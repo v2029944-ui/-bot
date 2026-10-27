@@ -1,0 +1,7 @@
+.env
+data/
+code/
+__pycache__/
+.pytest_cache/
+*.zip
+*.bak

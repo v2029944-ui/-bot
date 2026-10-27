@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: post_bot
+    restart: unless-stopped        # поднимется сам после сбоя и после перезагрузки сервера
+    env_file: .env                 # все настройки и токены — в файле .env
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data           # база (правила, люди, черновики) и фото переживают обновления
+      - ./code:/app/code           # сюда скачивается код из GitHub (если задан GITHUB_REPO)
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"            # логи не разрастутся и не забьют диск
+        max-file: "3"

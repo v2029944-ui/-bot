@@ -1,0 +1,225 @@
+"""MAX-адаптер на прямых запросах к официальному Bot API (https://dev.max.ru/docs-api)."""
+import asyncio
+import json
+import logging
+import os
+
+import httpx
+
+import core
+import ops
+
+log = logging.getLogger("max")
+API = "https://platform-api.max.ru"
+
+
+def _id(x):
+    """MAX ждёт числовые id, а из настроек и колбэков приходят строки."""
+    s = str(x)
+    return int(s) if s.lstrip("-").isdigit() else s
+
+
+class Max(core.Adapter):
+    name = "max"
+
+    def __init__(self, token, channel, approvers, employees, admins=()):
+        self.http = httpx.AsyncClient(base_url=API, headers={"Authorization": token}, timeout=60)
+        self.channel = channel
+        self.base_approvers, self.base_employees = list(approvers), list(employees)  # из настроек
+        self.admins, self.approvers, self.allowed = [str(a) for a in admins], list(approvers), None
+        core.refresh_people(self)  # + люди, добавленные кнопками (хранятся в базе)
+        self._tasks: set[asyncio.Task] = set()
+
+    def not_sent(self, e):
+        """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
+        return (isinstance(e, httpx.HTTPStatusError)
+                and 400 <= e.response.status_code < 500 and e.response.status_code != 408)
+
+    async def call(self, method, path, **kw):
+        r = await self.http.request(method, path, **kw)
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+    # --- отправка ---
+    async def _upload_image(self, path) -> str:
+        info = await self.call("POST", "/uploads", params={"type": "image"})
+        async with httpx.AsyncClient(timeout=120) as c, open(path, "rb") as f:
+            r = await c.post(info["url"], files={"data": ("photo.jpg", f, "image/jpeg")})
+        r.raise_for_status()
+        return next(iter(r.json()["photos"].values()))["token"]
+
+    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False):
+        target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
+        attachments = []
+        if photo:
+            attachments.append({"type": "image", "payload": {"token": await self._upload_image(photo)}})
+        if buttons:
+            attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
+        body = {"text": post, "attachments": attachments}
+        if silent:
+            body["notify"] = False  # без звука (по документации MAX; с реальным токеном не проверено)
+        for i in range(6):  # MAX иногда отвечает "attachment.not.ready", пока картинка обрабатывается
+            try:
+                return await self.call("POST", "/messages", params=target, json=body)
+            except httpx.HTTPStatusError as e:
+                if "not.ready" in e.response.text and i < 5:
+                    await asyncio.sleep(1.5)
+                    continue
+                raise
+
+    async def send_for_approval(self, approver, did, photo, post, silent=False):
+        d = core.get(did)
+        if not d:  # черновик успели удалить — не роняем рассылку остальным
+            log.warning("черновик %s не найден, отправка согласующему %s пропущена", did, approver)
+            return
+        n = d["attempts"]
+        btn = lambda t, a: {"type": "callback", "text": t, "payload": f"d:{a}:{did}:{n}"}
+        buttons = [[btn("✅ Опубликовать", "ok")],
+                   [btn("🔁 Заново", "redo"), btn("✏️ С комментарием", "redoc")],
+                   [btn("✍️ Править самому", "edit"), btn("🗑 Удалить", "del")]]
+        await self._send({"user_id": approver}, post, photo, buttons, silent=silent)
+
+    async def publish(self, photo, post):
+        if str(self.channel).startswith("user:"):
+            target = {"user_id": self.channel.split(":", 1)[1]}  # в личку
+        else:
+            target = {"chat_id": self.channel}  # группа или канал
+        await self._send(target, post, photo)
+
+    async def notify(self, user_id, text):
+        await self._send({"user_id": user_id}, text)
+
+    async def send_menu(self, user_id, text, rows, silent=False):
+        buttons = [[{"type": "callback", "text": t, "payload": p} for t, p in row] for row in rows] if rows else None
+        await self._send({"user_id": user_id}, text, None, buttons, silent=silent)
+
+    # --- входящие ---
+    async def run(self):
+        marker = None
+        types = "message_created,message_callback,bot_started"
+        while True:
+            try:
+                params = {"timeout": 30, "limit": 100, "types": types}
+                if marker is not None:
+                    params["marker"] = marker
+                data = await self.call("GET", "/updates", params=params)
+                marker = data.get("marker", marker)
+                for u in data.get("updates", []):
+                    if os.getenv("MAX_LOG_UPDATES") == "1":  # для первой проверки с реальным MAX; в логе чужие данные
+                        log.info("MAX update: %s", json.dumps(u, ensure_ascii=False)[:1000])
+                    t = asyncio.create_task(self.handle(u))
+                    self._tasks.add(t)
+                    t.add_done_callback(self._tasks.discard)
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                if code in (401, 403):  # неверный/просроченный токен: не долбим API каждые 3 секунды
+                    log.error("MAX отклонил токен (%s): проверьте MAX_TOKEN. Повтор через 5 минут.", code)
+                    await asyncio.sleep(300)
+                elif 400 <= code < 500:
+                    log.error("MAX вернул %s: %s. Повтор через 30 с.", code, e.response.text[:200])
+                    await asyncio.sleep(30)
+                else:
+                    log.exception("polling error")
+                    await asyncio.sleep(3)
+            except Exception:
+                log.exception("polling error")
+                await asyncio.sleep(3)
+
+    async def handle(self, u: dict):
+        try:
+            kind = u.get("update_type")
+            if kind == "bot_started":
+                uid = u["user"]["user_id"]
+                if await self._stranger(uid, u["user"].get("name") or u["user"].get("first_name"),
+                                        u["user"].get("username")):
+                    return
+                if not core.quiet(self, uid):
+                    await self.notify(uid, self.HELLO)
+                if str(uid) in self.approvers:
+                    await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
+            elif kind == "message_created":
+                await self.on_message(u["message"])
+            elif kind == "message_callback":
+                await self.on_callback(u["callback"])
+        except Exception:
+            log.exception("handle failed")
+
+    HELLO = ("Привет! Пришлите фото вашей работы с кратким описанием в подписи — "
+             "я подготовлю пост и отправлю его на согласование.")
+
+    async def _stranger(self, uid, name, username=None) -> bool:
+        """Человека нет в списках: тихо передаём заявку администраторам. True = обработано."""
+        if self.allowed is None or str(uid) in self.allowed:
+            return False
+        asked = await core.unknown_user(self, uid, name or str(uid), username)
+        if not core.quiet(self, uid):
+            await self.notify(uid, "Заявка на доступ отправлена администратору 🙏" if asked
+                              else "У вас нет доступа к этому боту.")
+        return True
+
+    async def on_message(self, m: dict):
+        if m.get("recipient", {}).get("chat_type", "dialog") != "dialog":
+            return  # отвечаем только в личке
+        sender = m["sender"]
+        uid = sender["user_id"]
+        quiet = core.quiet(self, uid)
+        if await self._stranger(uid, sender.get("name") or sender.get("first_name"), sender.get("username")):
+            return
+        body = m.get("body", {})
+        images = [a for a in body.get("attachments") or [] if a.get("type") == "image"]
+        if not images:
+            if body.get("text"):
+                if await core.on_text(self, uid, body["text"]):
+                    return
+                if str(uid) in self.approvers:
+                    return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
+            return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото с описанием в подписи 📷")
+        name = sender.get("name") or sender.get("first_name") or str(uid)
+        if ops.is_paused():
+            return await self.notify(uid, ops.PAUSED_MSG)
+        if not core.caption_ok(body.get("text")):  # единственное, что отвечаем сотруднику в тихом режиме
+            return await self.notify(uid, core.CAPTION_ASK)
+        if not quiet:
+            await self.notify(uid, "Принято, готовлю пост…")
+        try:
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.get(images[0]["payload"]["url"])
+                r.raise_for_status()
+            await core.submit(self, str(uid), name, body.get("text") or "", r.content)
+            if not quiet:
+                await self.notify(uid, "Пост отправлен на согласование ✅")
+            elif core.confirm_mode() != "off":  # в MAX вместо реакции короткое сообщение
+                await self.notify(uid, "✅ Принято")
+        except core.RateLimited:
+            log.warning("лимит фото: %s", uid)
+            if not quiet:
+                await self.notify(uid, "Слишком много фото за час. Попробуйте позже.")
+        except core.BadImage as e:  # файл не картинка: согласующих не тревожим
+            log.info("плохое фото от %s: %s", uid, e)
+            if not quiet:
+                await self.notify(uid, f"⚠️ {e}. Пришлите обычное фото (JPEG/PNG), а не файл HEIC.")
+        except Exception as e:
+            log.exception("submit failed")
+            if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
+                await core.alert(self, f"⚠️ Не удалось обработать фото от {name}: {e}")
+            else:
+                await self.notify(uid, "⚠️ Не получилось обработать фото. Попробуйте ещё раз позже.")
+
+    async def on_callback(self, cb: dict):
+        uid = cb["user"]["user_id"]
+        try:
+            await self.call("POST", "/answers", params={"callback_id": cb["callback_id"]},
+                            json={"notification": "Работаю…"})
+        except Exception:  # ответ на нажатие не критичен (например, он устарел)
+            log.warning("callback answer failed", exc_info=True)
+        try:
+            if cb["payload"].startswith("m:"):  # кнопки меню правил
+                text, rows = await core.on_menu(self, uid, cb["payload"])
+                return await self.send_menu(uid, text, rows)
+            _, action, did, attempt = cb["payload"].split(":")
+            _, text = await core.on_action(self, uid, action, int(did), int(attempt))
+        except Exception as e:
+            log.exception("callback failed")
+            text = f"⚠️ Ошибка: {e}"
+        if text:
+            await self.notify(uid, text)

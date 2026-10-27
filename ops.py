@@ -1,0 +1,335 @@
+"""Управление ботом: пауза, уведомления по расписанию (у каждого свой режим), обновление с GitHub."""
+import asyncio
+import json
+import os
+import re
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import core
+
+log = core.log
+REPO_DIR = Path(__file__).resolve().parent
+
+core.db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+core.db.execute("""CREATE TABLE IF NOT EXISTS prefs (
+    platform TEXT, uid TEXT, key TEXT, value TEXT, PRIMARY KEY (platform, uid, key))""")
+# черновики, которые ждут начала рабочего времени у тех, кто выбрал режим «отложить»
+core.db.execute("""CREATE TABLE IF NOT EXISTS deferred (
+    platform TEXT, uid TEXT, did INTEGER, created REAL, PRIMARY KEY (platform, uid, did))""")
+core.db.commit()
+
+
+# ---------- Настройки в базе и пауза ----------
+def get_setting(key: str, default: str = "") -> str:
+    r = core.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(key: str, value: str):
+    core.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
+    core.db.commit()
+
+
+def set_paused(value: bool):
+    set_setting("paused", "1" if value else "0")
+
+
+PAUSED_MSG = "⏸ Бот сейчас на паузе: новые фото не принимаются. Пришлите фото позже."
+
+
+def is_paused() -> bool:
+    return get_setting("paused", "0") == "1"
+
+
+def pause_view() -> tuple[str, list]:
+    if is_paused():
+        return ("⏸ Бот на паузе: новые фото не принимаются (сотрудники получают об этом сообщение). "
+                "Кнопки под уже созданными черновиками работают.",
+                [[("▶️ Включить", "m:pauseset:0")]])
+    return ("▶️ Бот работает. Пауза остановит приём новых фото; черновики можно будет согласовывать как обычно.",
+            [[("⏸ Поставить на паузу", "m:pauseset:1")]])
+
+
+# ---------- Уведомления: окно рабочего времени и режим каждого человека ----------
+MODES = {
+    "normal": "🔔 Всегда со звуком",
+    "silent": "🔕 Вне рабочих часов — без звука",
+    "defer": "⏳ Вне рабочих часов — отложить",
+    "muted": "🔇 Мут — всегда без звука",
+}
+DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def _tz():
+    name = os.getenv("NOTIFY_TZ", "Asia/Yekaterinburg")
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except Exception:
+        return timezone(timedelta(hours=5))  # Екатеринбург
+
+
+def _hours() -> tuple[int, int]:
+    try:
+        a, b = (int(x) for x in os.getenv("NOTIFY_HOURS", "10-18").split("-"))
+        return a, b
+    except ValueError:
+        return 0, 24
+
+
+def _days() -> set[int]:
+    raw = os.getenv("NOTIFY_DAYS", "1-5")  # 1 = понедельник … 7 = воскресенье
+    try:
+        out = set()
+        for part in raw.split(","):
+            if "-" in part:
+                a, b = (int(x) for x in part.split("-"))
+                out |= set(range(a, b + 1))
+            else:
+                out.add(int(part))
+        return out or set(range(1, 8))
+    except ValueError:
+        return set(range(1, 8))
+
+
+def in_window(now: float | None = None) -> bool:
+    dt = datetime.fromtimestamp(now or time.time(), _tz())
+    a, b = _hours()
+    return dt.isoweekday() in _days() and a <= dt.hour < b
+
+
+def window_text() -> str:
+    days = sorted(_days())
+    a, b = _hours()
+    if days == list(range(days[0], days[-1] + 1)) and len(days) > 1:
+        d = f"{DAY_NAMES[days[0] - 1]}–{DAY_NAMES[days[-1] - 1]}"
+    else:
+        d = ", ".join(DAY_NAMES[x - 1] for x in days)
+    return f"{d}, {a:02d}:00–{b:02d}:00 ({os.getenv('NOTIFY_TZ', 'Asia/Yekaterinburg')})"
+
+
+def default_mode() -> str:
+    v = os.getenv("NOTIFY_DEFAULT", "silent")
+    return v if v in MODES else "silent"
+
+
+def get_mode(adapter, uid) -> str:
+    r = core.db.execute("SELECT value FROM prefs WHERE platform=? AND uid=? AND key='notify_mode'",
+                        (adapter.name, str(uid))).fetchone()
+    return r["value"] if r and r["value"] in MODES else default_mode()
+
+
+def set_mode(adapter, uid, mode: str):
+    core.db.execute("INSERT OR REPLACE INTO prefs(platform,uid,key,value) VALUES(?,?,'notify_mode',?)",
+                    (adapter.name, str(uid), mode))
+    core.db.commit()
+
+
+def delivery_for(adapter, uid, now: float | None = None) -> str:
+    """Как доставить человеку сообщение сейчас: normal (со звуком) / silent (без звука) / defer (придержать)."""
+    mode = get_mode(adapter, uid)
+    if mode == "normal":
+        return "normal"
+    if mode == "muted":
+        return "silent"
+    if in_window(now):
+        return "normal"
+    return "silent" if mode == "silent" else "defer"
+
+
+def notif_view(adapter, uid, saved: bool = False) -> tuple[str, list]:
+    mode = get_mode(adapter, uid)
+    text = (("✅ Сохранено.\n\n" if saved else "") + f"🔔 Уведомления\n\nСейчас: {MODES[mode]}\n"
+            f"Рабочие часы: {window_text()}\n\n"
+            "• Без звука — сообщения приходят сразу, но тихо.\n"
+            "• Отложить — черновики придут, когда начнётся рабочее время.\n"
+            "• Мут — всегда без звука.\n"
+            "Ошибки бота и ответы на ваши нажатия приходят как обычно.")
+    rows = [[(("✓ " if m == mode else "") + label, f"m:nset:{m}")] for m, label in MODES.items()]
+    return text, rows
+
+
+def enqueue(adapter, uid, did: int):
+    core.db.execute("INSERT OR IGNORE INTO deferred(platform,uid,did,created) VALUES(?,?,?,?)",
+                    (adapter.name, str(uid), did, time.time()))
+    core.db.commit()
+
+
+async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> int:
+    """Доставляем придержанные черновики тем, у кого уже началось рабочее время (или сменился режим)."""
+    now = now or time.time()
+    sql, args = "SELECT * FROM deferred", ()
+    if adapter is not None and uid is not None:
+        sql, args = sql + " WHERE platform=? AND uid=?", (adapter.name, str(uid))
+    done = 0
+    for r in core.db.execute(sql, args).fetchall():
+        ad, d = core.ADAPTERS.get(r["platform"]), core.get(r["did"])
+        drop = lambda: core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?",
+                                       (r["platform"], r["uid"], r["did"]))
+        if ad is None or not d or d["status"] != "pending" or r["uid"] not in ad.approvers:
+            drop()
+            core.db.commit()
+            continue
+        mode = delivery_for(ad, r["uid"], now)
+        if mode == "defer":
+            continue
+        try:
+            kw = {"silent": True} if mode == "silent" else {}
+            await ad.send_for_approval(r["uid"], d["id"], d["photo"], d["post"], **kw)
+        except Exception:
+            log.warning("не удалось доставить отложенный черновик %s человеку %s", r["did"], r["uid"], exc_info=True)
+            continue
+        drop()
+        core._set(d["id"], last_sent=now, reminded=0)  # напоминание считаем от фактической доставки
+        core.db.commit()
+        done += 1
+    return done
+
+
+# ---------- Обновление с GitHub ----------
+RESTART_CODE: int | None = None
+RESTART_DELAY = 3  # даём ответу в чате уйти, прежде чем перезапускаться
+_restart_ev: asyncio.Event | None = None
+
+
+def request_restart(code: int):
+    global RESTART_CODE
+    RESTART_CODE = code
+    if _restart_ev is not None:
+        try:
+            asyncio.get_running_loop().call_later(RESTART_DELAY, _restart_ev.set)
+        except RuntimeError:
+            _restart_ev.set()
+
+
+async def wait_restart() -> int:
+    global _restart_ev
+    _restart_ev = asyncio.Event()
+    if RESTART_CODE is not None:
+        _restart_ev.set()
+    await _restart_ev.wait()
+    return RESTART_CODE if RESTART_CODE is not None else 0
+
+
+def scrub(text: str) -> str:
+    """Токен GitHub в адресе репозитория не должен попасть ни в чат, ни в лог."""
+    return re.sub(r"//[^/@\s]+@", "//***@", text or "")
+
+
+def updates_enabled() -> bool:
+    return bool(os.getenv("GITHUB_REPO")) and (REPO_DIR / ".git").exists()
+
+
+async def _git(*args: str, timeout: int = 60) -> tuple[int, str]:
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "git", *args, cwd=REPO_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        out, _ = await asyncio.wait_for(p.communicate(), timeout)
+        return p.returncode, scrub(out.decode("utf-8", "replace")).strip()
+    except asyncio.TimeoutError:
+        return 1, "git не ответил вовремя"
+    except OSError as e:
+        return 1, f"git недоступен: {e}"
+
+
+async def version() -> str:
+    if not (REPO_DIR / ".git").exists():
+        return "из образа (без GitHub)"
+    rc, out = await _git("log", "-1", "--format=%h %s")
+    return out[:100] if rc == 0 else "неизвестна"
+
+
+async def check_update() -> tuple[str, list[str], str]:
+    """Возвращает (состояние, новые коммиты, пояснение): state = disabled | error | current | available."""
+    if not updates_enabled():
+        return "disabled", [], ("Автообновление не настроено: в .env нет GITHUB_REPO, "
+                                "либо бот запущен не из репозитория.")
+    branch = os.getenv("GITHUB_BRANCH", "main")
+    rc, out = await _git("fetch", "origin", branch)
+    if rc:
+        return "error", [], f"Не удалось связаться с GitHub: {out[-300:]}"
+    _, cur = await _git("rev-parse", "--short", "HEAD")
+    _, new = await _git("rev-parse", "--short", "FETCH_HEAD")
+    if cur == new:
+        return "current", [], cur
+    _, lines = await _git("log", "--format=%h %s", "-n", "6", "HEAD..FETCH_HEAD")
+    return "available", [x for x in lines.splitlines() if x], f"{cur} → {new}"
+
+
+async def upd_view() -> tuple[str, list | None]:
+    state, commits, info = await check_update()
+    if state in ("disabled", "error"):
+        return ("⚠️ " if state == "error" else "") + info, None
+    if state == "current":
+        return f"✅ Уже установлена последняя версия ({info}).", None
+    text = (f"🔄 Доступно обновление ({info}):\n" + "\n".join(f"• {c}" for c in commits) +
+            "\n\nБот проверит тесты новой версии и только потом переключится. "
+            "Перезапуск займёт около минуты, сообщения за это время не потеряются.")
+    return text, [[("Да, обновить", "m:updgo"), ("Отмена", "m:menu")]]
+
+
+def _data_dir() -> Path:
+    return Path(os.getenv("DATA_DIR", "data")).resolve()
+
+
+def upd_go(adapter, uid) -> tuple[str, None]:
+    if not updates_enabled():
+        return "Автообновление не настроено.", None
+    busy = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status IN ('publishing','regenerating')").fetchone()[0]
+    if busy:
+        return "⏳ Сейчас идёт публикация или пересоздание поста. Повторите через минуту.", None
+    d = _data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "update_request.json").write_text(json.dumps({"platform": adapter.name, "uid": str(uid), "ts": time.time()}))
+    request_restart(42)  # код 42 понимает entrypoint.sh: сначала updater.py, потом запуск новой версии
+    return "🔄 Перезапускаюсь для обновления. Через минуту-две напишу, чем всё закончилось.", None
+
+
+async def announce_update_result():
+    """После запуска сообщаем тому, кто нажал «Обновить», чем закончилось обновление или откат."""
+    f = _data_dir() / "update_result.json"
+    if not f.exists():
+        return
+    try:
+        r = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        r = {}
+    f.unlink(missing_ok=True)
+    text = {
+        "ok": f"✅ Бот обновлён: {r.get('commit', '')}",
+        "nochange": f"✅ Уже последняя версия ({r.get('commit', '')}).",
+        "tests_failed": ("❌ Обновление отменено: тесты новой версии не прошли, работает прежняя версия "
+                         f"{r.get('commit', '')}.\n{r.get('detail', '')}"),
+        "failed": f"❌ Обновление не удалось: {r.get('detail', '')}. Работает прежняя версия {r.get('commit', '')}.",
+        "rolled_back": ("⚠️ Новая версия не запустилась, бот вернулся к предыдущей "
+                        f"({r.get('commit', '')}). Подробности: docker compose logs --tail 80"),
+    }.get(r.get("status"), "")
+    if not text:
+        return
+    targets = []
+    ad = core.ADAPTERS.get(r.get("platform", ""))
+    if ad and r.get("uid"):
+        targets.append((ad, r["uid"]))
+    else:
+        targets = [(a, u) for a in core.ADAPTERS.values() for u in core.staff(a)]
+    for a, u in targets:
+        try:
+            await a.notify(u, scrub(text)[:1500])
+        except Exception:
+            log.warning("не удалось сообщить результат обновления %s", u, exc_info=True)
+
+
+async def probation_watch(seconds: int | None = None):
+    """Если после обновления бот прожил PROBATION_SEC секунд, считаем версию удачной (откат больше не нужен)."""
+    await asyncio.sleep(seconds if seconds is not None else int(os.getenv("PROBATION_SEC", "120")))
+    f = _data_dir() / "update_state.json"
+    try:
+        s = json.loads(f.read_text(encoding="utf-8"))
+        if s.get("status") == "probation":
+            s["status"] = "ok"
+            f.write_text(json.dumps(s))
+    except (OSError, ValueError):
+        pass
