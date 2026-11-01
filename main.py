@@ -47,7 +47,7 @@ async def serve(workers):
             for t in done:
                 if t is waiter:
                     core.SHUTTING_DOWN = True  # новые фото больше не берём, о перезапуске скажем
-                    left = await core.drain_inflight(float(os.getenv("SHUTDOWN_DRAIN_SEC", "30")))
+                    left = await core.drain_inflight(float(core.env("SHUTDOWN_DRAIN_SEC", "30")))
                     if left:
                         log.warning("не успели обработать фото при остановке: %s", left)
                     for other in tasks:

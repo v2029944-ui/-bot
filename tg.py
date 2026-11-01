@@ -271,7 +271,7 @@ class Telegram(core.Adapter):
             await self.bot.set_my_commands([BotCommand(command="menu", description="Меню правил стиля")])
         except Exception:
             log.warning("set_my_commands failed", exc_info=True)
-        drop = os.getenv("TG_DROP_PENDING", "0") == "1"  # 1 — после простоя не разбирать старую очередь
+        drop = core.env("TG_DROP_PENDING", "0") == "1"  # 1 — после простоя не разбирать старую очередь
         if drop:
             log.warning("TG_DROP_PENDING=1: накопленные за простой сообщения будут отброшены")
         # handle_signals=False: SIGTERM ловит main.serve. Иначе aiogram молча останавливает опрос, а процесс живёт

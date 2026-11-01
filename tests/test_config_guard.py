@@ -16,7 +16,7 @@ def _vars_read_by_code() -> set[str]:
     found = set()
     for name in ("core.py", "ops.py", "tg.py", "max_.py", "main.py", "updater.py"):
         src = (ROOT / name).read_text(encoding="utf-8")
-        found |= set(re.findall(r'(?:getenv|environ\.get|need|ids)\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
+        found |= set(re.findall(r'(?:getenv|environ\.get|need|ids|env)\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
         found |= set(re.findall(r'environ\[["\']([A-Z][A-Z0-9_]+)["\']\]', src))
         found |= set(re.findall(r'_env\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
     sh = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
@@ -25,14 +25,14 @@ def _vars_read_by_code() -> set[str]:
 
 
 def test_every_setting_the_code_reads_is_listed_in_env_example():
-    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    example = (ROOT / "env.example").read_text(encoding="utf-8")
     listed = set(re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", example, flags=re.M))
     missing = _vars_read_by_code() - listed
-    assert not missing, f"В .env.example нет настроек, которые читает код: {sorted(missing)}"
+    assert not missing, f"В env.example нет настроек, которые читает код: {sorted(missing)}"
 
 
 def test_example_does_not_advertise_settings_the_code_ignores():
-    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    example = (ROOT / "env.example").read_text(encoding="utf-8")
     listed = set(re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", example, flags=re.M))
     assert not (listed - _vars_read_by_code()), "в образце есть настройки, которых код не читает (например LLM_MODEL)"
 

@@ -7,6 +7,14 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 log = logging.getLogger("core")
 
+
+def env(name: str, default: str = "") -> str:
+    """Настройка из окружения. Пустое значение (NAME=) считается «не задано» и даёт значение по умолчанию:
+    так заготовка .env с пустыми строками не ломает запуск."""
+    v = os.getenv(name)
+    return default if v is None or not v.strip() else v.strip()
+
+
 # ---------- Секреты не должны попадать в сообщения и логи ----------
 _SECRET_RES = [re.compile(r"bot\d{5,}:[A-Za-z0-9_-]{20,}"),     # адрес Bot API: /bot<токен>/...
                re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}"),        # токен Telegram сам по себе
@@ -42,7 +50,7 @@ class RedactingFormatter(logging.Formatter):
 SHUTTING_DOWN = False  # идёт остановка: новые фото не принимаем (говорим об этом), текущие дорабатываем
 INFLIGHT: set = set()  # задачи обработки фото, которые не должны оборваться при остановке
 
-DATA = Path(os.getenv("DATA_DIR", "data")).resolve()  # абсолютный путь: не зависит от смены рабочей папки
+DATA = Path(env("DATA_DIR", "data")).resolve()  # абсолютный путь: не зависит от смены рабочей папки
 PHOTOS = DATA / "photos"
 PHOTOS.mkdir(parents=True, exist_ok=True)
 
@@ -113,12 +121,12 @@ ADAPTERS: dict[str, Adapter] = {}
 def quiet(adapter: Adapter, user_id) -> bool:
     """Тихий режим: обычные сотрудники не получают от бота никаких ответов (EMPLOYEE_NOTIFY=1 — вернуть ответы).
     Согласующие получают сообщения всегда. Исключения: просьба добавить подпись к фото и «доступ открыт»."""
-    return os.getenv("EMPLOYEE_NOTIFY", "0") != "1" and str(user_id) not in adapter.approvers
+    return env("EMPLOYEE_NOTIFY", "0") != "1" and str(user_id) not in adapter.approvers
 
 
 def confirm_mode() -> str:
     """Как подтверждать сотруднику, что фото дошло: reaction (👍 под сообщением) | text («✅ Принято») | off."""
-    return os.getenv("EMPLOYEE_CONFIRM", "reaction").lower()
+    return env("EMPLOYEE_CONFIRM", "reaction").lower()
 
 
 _ALERT_LAST: dict[str, float] = {}
@@ -130,7 +138,7 @@ async def alert(adapter: Adapter, text: str):
     text = redact(text)
     key = text[:60]
     now = time.time()
-    if now - _ALERT_LAST.get(key, 0) < int(os.getenv("ALERT_THROTTLE_SEC", "300")):
+    if now - _ALERT_LAST.get(key, 0) < int(env("ALERT_THROTTLE_SEC", "300")):
         log.info("alert suppressed: %s", text[:120])
         return
     _ALERT_LAST[key] = now
@@ -161,7 +169,7 @@ async def alert_staff(adapter, text: str):
     Одинаковые сообщения не чаще раза в ALERT_THROTTLE_SEC."""
     text = redact(text)
     key, now = "staff:" + text[:60], time.time()
-    if now - _ALERT_LAST.get(key, 0) < int(os.getenv("ALERT_THROTTLE_SEC", "300")):
+    if now - _ALERT_LAST.get(key, 0) < int(env("ALERT_THROTTLE_SEC", "300")):
         return
     _ALERT_LAST[key] = now
     seen = []
@@ -178,11 +186,11 @@ async def alert_staff(adapter, text: str):
 
 async def announce_start():
     """Сообщение «бот запущен» (STARTUP_NOTIFY=0 — не слать)."""
-    if os.getenv("STARTUP_NOTIFY", "1") == "0":
+    if env("STARTUP_NOTIFY", "1") == "0":
         return
     n = db.execute("SELECT COUNT(*) FROM drafts WHERE status='pending'").fetchone()[0]
     text = ("🟢 Бот запущен." + (f" Ждут согласования: {n}." if n else "")
-            + (f"\nЗакрыто неразобранных черновиков старше {os.getenv('DRAFT_TTL_DAYS', '30')} дн.: {LAST_EXPIRED}."
+            + (f"\nЗакрыто неразобранных черновиков старше {env('DRAFT_TTL_DAYS', '30')} дн.: {LAST_EXPIRED}."
                if LAST_EXPIRED else ""))
     for a in ADAPTERS.values():
         for uid in staff(a):
@@ -241,7 +249,7 @@ async def remind_once(now: float | None = None) -> int:
     """Если черновик ждёт дольше REMIND_AFTER_MIN минут (0 — выключено), один раз напоминаем согласующим.
     Возвращает число черновиков, о которых напомнили."""
     now = now or time.time()
-    after = float(os.getenv("REMIND_AFTER_MIN", "180")) * 60
+    after = float(env("REMIND_AFTER_MIN", "180")) * 60
     # напоминаем только в рабочее время (NOTIFY_HOURS/NOTIFY_DAYS/NOTIFY_TZ) и не на паузе
     if after <= 0 or ops.is_paused() or not ops.in_window(now):
         return 0
@@ -255,9 +263,10 @@ async def remind_once(now: float | None = None) -> int:
             groups.setdefault(id(ad), (ad, []))[1].append(d)
     total = 0
     for ad, ds in groups.values():
-        ds = ds[:5]  # показываем (и помечаем как «напомнили») не больше 5; остальные дождутся следующего круга
         age = lambda d: now - (d["last_sent"] or d["created"])
-        text = (f"⏰ Ждут согласования: {len(ds)} (самый давний — {_ago(max(age(d) for d in ds))}).\n"
+        waiting, oldest = len(ds), max(age(d) for d in ds)  # в заголовке — все ждущие, а не только показанные
+        ds = ds[:5]  # показываем (и помечаем как «напомнили») не больше 5; остальные дождутся следующего круга
+        text = (f"⏰ Ждут согласования: {waiting} (самый давний — {_ago(oldest)}).\n"
                 "Нажмите, чтобы показать пост ещё раз:")
         rows_ = [[(f"📨 {(d['author_name'] or 'Пост')[:14]}, {_ago(age(d))}", f"d:show:{d['id']}:{d['attempts']}")]
                  for d in ds]
@@ -282,12 +291,12 @@ async def reminder_loop():
         try:
             await ops.flush_deferred()  # придержанные черновики уходят, когда началось рабочее время
             await remind_once()
-            if time.time() - last_clean > int(os.getenv("HOUSEKEEPING_SEC", "21600")):  # раз в 6 часов
+            if time.time() - last_clean > int(env("HOUSEKEEPING_SEC", "21600")):  # раз в 6 часов
                 last_clean = time.time()
                 housekeeping()  # в потоке нельзя: соединение SQLite принадлежит потоку с event loop
         except Exception:
             log.exception("reminder failed")
-        await asyncio.sleep(int(os.getenv("REMIND_CHECK_SEC", "300")))
+        await asyncio.sleep(int(env("REMIND_CHECK_SEC", "300")))
 
 
 class Reminder:
@@ -343,7 +352,7 @@ def housekeeping() -> int:
     стираем фото старых опубликованных/удалённых постов и файлы-сироты (фото, которых нет ни в одном черновике).
     Вызывается при старте и периодически (HOUSEKEEPING_SEC). Возвращает число закрытых черновиков."""
     expired = 0
-    ttl = int(os.getenv("DRAFT_TTL_DAYS", "30"))  # 0 — не закрывать
+    ttl = int(env("DRAFT_TTL_DAYS", "30"))  # 0 — не закрывать
     if ttl > 0:
         for r in db.execute("SELECT id, photo FROM drafts WHERE status='pending' AND "
                             "COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
@@ -391,13 +400,13 @@ CAPTION_ASK = ("📝 К фото нужна короткая подпись: ч�
 
 def caption_ok(text: str | None) -> bool:
     """Без описания нейросеть выдаёт «воду», поэтому такое фото не принимаем (REQUIRE_CAPTION=0 — отключить)."""
-    if os.getenv("REQUIRE_CAPTION", "1") == "0":
+    if env("REQUIRE_CAPTION", "1") == "0":
         return True
-    return len((text or "").strip()) >= int(os.getenv("MIN_CAPTION_CHARS", "8"))
+    return len((text or "").strip()) >= int(env("MIN_CAPTION_CHARS", "8"))
 
 
 # ---------- Нейросеть ----------
-MODEL = os.getenv("MODEL", "gpt-4.1-mini")
+MODEL = env("MODEL", "gpt-4.1-mini")
 
 
 def llm_config_problem() -> str | None:
@@ -405,15 +414,15 @@ def llm_config_problem() -> str | None:
     и выглядела как «неверный ключ»."""
     if PROVIDER != "openai":
         return None
-    base = os.getenv("LLM_BASE_URL", "").strip()
+    base = env("LLM_BASE_URL", "").strip()
     if not base:
         return ("Не задан LLM_BASE_URL. Укажите адрес вашего провайдера нейросети, "
                 "например LLM_BASE_URL=https://api.aitunnel.ru/v1")
-    if "aitunnel" in os.getenv("LLM_API_KEY", "").lower() and "aitunnel" not in base.lower():
+    if "aitunnel" in env("LLM_API_KEY", "").lower() and "aitunnel" not in base.lower():
         return (f"Ключ от AITunnel (sk-aitunnel-...), а LLM_BASE_URL указывает на {base}. "
                 "Поставьте LLM_BASE_URL=https://api.aitunnel.ru/v1 или смените ключ.")
     return None
-SYSTEM = f"""Ты SMM-редактор компании «{os.getenv('COMPANY', 'нашей компании')}».
+SYSTEM = f"""Ты SMM-редактор компании «{env('COMPANY', 'нашей компании')}».
 Сотрудник присылает фото своей работы и краткое описание. Напиши пост для корпоративного канала.
 Правила:
 - Опирайся только на описание и на то, что реально видно на фото. Не выдумывай факты, цифры, имена, адреса, цены, сроки.
@@ -425,10 +434,10 @@ SYSTEM = f"""Ты SMM-редактор компании «{os.getenv('COMPANY', 
 - Длина 300-800 символов, 1-3 коротких абзаца, цепляющая первая строка.
 - 1-3 уместных эмодзи, в конце не более 3 хештегов.
 - Обычный текст без markdown-разметки (без звёздочек и заголовков).
-- Стиль: {os.getenv('STYLE', 'дружелюбный, деловой тон, без канцелярита')}
+- Стиль: {env('STYLE', 'дружелюбный, деловой тон, без канцелярита')}
 - Выведи только текст поста, без пояснений и кавычек."""
 
-PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()  # anthropic | openai (любой OpenAI-совместимый сервис)
+PROVIDER = env("LLM_PROVIDER", "openai").lower()  # anthropic | openai (любой OpenAI-совместимый сервис)
 _client = None
 
 
@@ -443,7 +452,7 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
         text += f"\n\nПредыдущий вариант не подошёл:\n{prev}\n\nНапиши другой: иная подача и первая строка, те же факты."
     # LLM_VISION=0 — для моделей без поддержки картинок: пост пишется только по описанию
     b64 = None
-    if os.getenv("LLM_VISION", "1") != "0":
+    if env("LLM_VISION", "1") != "0":
         b64 = base64.b64encode(await asyncio.to_thread(Path(photo).read_bytes)).decode()
     try:
         out = await _complete(build_system(), text, b64)
@@ -494,7 +503,7 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
     """OpenAI, OpenRouter, Gemini, Qwen, AITunnel и другие сервисы с форматом /chat/completions."""
     if (problem := llm_config_problem()):
         raise RuntimeError(problem)
-    base = os.getenv("LLM_BASE_URL", "").strip().rstrip("/")
+    base = env("LLM_BASE_URL", "").strip().rstrip("/")
     content = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
@@ -528,7 +537,12 @@ MAX_PHOTO_BYTES = 25 * 1024 * 1024
 # (100 Мпикс ≈ +380 МБ), а JPEG читаем уменьшенным через draft(), поэтому ему можно больше.
 Image.MAX_IMAGE_PIXELS = None
 MAX_PIXELS_JPEG = 300_000_000
+MAX_PIXELS_HEIF = 64_000_000  # режим 48 Мпикс на новых iPhone (8064×6048), присланный файлом
 MAX_PIXELS_OTHER = 40_000_000
+
+
+def _pixel_limit(fmt: str | None) -> int:
+    return {"JPEG": MAX_PIXELS_JPEG, "MPO": MAX_PIXELS_JPEG, "HEIF": MAX_PIXELS_HEIF}.get(fmt or "", MAX_PIXELS_OTHER)
 
 
 class BadImage(ValueError):
@@ -543,7 +557,7 @@ def save_photo(data: bytes) -> str:
     try:
         img = Image.open(io.BytesIO(data))  # читает только заголовок: память пока не тратится
         w, h = img.size
-        if w * h > (MAX_PIXELS_JPEG if img.format == "JPEG" else MAX_PIXELS_OTHER):
+        if w * h > _pixel_limit(img.format):
             raise BadImage(f"Слишком большое разрешение ({w}×{h}). Пришлите фото поменьше")
         if img.format == "JPEG":
             img.draft("RGB", (1600, 1600))  # JPEG сразу читается уменьшенным: даже огромный кадр не раздувает память
@@ -571,7 +585,7 @@ async def _check_rate(adapter: Adapter, author_id: str, author_name: str):
     """Защита бюджета: не больше RATE_LIMIT_PER_HOUR фото в час от сотрудника (согласующие без лимита)."""
     if str(author_id) in adapter.approvers:
         return
-    limit = int(os.getenv("RATE_LIMIT_PER_HOUR", "20"))
+    limit = int(env("RATE_LIMIT_PER_HOUR", "20"))
     key, now = f"{adapter.name}:{author_id}", time.time()
     hits = [t for t in _HITS.get(key, []) if now - t < 3600]
     if len(hits) >= limit:
@@ -617,7 +631,13 @@ async def submit(adapter: Adapter, author_id: str, author_name: str, text: str, 
     """Сотрудник прислал фото + описание -> пост -> на согласование.
     Работа идёт в отдельной задаче под shield: при остановке бота main.serve дожидается её завершения
     (drain_inflight), а не обрывает на середине, когда фото уже принято, а черновика ещё нет."""
-    task = asyncio.ensure_future(_submit(adapter, author_id, author_name, text, photo_bytes))
+    return await _guard(_submit(adapter, author_id, author_name, text, photo_bytes))
+
+
+async def _guard(coro):
+    """Запускает работу отдельной задачей под shield и регистрирует её в INFLIGHT: остановка бота (docker stop)
+    дожидается её, а не обрывает на середине (фото принято без черновика, пост опубликован без пометки)."""
+    task = asyncio.ensure_future(coro)
     INFLIGHT.add(task)
     task.add_done_callback(INFLIGHT.discard)
     task.add_done_callback(lambda t: t.cancelled() or t.exception())  # результат заберёт await ниже
@@ -625,12 +645,15 @@ async def submit(adapter: Adapter, author_id: str, author_name: str, text: str, 
 
 
 async def drain_inflight(timeout: float) -> int:
-    """Ждём, пока дорабатывают принятые фото. Возвращает, сколько не успело."""
-    pending = {t for t in INFLIGHT if not t.done()}
-    if pending:
-        log.info("жду завершения обработки фото: %s", len(pending))
-        await asyncio.wait(pending, timeout=timeout)
-    return len([t for t in INFLIGHT if not t.done()])
+    """Ждём, пока дорабатывают начатые работы (обработка фото, публикация, пересоздание).
+    Возвращает, сколько не успело."""
+    deadline = time.monotonic() + timeout
+    while True:
+        pending = {t for t in INFLIGHT if not t.done()}
+        if not pending or time.monotonic() >= deadline:
+            return len(pending)
+        log.info("жду завершения начатых работ: %s", len(pending))
+        await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
 
 
 async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str, photo_bytes: bytes):
@@ -667,7 +690,7 @@ BUSY = "⏳ Пост уже обрабатывается, подождите п�
 
 # ---------- «Править самому» ----------
 WAITING_EDIT: dict[tuple[str, str], tuple[int, int]] = {}  # (платформа, id) -> (черновик, номер варианта)
-MAX_POST_CHARS = int(os.getenv("MAX_POST_CHARS", "3900"))
+MAX_POST_CHARS = int(env("MAX_POST_CHARS", "3900"))
 
 
 async def _apply_edit(adapter: Adapter, user_id, did: int, attempt: int, text: str) -> tuple[bool, str]:
@@ -696,6 +719,8 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
     """Нажатие кнопки согласующим. Возвращает (ок, текст ответа)."""
     if str(user_id) not in adapter.approvers:
         return False, "⛔ У вас нет прав согласования."
+    if SHUTTING_DOWN and action != "show":  # идёт остановка: новую работу не начинаем, чтобы не оборвать на середине
+        return False, "🔄 Бот перезапускается. Повторите нажатие через минуту: черновик сохранён."
     d = get(did)
     if not d:
         return True, "Черновик не найден."
@@ -755,6 +780,10 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
 
 
 async def _publish(adapter: Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
+    return await _guard(_publish_safe(adapter, user_id, did, attempt, force))
+
+
+async def _publish_safe(adapter: Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
     """Обёртка: непредвиденный сбой не должен оставить черновик навсегда в статусе «publishing»."""
     try:
         return await _publish_inner(adapter, user_id, did, attempt, force)
@@ -830,6 +859,10 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
 
 
 async def _regenerate(adapter: Adapter, user_id, did: int, comment: str | None = None) -> tuple[bool, str]:
+    return await _guard(_regenerate_inner(adapter, user_id, did, comment))
+
+
+async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | None = None) -> tuple[bool, str]:
     d = get(did)
     if not d:
         return True, "Черновик не найден."
@@ -869,7 +902,7 @@ async def on_comment(adapter: Adapter, user_id, text: str) -> bool:
     await adapter.notify(str(user_id), msg)
     after = get(did)
     if before and after and after["attempts"] > before["attempts"]:
-        rule = await _learn(text, before["post"]) if os.getenv("LEARN_RULES", "1") != "0" else None
+        rule = await _learn(text, before["post"]) if env("LEARN_RULES", "1") != "0" else None
         if rule:
             await adapter.notify(str(user_id), f"🧠 Запомнил на будущее: «{rule}»\n(Посмотреть и удалить: /rules)")
     return True
@@ -944,7 +977,7 @@ def is_admin(adapter: Adapter, uid) -> bool:
 
 def requests_enabled(adapter: Adapter) -> bool:
     """Заявки и приглашения работают, только если у мессенджера есть администратор."""
-    return bool(getattr(adapter, "admins", None)) and os.getenv("ACCESS_REQUESTS", "1") != "0"
+    return bool(getattr(adapter, "admins", None)) and env("ACCESS_REQUESTS", "1") != "0"
 
 
 def _base(adapter: Adapter) -> tuple[list[str], list[str]]:

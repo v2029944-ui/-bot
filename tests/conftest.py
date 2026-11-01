@@ -11,9 +11,9 @@ import re
 
 
 def _settings_names() -> list[str]:
-    """Все настройки бота из образца .env: тесты не должны зависеть от настоящего .env сервера
+    """Все настройки бота из образца env.example: тесты не должны зависеть от настоящего .env сервера
     (при обновлении кнопкой тесты идут на сервере, где в окружении лежат ваши значения)."""
-    text = (Path(__file__).resolve().parent.parent / ".env.example").read_text(encoding="utf-8")
+    text = (Path(__file__).resolve().parent.parent / "env.example").read_text(encoding="utf-8")
     return re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", text, flags=re.M)
 
 

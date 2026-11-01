@@ -489,3 +489,20 @@ def test_serve_stops_everything_and_exits_with_code_42():
         asyncio.run(scenario())
     assert e.value.code == 42 and len(stopped) == 2  # оба мессенджера остановлены аккуратно
     ops.RESTART_DELAY = 3
+
+
+def test_failed_update_names_the_failing_test_and_reason(repos, tmp_path):
+    """Сообщение «обновление отменено» должно называть упавший тест, а не только «тесты не прошли»."""
+    origin, code = repos
+    data = tmp_path / "data"
+    data.mkdir()
+    (origin / "tests").mkdir()
+    (origin / "tests" / "test_demo.py").write_text(
+        "def test_ok():\n    assert True\n\n\ndef test_settings_are_listed():\n"
+        "    missing = ['HOUSEKEEPING_SEC']\n    assert not missing, f'нет настроек: {missing}'\n")
+    git(origin, "add", "."), git(origin, "commit", "-qm", "добавили тесты")
+    r = run_updater(code, data, f"{sys.executable} -m pytest -q -x -p no:cacheprovider")
+    assert r["status"] == "tests_failed"
+    assert "FAILED tests/test_demo.py::test_settings_are_listed" in r["detail"]
+    assert "HOUSEKEEPING_SEC" in r["detail"] and "PASSED" not in r["detail"]
+    assert len(r["detail"].splitlines()) <= 8  # коротко: тест и причина, без полотна вывода

@@ -34,7 +34,7 @@ def run(cmd: list[str], cwd: Path, timeout: int = 300, env: dict | None = None) 
     except subprocess.TimeoutExpired:
         return 1, f"команда не завершилась за {timeout} с"
     except OSError as e:
-        return 1, str(e)
+        return 1, scrub(str(e))
 
 
 def git(*args: str, cwd: Path | None = None, timeout: int = 120) -> tuple[int, str]:
@@ -55,6 +55,15 @@ def _read(name: str) -> dict:
 def _write(name: str, data: dict):
     DATA.mkdir(parents=True, exist_ok=True)
     (DATA / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def summarize_failure(out: str) -> str:
+    """Из вывода pytest берём главное: какие тесты упали и в чём (строки FAILED/ERROR и первые строки «E …»)."""
+    lines = [l.rstrip() for l in out.splitlines()]
+    failed = [l for l in lines if l.startswith(("FAILED ", "ERROR "))][:5]
+    reasons = [l.strip() for l in lines if l.startswith("E ")][:3]
+    picked = failed + [r for r in reasons if r not in failed]
+    return "\n".join(picked) if picked else "\n".join(lines[-12:])
 
 
 def finish(status: str, who: dict, **kw):
@@ -94,8 +103,7 @@ def update():
             pypath = os.pathsep.join([str(wt), str(libs)])
         rc, out = run(shlex.split(TEST_CMD), wt, 600, {"PYTHONPATH": pypath, "DATA_DIR": str(tmp / "data")})
         if rc:
-            tail = "\n".join(out.splitlines()[-12:])
-            return finish("tests_failed", who, detail=tail[-900:], commit=short())
+            return finish("tests_failed", who, detail=summarize_failure(out)[-900:], commit=short())
         subject = git("log", "-1", "--format=%s", new)[1][:100]
         _write("update_state.json", {"prev": head, "new": new, "ts": time.time(), "status": "probation",
                                      "platform": who.get("platform"), "uid": who.get("uid")})

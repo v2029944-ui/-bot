@@ -63,7 +63,7 @@ DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 
 def _tz():
-    name = os.getenv("NOTIFY_TZ", "Asia/Yekaterinburg")
+    name = core.env("NOTIFY_TZ", "Asia/Yekaterinburg")
     try:
         from zoneinfo import ZoneInfo
         return ZoneInfo(name)
@@ -75,50 +75,56 @@ def _hours() -> tuple[int, int]:
     """Часы рабочего окна «начало-конец». Если начало больше конца (20-6), окно переходит через полночь.
     Неверное значение = окно весь день (а main при запуске сообщит об ошибке в настройке)."""
     try:
-        a, b = (int(x) for x in os.getenv("NOTIFY_HOURS", "10-18").split("-"))
+        a, b = (int(x) for x in core.env("NOTIFY_HOURS", "10-18").split("-"))
     except ValueError:
         return 0, 24
     return (a, b) if 0 <= a <= 24 and 0 <= b <= 24 and a != b else (0, 24)
 
 
+def _parse_days(raw: str) -> set[int]:
+    """«1-5», «1,3,5», «6-2» (через воскресенье: сб, вс, пн, вт). Бросает ValueError на неверном значении."""
+    out: set[int] = set()
+    for part in raw.split(","):
+        if "-" in part:
+            a, b = (int(x) for x in part.split("-"))
+            if not (1 <= a <= 7 and 1 <= b <= 7):
+                raise ValueError(part)
+            out |= set(range(a, b + 1)) if a <= b else set(range(a, 8)) | set(range(1, b + 1))
+        else:
+            out.add(int(part))
+    if not out or any(not 1 <= d <= 7 for d in out):
+        raise ValueError(raw)
+    return out
+
+
 def _days() -> set[int]:
-    raw = os.getenv("NOTIFY_DAYS", "1-5")  # 1 = понедельник … 7 = воскресенье
     try:
-        out = set()
-        for part in raw.split(","):
-            if "-" in part:
-                a, b = (int(x) for x in part.split("-"))
-                out |= set(range(a, b + 1))
-            else:
-                out.add(int(part))
+        return _parse_days(core.env("NOTIFY_DAYS", "1-5"))  # 1 = понедельник … 7 = воскресенье
     except ValueError:
         return set(range(1, 8))
-    return {d for d in out if 1 <= d <= 7} or set(range(1, 8))
 
 
 def config_problem() -> str | None:
     """Проверка настроек времени при запуске: ошибка видна сразу, а не как «черновики не приходят»."""
-    raw_h = os.getenv("NOTIFY_HOURS", "10-18")
+    raw_h = core.env("NOTIFY_HOURS", "10-18")
     try:
         a, b = (int(x) for x in raw_h.split("-"))
         if not (0 <= a <= 24 and 0 <= b <= 24 and a != b):
             raise ValueError
     except ValueError:
         return f"NOTIFY_HOURS={raw_h}: нужны часы вида 10-18 (числа от 0 до 24, начало не равно концу)."
-    raw_d = os.getenv("NOTIFY_DAYS", "1-5")
+    raw_d = core.env("NOTIFY_DAYS", "1-5")
     try:
-        nums = [int(x) for part in raw_d.split(",") for x in part.split("-")]
-        if not nums or any(not 1 <= n <= 7 for n in nums):
-            raise ValueError
+        _parse_days(raw_d)
     except ValueError:
         return f"NOTIFY_DAYS={raw_d}: дни недели числами от 1 (понедельник) до 7, например 1-5 или 1,3,5."
-    name = os.getenv("NOTIFY_TZ", "Asia/Yekaterinburg")
+    name = core.env("NOTIFY_TZ", "Asia/Yekaterinburg")
     try:
         from zoneinfo import ZoneInfo
         ZoneInfo(name)
     except Exception:
         return f"NOTIFY_TZ={name}: неизвестный часовой пояс (пример: Asia/Yekaterinburg, Europe/Moscow)."
-    if os.getenv("NOTIFY_DEFAULT", "silent") not in MODES:
+    if core.env("NOTIFY_DEFAULT", "silent") not in MODES:
         return f"NOTIFY_DEFAULT={os.getenv('NOTIFY_DEFAULT')}: допустимо {', '.join(MODES)}."
     return None
 
@@ -137,11 +143,11 @@ def window_text() -> str:
         d = f"{DAY_NAMES[days[0] - 1]}–{DAY_NAMES[days[-1] - 1]}"
     else:
         d = ", ".join(DAY_NAMES[x - 1] for x in days)
-    return f"{d}, {a:02d}:00–{b:02d}:00 ({os.getenv('NOTIFY_TZ', 'Asia/Yekaterinburg')})"
+    return f"{d}, {a:02d}:00–{b:02d}:00 ({core.env('NOTIFY_TZ', 'Asia/Yekaterinburg')})"
 
 
 def default_mode() -> str:
-    v = os.getenv("NOTIFY_DEFAULT", "silent")
+    v = core.env("NOTIFY_DEFAULT", "silent")
     return v if v in MODES else "silent"
 
 
@@ -269,7 +275,7 @@ async def _git(*args: str, timeout: int = 60) -> tuple[int, str]:
     except asyncio.TimeoutError:
         return 1, "git не ответил вовремя"
     except OSError as e:
-        return 1, f"git недоступен: {e}"
+        return 1, f"git недоступен: {scrub(str(e))}"
 
 
 async def version() -> str:
@@ -284,7 +290,7 @@ async def check_update() -> tuple[str, list[str], str]:
     if not updates_enabled():
         return "disabled", [], ("Автообновление не настроено: в .env нет GITHUB_REPO, "
                                 "либо бот запущен не из репозитория.")
-    branch = os.getenv("GITHUB_BRANCH", "main")
+    branch = core.env("GITHUB_BRANCH", "main")
     rc, out = await _git("fetch", "origin", branch)
     if rc:
         return "error", [], f"Не удалось связаться с GitHub: {out[-300:]}"
@@ -309,7 +315,7 @@ async def upd_view() -> tuple[str, list | None]:
 
 
 def _data_dir() -> Path:
-    return Path(os.getenv("DATA_DIR", "data")).resolve()
+    return Path(core.env("DATA_DIR", "data")).resolve()
 
 
 def upd_go(adapter, uid) -> tuple[str, None]:
@@ -361,7 +367,7 @@ async def announce_update_result():
 
 async def probation_watch(seconds: int | None = None):
     """Если после обновления бот прожил PROBATION_SEC секунд, считаем версию удачной (откат больше не нужен)."""
-    await asyncio.sleep(seconds if seconds is not None else int(os.getenv("PROBATION_SEC", "120")))
+    await asyncio.sleep(seconds if seconds is not None else int(core.env("PROBATION_SEC", "120")))
     f = _data_dir() / "update_state.json"
     try:
         s = json.loads(f.read_text(encoding="utf-8"))
