@@ -181,7 +181,7 @@ async def announce_start():
     if os.getenv("STARTUP_NOTIFY", "1") == "0":
         return
     n = db.execute("SELECT COUNT(*) FROM drafts WHERE status='pending'").fetchone()[0]
-    text = ("🟢🟢🟢 Бот запущен." + (f" Ждут согласования: {n}." if n else "")
+    text = ("🟢🟢 Бот запущен." + (f" Ждут согласования: {n}." if n else "")
             + (f"\nЗакрыто неразобранных черновиков старше {os.getenv('DRAFT_TTL_DAYS', '30')} дн.: {LAST_EXPIRED}."
                if LAST_EXPIRED else ""))
     for a in ADAPTERS.values():
