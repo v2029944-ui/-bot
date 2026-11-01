@@ -72,11 +72,13 @@ def _tz():
 
 
 def _hours() -> tuple[int, int]:
+    """Часы рабочего окна «начало-конец». Если начало больше конца (20-6), окно переходит через полночь.
+    Неверное значение = окно весь день (а main при запуске сообщит об ошибке в настройке)."""
     try:
         a, b = (int(x) for x in os.getenv("NOTIFY_HOURS", "10-18").split("-"))
-        return a, b
     except ValueError:
         return 0, 24
+    return (a, b) if 0 <= a <= 24 and 0 <= b <= 24 and a != b else (0, 24)
 
 
 def _days() -> set[int]:
@@ -89,15 +91,43 @@ def _days() -> set[int]:
                 out |= set(range(a, b + 1))
             else:
                 out.add(int(part))
-        return out or set(range(1, 8))
     except ValueError:
         return set(range(1, 8))
+    return {d for d in out if 1 <= d <= 7} or set(range(1, 8))
+
+
+def config_problem() -> str | None:
+    """Проверка настроек времени при запуске: ошибка видна сразу, а не как «черновики не приходят»."""
+    raw_h = os.getenv("NOTIFY_HOURS", "10-18")
+    try:
+        a, b = (int(x) for x in raw_h.split("-"))
+        if not (0 <= a <= 24 and 0 <= b <= 24 and a != b):
+            raise ValueError
+    except ValueError:
+        return f"NOTIFY_HOURS={raw_h}: нужны часы вида 10-18 (числа от 0 до 24, начало не равно концу)."
+    raw_d = os.getenv("NOTIFY_DAYS", "1-5")
+    try:
+        nums = [int(x) for part in raw_d.split(",") for x in part.split("-")]
+        if not nums or any(not 1 <= n <= 7 for n in nums):
+            raise ValueError
+    except ValueError:
+        return f"NOTIFY_DAYS={raw_d}: дни недели числами от 1 (понедельник) до 7, например 1-5 или 1,3,5."
+    name = os.getenv("NOTIFY_TZ", "Asia/Yekaterinburg")
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(name)
+    except Exception:
+        return f"NOTIFY_TZ={name}: неизвестный часовой пояс (пример: Asia/Yekaterinburg, Europe/Moscow)."
+    if os.getenv("NOTIFY_DEFAULT", "silent") not in MODES:
+        return f"NOTIFY_DEFAULT={os.getenv('NOTIFY_DEFAULT')}: допустимо {', '.join(MODES)}."
+    return None
 
 
 def in_window(now: float | None = None) -> bool:
     dt = datetime.fromtimestamp(now or time.time(), _tz())
     a, b = _hours()
-    return dt.isoweekday() in _days() and a <= dt.hour < b
+    inside = (a <= dt.hour < b) if a < b else (dt.hour >= a or dt.hour < b)  # 20-6: вечер и ночь
+    return dt.isoweekday() in _days() and inside
 
 
 def window_text() -> str:
@@ -158,7 +188,8 @@ def enqueue(adapter, uid, did: int):
 
 
 async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> int:
-    """Доставляем придержанные черновики тем, у кого уже началось рабочее время (или сменился режим)."""
+    """Доставляем придержанные черновики тем, у кого уже началось рабочее время (или сменился режим).
+    Запись удаляется только когда черновик закончил жизнь; пока он публикуется или пересоздаётся — ждём."""
     now = now or time.time()
     sql, args = "SELECT * FROM deferred", ()
     if adapter is not None and uid is not None:
@@ -166,24 +197,29 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
     done = 0
     for r in core.db.execute(sql, args).fetchall():
         ad, d = core.ADAPTERS.get(r["platform"]), core.get(r["did"])
-        drop = lambda: core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?",
-                                       (r["platform"], r["uid"], r["did"]))
-        if ad is None or not d or d["status"] != "pending" or r["uid"] not in ad.approvers:
-            drop()
+        key = (r["platform"], r["uid"], r["did"])
+        if ad is None or not d or d["status"] in ("published", "deleted", "expired") or r["uid"] not in ad.approvers:
+            core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?", key)
             core.db.commit()
+            continue
+        if d["status"] != "pending":  # publishing/regenerating — состояние временное, вернёмся позже
             continue
         mode = delivery_for(ad, r["uid"], now)
         if mode == "defer":
+            continue
+        # забираем запись ДО отправки: цикл напоминаний и смена режима не пришлют один черновик дважды
+        cur = core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?", key)
+        core.db.commit()
+        if cur.rowcount != 1:
             continue
         try:
             kw = {"silent": True} if mode == "silent" else {}
             await ad.send_for_approval(r["uid"], d["id"], d["photo"], d["post"], **kw)
         except Exception:
             log.warning("не удалось доставить отложенный черновик %s человеку %s", r["did"], r["uid"], exc_info=True)
+            enqueue(ad, r["uid"], d["id"])  # вернём в очередь: попробуем в следующий круг
             continue
-        drop()
         core._set(d["id"], last_sent=now, reminded=0)  # напоминание считаем от фактической доставки
-        core.db.commit()
         done += 1
     return done
 
@@ -194,12 +230,13 @@ RESTART_DELAY = 3  # даём ответу в чате уйти, прежде ч
 _restart_ev: asyncio.Event | None = None
 
 
-def request_restart(code: int):
+def request_restart(code: int, delay: float | None = None):
+    """Просим main.serve остановить бота и выйти с этим кодом (42 — обновление, 0 — обычная остановка)."""
     global RESTART_CODE
     RESTART_CODE = code
     if _restart_ev is not None:
         try:
-            asyncio.get_running_loop().call_later(RESTART_DELAY, _restart_ev.set)
+            asyncio.get_running_loop().call_later(RESTART_DELAY if delay is None else delay, _restart_ev.set)
         except RuntimeError:
             _restart_ev.set()
 

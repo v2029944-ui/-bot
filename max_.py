@@ -175,6 +175,8 @@ class Max(core.Adapter):
                     return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
             return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото с описанием в подписи 📷")
         name = sender.get("name") or sender.get("first_name") or str(uid)
+        if core.SHUTTING_DOWN:
+            return await self.notify(uid, "🔄 Бот перезапускается. Пришлите фото через минуту.")
         if ops.is_paused():
             return await self.notify(uid, ops.PAUSED_MSG)
         if not core.caption_ok(body.get("text")):  # единственное, что отвечаем сотруднику в тихом режиме
@@ -201,7 +203,7 @@ class Max(core.Adapter):
         except Exception as e:
             log.exception("submit failed")
             if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
-                await core.alert(self, f"⚠️ Не удалось обработать фото от {name}: {e}")
+                await core.alert(self, f"⚠️ Не удалось обработать фото от {name}: {core.err(e)}")
             else:
                 await self.notify(uid, "⚠️ Не получилось обработать фото. Попробуйте ещё раз позже.")
 
@@ -220,6 +222,6 @@ class Max(core.Adapter):
             _, text = await core.on_action(self, uid, action, int(did), int(attempt))
         except Exception as e:
             log.exception("callback failed")
-            text = f"⚠️ Ошибка: {e}"
+            text = f"⚠️ Ошибка: {core.err(e)}"
         if text:
             await self.notify(uid, text)

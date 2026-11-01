@@ -126,6 +126,8 @@ class Telegram(core.Adapter):
             if quiet:
                 return await core.alert(self, f"⚠️ {name}: файл {size / 1e6:.0f} МБ не скачать (лимит Telegram 20 МБ)")
             return await m.answer("Файл больше 20 МБ — пришлите фото поменьше.")
+        if core.SHUTTING_DOWN:  # перезапуск: без ответа фото молча пропало бы
+            return await m.answer("🔄 Бот перезапускается. Пришлите фото через минуту.")
         if ops.is_paused():  # одно из исключений тихого режима: иначе фото молча пропало бы
             return await m.answer(ops.PAUSED_MSG)
         if not core.caption_ok(m.caption):  # единственное, что отвечаем сотруднику в тихом режиме
@@ -152,7 +154,7 @@ class Telegram(core.Adapter):
         except Exception as e:
             log.exception("submit failed")
             if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
-                await core.alert(self, f"⚠️ Не удалось обработать фото от {name}: {e}")
+                await core.alert(self, f"⚠️ Не удалось обработать фото от {name}: {core.err(e)}")
             else:
                 await m.answer("⚠️ Не получилось обработать фото. Попробуйте ещё раз позже.")
 
@@ -174,7 +176,7 @@ class Telegram(core.Adapter):
                     pass
         except Exception as e:
             log.exception("callback failed")
-            text = f"⚠️ Ошибка: {e}"
+            text = f"⚠️ Ошибка: {core.err(e)}"
         if text:
             await self.notify(cb.from_user.id, text)
 
@@ -204,7 +206,7 @@ class Telegram(core.Adapter):
             await self.send_menu(str(cb.from_user.id), text, rows)
         except Exception as e:
             log.exception("menu callback failed")
-            await self.notify(cb.from_user.id, f"⚠️ Ошибка: {e}")
+            await self.notify(cb.from_user.id, f"⚠️ Ошибка: {core.err(e)}")
 
     # --- исходящие ---
     @staticmethod
@@ -272,4 +274,5 @@ class Telegram(core.Adapter):
         drop = os.getenv("TG_DROP_PENDING", "0") == "1"  # 1 — после простоя не разбирать старую очередь
         if drop:
             log.warning("TG_DROP_PENDING=1: накопленные за простой сообщения будут отброшены")
-        await self.dp.start_polling(self.bot, drop_pending_updates=drop)
+        # handle_signals=False: SIGTERM ловит main.serve. Иначе aiogram молча останавливает опрос, а процесс живёт
+        await self.dp.start_polling(self.bot, drop_pending_updates=drop, handle_signals=False)

@@ -82,11 +82,17 @@ def update():
         rc, out = git("worktree", "add", "--detach", str(wt), new)
         if rc:
             return finish("failed", who, detail="не удалось подготовить новую версию: " + out[-300:], commit=short())
-        if _sha(wt / "requirements.txt") != _sha(CODE / "requirements.txt"):  # новые библиотеки нужны для тестов
-            rc, out = run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"], wt, 900)
+        pypath = str(wt)
+        if _sha(wt / "requirements.txt") != _sha(CODE / "requirements.txt"):
+            # новые библиотеки нужны только для проверки: ставим в отдельную папку, общее окружение не трогаем
+            # (в рабочее окружение они попадут при запуске, entrypoint.sh сам сверяет requirements.txt)
+            libs = tmp / "libs"
+            rc, out = run([sys.executable, "-m", "pip", "install", "-q", "--target", str(libs), "-r",
+                           "requirements.txt"], wt, 900)
             if rc:
                 return finish("failed", who, detail="не удалось установить библиотеки: " + out[-300:], commit=short())
-        rc, out = run(shlex.split(TEST_CMD), wt, 600, {"PYTHONPATH": str(wt), "DATA_DIR": str(tmp / "data")})
+            pypath = os.pathsep.join([str(wt), str(libs)])
+        rc, out = run(shlex.split(TEST_CMD), wt, 600, {"PYTHONPATH": pypath, "DATA_DIR": str(tmp / "data")})
         if rc:
             tail = "\n".join(out.splitlines()[-12:])
             return finish("tests_failed", who, detail=tail[-900:], commit=short())

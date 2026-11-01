@@ -225,8 +225,8 @@ def test_status_text_and_access(llm, png):
     assert run(core.on_text(a, "1", "/status")) is True
     text = a.sent("notify")[-1][2]
     assert "Бот работает" in text and "✅ отвечает" in text and "На согласовании: 1" in text
-    run(core.on_text(a, "2", "/status"))  # обычный согласующий при заданном админе — нет
-    assert len(a.sent("notify")) == 1
+    run(core.on_text(a, "2", "/status"))  # обычный согласующий при заданном админе: отказ, а не молчание
+    assert len(a.sent("notify")) == 2 and "администратору" in a.sent("notify")[-1][2]
     assert "администратору" in run(core.on_menu(a, "2", "m:status"))[0]
     assert "Бот работает" in run(core.on_menu(a, "1", "m:status"))[0]
 

@@ -1,11 +1,46 @@
 """Ядро: хранилище черновиков, генерация поста нейросетью, логика согласования."""
-import asyncio, base64, io, logging, os, secrets, sqlite3, time, uuid
+import asyncio, base64, io, logging, os, re, secrets, sqlite3, time, uuid
 from pathlib import Path
 
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 log = logging.getLogger("core")
+
+# ---------- Секреты не должны попадать в сообщения и логи ----------
+_SECRET_RES = [re.compile(r"bot\d{5,}:[A-Za-z0-9_-]{20,}"),     # адрес Bot API: /bot<токен>/...
+               re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}"),        # токен Telegram сам по себе
+               re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),             # ключи нейросетей
+               re.compile(r"//[^/@\s]+@")]                       # логин:пароль или токен в адресе (GitHub)
+_SECRET_ENVS = ("TG_TOKEN", "MAX_TOKEN", "LLM_API_KEY", "ANTHROPIC_API_KEY")
+
+
+def redact(text) -> str:
+    """Вычищает токены и ключи. Все тексты об ошибках для людей и записи в логе проходят через неё:
+    текст ошибки сети может содержать адрес запроса вместе с токеном бота."""
+    s = str(text)
+    for v in filter(None, (os.getenv(n, "") for n in _SECRET_ENVS)):
+        if len(v) >= 8:
+            s = s.replace(v, "***")
+    s = _SECRET_RES[0].sub("bot***", s)
+    s = _SECRET_RES[1].sub("***", s)
+    s = _SECRET_RES[2].sub("sk-***", s)
+    return _SECRET_RES[3].sub("//***@", s)
+
+
+def err(e: BaseException) -> str:
+    """Безопасное описание ошибки для сообщения человеку."""
+    return redact(e)
+
+
+class RedactingFormatter(logging.Formatter):
+    """Формат записей лога, который вычищает секреты и из текста, и из трассировки ошибки."""
+
+    def format(self, record):
+        return redact(super().format(record))
+
+SHUTTING_DOWN = False  # идёт остановка: новые фото не принимаем (говорим об этом), текущие дорабатываем
+INFLIGHT: set = set()  # задачи обработки фото, которые не должны оборваться при остановке
 
 DATA = Path(os.getenv("DATA_DIR", "data")).resolve()  # абсолютный путь: не зависит от смены рабочей папки
 PHOTOS = DATA / "photos"
@@ -92,6 +127,7 @@ _ALERT_LAST: dict[str, float] = {}
 async def alert(adapter: Adapter, text: str):
     """Сообщение об ошибке — согласующим, а не сотруднику. С троттлингом: сломанный ключ LLM
     не превращается в поток сообщений на каждое фото."""
+    text = redact(text)
     key = text[:60]
     now = time.time()
     if now - _ALERT_LAST.get(key, 0) < int(os.getenv("ALERT_THROTTLE_SEC", "300")):
@@ -123,6 +159,7 @@ def can_status(adapter: Adapter, uid) -> bool:
 async def alert_staff(adapter, text: str):
     """Сообщение о сбое бота. Пробуем все подключённые мессенджеры: если упал один, второй сообщит.
     Одинаковые сообщения не чаще раза в ALERT_THROTTLE_SEC."""
+    text = redact(text)
     key, now = "staff:" + text[:60], time.time()
     if now - _ALERT_LAST.get(key, 0) < int(os.getenv("ALERT_THROTTLE_SEC", "300")):
         return
@@ -178,7 +215,7 @@ async def status_text(adapter: Adapter) -> str:
         await asyncio.wait_for(_complete("Отвечай одним словом.", "Ответь: ОК"), 30)
         llm = "✅ отвечает"
     except Exception as e:
-        llm = f"❌ {type(e).__name__}: {str(e)[:150]}"
+        llm = f"❌ {type(e).__name__}: {err(e)[:150]}"
     last = ("нет данных" if not (LLM_STATE["ok"] or LLM_STATE["err"]) else
             f"последний пост написан {_ago(now - LLM_STATE['ok'])} назад" if LLM_STATE["ok"] >= LLM_STATE["err"] else
             f"последняя генерация закончилась ошибкой {_ago(now - LLM_STATE['err'])} назад: {LLM_STATE['msg'][:100]}")
@@ -218,11 +255,12 @@ async def remind_once(now: float | None = None) -> int:
             groups.setdefault(id(ad), (ad, []))[1].append(d)
     total = 0
     for ad, ds in groups.values():
+        ds = ds[:5]  # показываем (и помечаем как «напомнили») не больше 5; остальные дождутся следующего круга
         age = lambda d: now - (d["last_sent"] or d["created"])
         text = (f"⏰ Ждут согласования: {len(ds)} (самый давний — {_ago(max(age(d) for d in ds))}).\n"
                 "Нажмите, чтобы показать пост ещё раз:")
         rows_ = [[(f"📨 {(d['author_name'] or 'Пост')[:14]}, {_ago(age(d))}", f"d:show:{d['id']}:{d['attempts']}")]
-                 for d in ds[:5]]
+                 for d in ds]
         sent = 0
         for uid in ad.approvers:
             try:
@@ -239,10 +277,14 @@ async def remind_once(now: float | None = None) -> int:
 
 
 async def reminder_loop():
+    last_clean = time.time()
     while True:
         try:
             await ops.flush_deferred()  # придержанные черновики уходят, когда началось рабочее время
             await remind_once()
+            if time.time() - last_clean > int(os.getenv("HOUSEKEEPING_SEC", "21600")):  # раз в 6 часов
+                last_clean = time.time()
+                housekeeping()  # в потоке нельзя: соединение SQLite принадлежит потоку с event loop
         except Exception:
             log.exception("reminder failed")
         await asyncio.sleep(int(os.getenv("REMIND_CHECK_SEC", "300")))
@@ -296,35 +338,50 @@ def _dump_marks(m: dict[str, str]) -> str:
 LAST_EXPIRED = 0
 
 
+def housekeeping() -> int:
+    """Уборка: закрываем черновики без решения старше DRAFT_TTL_DAYS (статус expired, фото удаляем),
+    стираем фото старых опубликованных/удалённых постов и файлы-сироты (фото, которых нет ни в одном черновике).
+    Вызывается при старте и периодически (HOUSEKEEPING_SEC). Возвращает число закрытых черновиков."""
+    expired = 0
+    ttl = int(os.getenv("DRAFT_TTL_DAYS", "30"))  # 0 — не закрывать
+    if ttl > 0:
+        for r in db.execute("SELECT id, photo FROM drafts WHERE status='pending' AND "
+                            "COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
+            _unlink(r["photo"])
+            db.execute("UPDATE drafts SET status='expired' WHERE id=?", (r["id"],))
+            expired += 1
+        db.commit()
+        if expired:
+            log.warning("Закрыто черновиков без решения (старше %s дн.): %s", ttl, expired)
+    for r in db.execute("SELECT photo FROM drafts WHERE status IN ('published','deleted') AND created < ?"
+                        " AND photo IS NOT NULL AND photo != ''", (time.time() - 30 * 86400,)).fetchall():
+        _unlink(r["photo"])
+    known = {r["photo"] for r in db.execute("SELECT photo FROM drafts WHERE photo IS NOT NULL")}
+    for f in PHOTOS.glob("*.jpg"):  # файл моложе часа может принадлежать фото, которое сейчас обрабатывается
+        try:
+            if str(f) not in known and time.time() - f.stat().st_mtime > 3600:
+                f.unlink(missing_ok=True)
+                log.info("удалён файл-сирота %s", f.name)
+        except OSError:
+            log.warning("не удалось проверить файл %s", f, exc_info=True)
+    return expired
+
+
+def _unlink(path):
+    try:
+        Path(path or "").unlink(missing_ok=True)
+    except (OSError, IsADirectoryError):
+        log.warning("не удалось удалить фото %s", path, exc_info=True)
+
+
 def startup():
-    """При старте: возвращаем «зависшие» после сбоя черновики в работу и чистим старые фото (30 дней)."""
+    """При старте: возвращаем «зависшие» после сбоя черновики в работу и убираем старое."""
     n = db.execute("UPDATE drafts SET status='pending' WHERE status IN ('publishing','regenerating')").rowcount
     db.commit()
     if n:
         log.warning("Восстановлено зависших черновиков: %s", n)
     global LAST_EXPIRED
-    LAST_EXPIRED = 0
-    ttl = int(os.getenv("DRAFT_TTL_DAYS", "30"))  # брошенные без решения черновики закрываем (0 — не закрывать)
-    if ttl > 0:
-        for r in db.execute("SELECT id, photo FROM drafts WHERE status='pending' AND "
-                            "COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
-            try:
-                Path(r["photo"] or "").unlink(missing_ok=True)
-            except OSError:
-                log.warning("не удалось удалить фото %s", r["photo"], exc_info=True)
-            db.execute("UPDATE drafts SET status='expired' WHERE id=?", (r["id"],))
-            LAST_EXPIRED += 1
-        db.commit()
-        if LAST_EXPIRED:
-            log.warning("Закрыто черновиков без решения (старше %s дн.): %s", ttl, LAST_EXPIRED)
-    old = db.execute("SELECT photo FROM drafts WHERE status IN ('published','deleted') AND created < ?"
-                     " AND photo IS NOT NULL AND photo != ''",
-                     (time.time() - 30 * 86400,)).fetchall()
-    for r in old:
-        try:
-            Path(r["photo"]).unlink(missing_ok=True)
-        except OSError:
-            log.warning("не удалось удалить фото %s", r["photo"], exc_info=True)
+    LAST_EXPIRED = housekeeping()
 
 
 # ---------- Проверка подписи ----------
@@ -391,7 +448,7 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
     try:
         out = await _complete(build_system(), text, b64)
     except Exception as e:
-        LLM_STATE.update(err=time.time(), msg=f"{type(e).__name__}: {e}")
+        LLM_STATE.update(err=time.time(), msg=f"{type(e).__name__}: {err(e)}")
         raise
     LLM_STATE["ok"] = time.time()
     return out
@@ -467,6 +524,11 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
 
 
 MAX_PHOTO_BYTES = 25 * 1024 * 1024
+# Свои лимиты вместо встроенных предупреждений Pillow: PNG/WebP/HEIC целиком разворачиваются в памяти
+# (100 Мпикс ≈ +380 МБ), а JPEG читаем уменьшенным через draft(), поэтому ему можно больше.
+Image.MAX_IMAGE_PIXELS = None
+MAX_PIXELS_JPEG = 300_000_000
+MAX_PIXELS_OTHER = 40_000_000
 
 
 class BadImage(ValueError):
@@ -479,7 +541,13 @@ def save_photo(data: bytes) -> str:
     if len(data) > MAX_PHOTO_BYTES:
         raise BadImage("Файл слишком большой (больше 25 МБ)")
     try:
-        img = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))  # поворот по EXIF, как снято на телефон
+        img = Image.open(io.BytesIO(data))  # читает только заголовок: память пока не тратится
+        w, h = img.size
+        if w * h > (MAX_PIXELS_JPEG if img.format == "JPEG" else MAX_PIXELS_OTHER):
+            raise BadImage(f"Слишком большое разрешение ({w}×{h}). Пришлите фото поменьше")
+        if img.format == "JPEG":
+            img.draft("RGB", (1600, 1600))  # JPEG сразу читается уменьшенным: даже огромный кадр не раздувает память
+        img = ImageOps.exif_transpose(img)  # поворот по EXIF, как снято на телефон
         img = img.convert("RGB")
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise BadImage("Не получилось открыть файл — это не изображение") from e
@@ -546,17 +614,36 @@ async def _send_draft(d: dict, did: int, post: str, fallback: Adapter,
 
 
 async def submit(adapter: Adapter, author_id: str, author_name: str, text: str, photo_bytes: bytes):
-    """Сотрудник прислал фото + описание -> пост -> на согласование."""
+    """Сотрудник прислал фото + описание -> пост -> на согласование.
+    Работа идёт в отдельной задаче под shield: при остановке бота main.serve дожидается её завершения
+    (drain_inflight), а не обрывает на середине, когда фото уже принято, а черновика ещё нет."""
+    task = asyncio.ensure_future(_submit(adapter, author_id, author_name, text, photo_bytes))
+    INFLIGHT.add(task)
+    task.add_done_callback(INFLIGHT.discard)
+    task.add_done_callback(lambda t: t.cancelled() or t.exception())  # результат заберёт await ниже
+    return await asyncio.shield(task)
+
+
+async def drain_inflight(timeout: float) -> int:
+    """Ждём, пока дорабатывают принятые фото. Возвращает, сколько не успело."""
+    pending = {t for t in INFLIGHT if not t.done()}
+    if pending:
+        log.info("жду завершения обработки фото: %s", len(pending))
+        await asyncio.wait(pending, timeout=timeout)
+    return len([t for t in INFLIGHT if not t.done()])
+
+
+async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str, photo_bytes: bytes):
     path = await asyncio.to_thread(save_photo, photo_bytes)  # ValueError — файл не картинка
     try:
         await _check_rate(adapter, author_id, author_name)  # лимит считаем только за валидные фото
-    except Exception:
+    except BaseException:
         Path(path).unlink(missing_ok=True)
         raise
     try:
         post = await generate_post(path, text)
-    except Exception:
-        Path(path).unlink(missing_ok=True)  # иначе фото висит на диске навсегда
+    except BaseException:  # в том числе отмена при остановке: иначе фото висит на диске навсегда
+        Path(path).unlink(missing_ok=True)
         raise
     cur = db.execute(
         "INSERT INTO drafts(platform,author_id,author_name,source_text,photo,post,created) VALUES(?,?,?,?,?,?,?)",
@@ -569,7 +656,7 @@ async def submit(adapter: Adapter, author_id: str, author_name: str, text: str, 
         db.execute("DELETE FROM drafts WHERE id=?", (did,))
         db.commit()
         Path(path).unlink(missing_ok=True)
-        raise RuntimeError(f"Не удалось отправить черновик согласующим: {last}")
+        raise RuntimeError(f"Не удалось отправить черновик согласующим: {err(last)}")
     return did
 
 
@@ -600,7 +687,7 @@ async def _apply_edit(adapter: Adapter, user_id, did: int, attempt: int, text: s
     sent, last = await _send_draft(d, did, text, adapter, actor=str(user_id))
     if not sent:  # откат, как при пересоздании: сообщения с новыми кнопками нет
         _set(did, post=d["post"], attempts=d["attempts"], status="pending")
-        return False, f"⚠️ Текст сохранить не удалось: {last}"
+        return False, f"⚠️ Текст сохранить не удалось: {err(last)}"
     return False, "✍️ Ваш текст заменил черновик. Проверьте пост выше и нажмите ✅ Опубликовать."
 
 
@@ -678,7 +765,7 @@ async def _publish(adapter: Adapter, user_id, did: int, attempt: int, force: boo
             db.commit()
         except Exception:
             log.exception("не удалось вернуть черновик в работу")
-        return False, (f"⚠️ Сбой при публикации: {e}. Проверьте канал, прежде чем нажимать ✅ снова "
+        return False, (f"⚠️ Сбой при публикации: {err(e)}. Проверьте канал, прежде чем нажимать ✅ снова "
                        "(пометки о публикации сохранены, дубль не выйдет без подтверждения).")
 
 
@@ -704,9 +791,10 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         await adapter.send_menu(
             str(user_id),
             f"⚠️ Прошлая публикация в {', '.join(risky)} оборвалась: пост мог выйти.\n"
-            f"Проверьте канал. Если пост уже там — нажмите «↩️ Отмена» и удалите черновик.",
+            f"Проверьте канал. Если пост уже там — под сообщением с черновиком нажмите «🗑 Удалить».\n"
+            f"Если его там нет — опубликуйте ещё раз.",
             [[("✅ Опубликовать ещё раз", f"d:okforce:{did}:{attempt}")],
-             [("↩️ Отмена", f"d:delno:{did}:{attempt}")]])
+             [("↩️ Не публиковать (пост остаётся на согласовании)", f"d:delno:{did}:{attempt}")]])
         return False, ""
 
     for t in todo:
@@ -732,7 +820,7 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
             part = f"\nУже опубликовано: {', '.join(done)}." if done else ""
             tail = ("Пост не вышел: исправьте причину и нажмите ✅ ещё раз." if sure else
                     "Пост мог всё же выйти — проверьте канал, прежде чем нажимать ✅ снова.")
-            return False, f"⚠️ Не удалось опубликовать в {t.name}: {e}{part}\n{tail}"
+            return False, f"⚠️ Не удалось опубликовать в {t.name}: {err(e)}{part}\n{tail}"
         marks[t.name] = "done"
         _set(did, published_to=_dump_marks(marks))
 
@@ -746,20 +834,22 @@ async def _regenerate(adapter: Adapter, user_id, did: int, comment: str | None =
     if not d:
         return True, "Черновик не найден."
     if not _claim(did, "pending", "regenerating"):
+        cur = get(did)
+        if cur and cur["status"] in ("published", "deleted", "expired"):
+            return True, "Этот пост уже обработан."
         return False, BUSY
     try:
         post = await generate_post(d["photo"], d["source_text"], prev=d["post"], comment=comment)
     except Exception as e:
         log.exception("regenerate failed")
         _set(did, status="pending")
-        return False, f"⚠️ Не удалось пересоздать: {e}"
+        return False, f"⚠️ Не удалось пересоздать: {err(e)}"
 
-    new = get(did)
     _set(did, post=post, attempts=d["attempts"] + 1, status="pending")
     sent, last = await _send_draft(d, did, post, adapter, actor=str(user_id))
     if not sent:  # откат: иначе в базе attempts=N+1, а сообщения с такими кнопками нет
         _set(did, post=d["post"], attempts=d["attempts"], status="pending")
-        return False, f"⚠️ Новый вариант готов, но не отправился: {last}"
+        return False, f"⚠️ Новый вариант готов, но не отправился: {err(last)}"
     # новый вариант уходит всем согласующим: у остальных кнопки не должны «протухать»
     return True, ("🔁 Новый вариант ниже (отправлен всем согласующим)." if sent > 1
                   else "🔁 Новый вариант ниже.")
@@ -796,7 +886,7 @@ async def _learn(comment: str, old_post: str) -> str | None:
                   "одной короткой строкой-инструкцией. Иначе ответь ровно: НЕТ")
         out = (await _complete("Ты ведёшь свод правил стиля для корпоративного канала.", prompt)).strip()
         out = out.lstrip("-• ").strip()
-        if out and out.upper().rstrip(".") != "НЕТ" and len(out) < 300:
+        if out and not re.match(r"^\W*нет\b", out, re.I) and len(out) < 300:  # «НЕТ», «Нет.», «НЕТ, это разовая…»
             db.execute("INSERT INTO rules(text,created) VALUES(?,?)", (out, time.time()))
             db.commit()
             return out
@@ -1110,10 +1200,14 @@ async def people_menu(adapter: Adapter, act: str, parts: list[str], uid: str = "
         p = next((x for x in _db_people(adapter) if x["uid"] == arg(2)), None)
         if not p:
             return people_view(adapter)
+        if p["role"] == "adm" and len(adapter.admins) <= 1:
+            return "⛔ Нельзя убрать последнего администратора.", [[("← Назад", f"m:pset:{p['uid']}")]]
         return (f"Убрать {p['name'] or p['uid']} из списка? Он перестанет присылать фото.",
                 [[("Да, убрать", f"m:pdelok:{p['uid']}"), ("Отмена", "m:people")]])
     if act == "pdelok":
         p = next((x for x in _db_people(adapter) if x["uid"] == arg(2)), None)
+        if p and p["role"] == "adm" and len(adapter.admins) <= 1:  # иначе бот остался бы без админа и открылся всем
+            return "⛔ Нельзя убрать последнего администратора.", [[("← Назад", f"m:pset:{p['uid']}")]]
         if p:
             _remove_person(adapter, p["uid"], p["name"])
         text, rows = people_view(adapter)
@@ -1127,7 +1221,7 @@ async def people_menu(adapter: Adapter, act: str, parts: list[str], uid: str = "
         if role not in ROLE_NAME:
             return "Неизвестная роль.", None
         db.execute("DELETE FROM invites WHERE created < ?", (time.time() - 30 * 86400,))
-        token = secrets.token_hex(6)
+        token = secrets.token_urlsafe(16)  # 128 бит: для роли «согласующий» перебор должен быть невозможен
         link = await adapter.invite_link(token)
         if not link:
             return ("В этом мессенджере ссылки-приглашения не поддерживаются. Попросите человека написать боту — "
@@ -1220,8 +1314,9 @@ async def on_text(adapter: Adapter, user_id, text: str) -> bool:
         await adapter.send_menu(uid, msg, rows)
         return True
     cmd = t.split(maxsplit=1)[0].split("@")[0].lower() if t.startswith("/") else ""
-    if cmd == "/status" and can_status(adapter, uid):
-        await adapter.notify(uid, await status_text(adapter))
+    if cmd == "/status":  # ни при каких условиях не должна уходить дальше как комментарий к посту
+        await adapter.notify(uid, await status_text(adapter) if can_status(adapter, uid)
+                             else "⛔ Статус показывается администратору.")
         return True
     if cmd and cmd not in SAFE_CMDS and (key in WAITING_EDIT or key in WAITING_RULE or key in WAITING):
         # неизвестная команда не должна стать ни текстом поста, ни правилом, ни комментарием для нейросети

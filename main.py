@@ -1,4 +1,4 @@
-import asyncio, logging, os
+import asyncio, logging, os, signal
 
 from dotenv import load_dotenv
 
@@ -31,19 +31,35 @@ def need(name):
 async def serve(workers):
     """Запускает мессенджеры и фоновые задачи. Админ нажал «Обновить» -> останавливаем всё и выходим с кодом 42:
     его понимает entrypoint.sh (запускает updater.py и поднимает бота заново)."""
+    loop = asyncio.get_running_loop()
+    try:  # docker stop шлёт SIGTERM: останавливаемся аккуратно, а не по таймауту с SIGKILL
+        loop.add_signal_handler(signal.SIGTERM, lambda: (log.info("получен SIGTERM, останавливаюсь"),
+                                                         ops.request_restart(0, delay=0)))
+        sigterm = True
+    except (NotImplementedError, RuntimeError, ValueError):  # Windows, не главный поток
+        sigterm = False
     tasks = {asyncio.create_task(supervise(w)) for w in workers}
     waiter = asyncio.create_task(ops.wait_restart())
     tasks.add(waiter)
-    while tasks:
-        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            if t is waiter:
-                for other in tasks:
-                    other.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                raise SystemExit(t.result())
-            if t.exception():
-                raise t.exception()
+    try:
+        while tasks:
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                if t is waiter:
+                    core.SHUTTING_DOWN = True  # новые фото больше не берём, о перезапуске скажем
+                    left = await core.drain_inflight(float(os.getenv("SHUTDOWN_DRAIN_SEC", "30")))
+                    if left:
+                        log.warning("не успели обработать фото при остановке: %s", left)
+                    for other in tasks:
+                        other.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise SystemExit(t.result())
+                if t.exception():
+                    raise t.exception()
+    finally:
+        if sigterm:
+            loop.remove_signal_handler(signal.SIGTERM)
+        core.SHUTTING_DOWN = False
 
 
 async def supervise(adapter):
@@ -68,6 +84,10 @@ async def supervise(adapter):
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    for h in logging.getLogger().handlers:  # токены и ключи не должны попадать в docker-логи, даже в трассировках
+        h.setFormatter(core.RedactingFormatter(h.formatter._fmt if h.formatter else None))
+    if (problem := ops.config_problem()):
+        raise SystemExit(problem)
     # без ключа нейросети бот принимает фото и падает на каждом — лучше не стартовать
     if core.PROVIDER == "openai" and not os.getenv("LLM_API_KEY"):
         raise SystemExit("Не задан LLM_API_KEY (LLM_PROVIDER=openai)")

@@ -9,7 +9,7 @@ services:
     volumes:
       - ./data:/app/data           # база (правила, люди, черновики) и фото переживают обновления
       - ./code:/app/code           # сюда скачивается код из GitHub (если задан GITHUB_REPO)
-    stop_grace_period: 30s
+    stop_grace_period: 45s   # время на дообработку принятых фото при остановке
     logging:
       driver: json-file
       options:
