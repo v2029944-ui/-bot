@@ -165,32 +165,6 @@ def test_pause_is_admin_only_and_persistent():
     assert not ops.is_paused()
 
 
-def test_telegram_photo_on_pause_gets_notice_and_nothing_is_processed(monkeypatch):
-    import tg as tgmod
-    t = tgmod.Telegram("123456:ABCDEF", "-1", ["1"], ["9"])
-    core.ADAPTERS["tg"] = t
-    called = []
-
-    async def fake_submit(*a, **k):
-        called.append(a)
-    monkeypatch.setattr(core, "submit", fake_submit)
-    ops.set_paused(True)
-
-    class Msg:
-        chat = S(id=5)
-        message_id = 7
-        from_user = S(id=9, full_name="Вася")
-        caption = "Заменили масло"
-        media_group_id = None
-        replies = []
-
-        async def answer(self, text, **kw):
-            self.replies.append(text)
-    m = Msg()
-    run(t._handle_image(m, S(file_size=1000)))
-    assert m.replies == [ops.PAUSED_MSG] and called == []  # даже в тихом режиме: иначе фото молча пропало бы
-
-
 # ---------- роли ----------
 def make_person(a, uid, name, role):
     core._add_person(a, uid, name, role)

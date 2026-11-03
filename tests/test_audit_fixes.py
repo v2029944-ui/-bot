@@ -12,34 +12,9 @@ from conftest import FakeAdapter, draft_id, run
 S = types.SimpleNamespace
 
 
-class Msg:
-    chat = S(id=5)
-    message_id = 7
-    from_user = S(id=9, full_name="Вася")
-
-    def __init__(self, caption=None, group=None):
-        self.caption, self.media_group_id, self.replies = caption, group, []
-
-    async def answer(self, text, **kw):
-        self.replies.append(text)
-
-
-@pytest.fixture
-def bot_tg(monkeypatch):
-    t = tgmod.Telegram("123456:ABCDEF", "-1", ["1"], ["9"])
-    core.ADAPTERS["tg"] = t
-    t.called = []
-
-    async def fake_submit(*a, **k):
-        t.called.append(a)
-        return 1
-    monkeypatch.setattr(core, "submit", fake_submit)
-    return t
-
-
 # 1.1 — признак «фото уже ушло» живёт в ошибке, а не в адаптере
 def test_partial_flag_is_per_error_not_shared_between_concurrent_publishes(tmp_path):
-    t = tgmod.Telegram("123456:ABCDEF", "-1", ["1"], ["9"])
+    t = tgmod.Telegram("123456:ABCDEF", "-1")
     photo = tmp_path / "p.jpg"
     photo.write_bytes(b"x")
     gate = asyncio.Event()
@@ -75,32 +50,6 @@ def test_partial_flag_is_per_error_not_shared_between_concurrent_publishes(tmp_p
 
 def test_utf16_length_counts_emoji_twice():
     assert tgmod._tg_len("ab") == 2 and tgmod._tg_len("😀") == 2
-
-
-# 1.2 — альбом с короткой подписью не должен молчать
-def test_album_photo_with_short_caption_gets_ask_but_without_caption_is_silent(bot_tg):
-    short = Msg(caption="ок", group="g")
-    run(bot_tg._handle_image(short, object()))
-    assert short.replies == [core.CAPTION_ASK]
-    none = Msg(caption=None, group="g")
-    run(bot_tg._handle_image(none, object()))
-    assert none.replies == []
-
-
-# 2.3 — файл больше 20 МБ
-def test_file_over_telegram_limit_is_reported_not_downloaded(bot_tg):
-    sent = []
-
-    class Bot:
-        async def send_message(self, chat, text, **kw):
-            sent.append((chat, text))
-    bot_tg.bot = Bot()
-    # сотрудник в тихом режиме молчит, а согласующему уходит предупреждение
-    m = Msg(caption="Заменили масло")
-    run(bot_tg._handle_image(m, S(file_size=21 * 1024 * 1024)))
-    assert bot_tg.called == [] and m.replies == []
-    assert sent and sent[0][0] == 1 and "20 МБ" in sent[0][1]
-    # согласующий-не-тихий получил бы ответ в чат (EMPLOYEE_NOTIFY=1)
 
 
 # 1.3 — «показать» работает и после пересоздания поста
@@ -186,23 +135,3 @@ def test_no_orphan_invite_token_when_links_unsupported():
     core.refresh_people(a)
     run(core.on_menu(a, "5", "m:invn:emp"))
     assert core.db.execute("SELECT COUNT(*) FROM invites").fetchone()[0] == 0
-
-
-# устаревшее нажатие кнопки не мешает обработке
-def test_expired_callback_answer_does_not_block_action(bot_tg, monkeypatch):
-    seen = []
-
-    async def action(*a, **k):
-        seen.append(a[2])
-        return True, ""
-    monkeypatch.setattr(core, "on_action", action)
-
-    class CB:
-        data = "d:ok:1:1"
-        from_user = S(id=1)
-        message = None
-
-        async def answer(self):
-            raise RuntimeError("query is too old")
-    run(bot_tg.on_cb(CB()))
-    assert seen == ["ok"]

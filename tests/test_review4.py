@@ -5,7 +5,6 @@ import io
 import logging
 import os
 import resource
-import signal
 import subprocess
 import sys
 import time
@@ -40,37 +39,6 @@ def test_alert_and_error_texts_never_contain_token(tg):
     run(core.alert_staff(tg, f"⚠️ сбой {TOKEN}"))
 
 
-def test_telegram_download_error_does_not_leak_token_to_approvers():
-    import aiohttp
-    import tg as tgmod
-    from yarl import URL
-    t = tgmod.Telegram("123456:ABCDEF", "-1", ["1"], ["9"])
-    core.ADAPTERS["tg"] = t
-    sent = []
-    url = URL(f"http://127.0.0.1/file/bot{TOKEN}/photos/f.jpg")
-
-    class Bot:
-        async def download(self, file):
-            info = aiohttp.RequestInfo(url=url, method="GET", headers=None, real_url=url)
-            raise aiohttp.ClientResponseError(info, (), status=404, message="Not Found")
-
-        async def send_message(self, chat, text, **kw):
-            sent.append(text)
-    t.bot = Bot()
-
-    class Msg:
-        chat = S(id=5)
-        message_id = 7
-        from_user = S(id=9, full_name="Иван")
-        caption = "Заменили масло и фильтры"
-        media_group_id = None
-
-        async def answer(self, text, **kw):
-            sent.append(text)
-    run(t._handle_image(Msg(), S(file_size=100)))
-    assert sent and all("SECRET_TOKEN" not in x and TOKEN not in x for x in sent)
-
-
 def test_log_formatter_redacts_message_and_traceback():
     fmt = core.RedactingFormatter("%(message)s")
     try:
@@ -79,58 +47,6 @@ def test_log_formatter_redacts_message_and_traceback():
         rec = logging.LogRecord("x", logging.ERROR, __file__, 1, "ошибка %s", (TOKEN,), sys.exc_info())
     out = fmt.format(rec)
     assert "SECRET_TOKEN" not in out and "Traceback" in out  # трассировка осталась, секрета в ней нет
-
-
-# ---------- 2. остановка по SIGTERM ----------
-def test_sigterm_stops_telegram_polling_and_process_exits_cleanly():
-    from aiohttp import web
-    from aiogram import Bot
-    from aiogram.client.session.aiohttp import AiohttpSession
-    from aiogram.client.telegram import TelegramAPIServer
-    import main
-    import tg as tgmod
-    token = "123456:ABCdefghijklmnopqrstuvwxyz0123456789"
-
-    async def handler(req):
-        m = req.match_info["m"]
-        if m == "getMe":
-            return web.json_response({"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "b", "username": "b"}})
-        if m == "getUpdates":
-            await REAL_SLEEP(0.2)
-            return web.json_response({"ok": True, "result": []})
-        return web.json_response({"ok": True, "result": True})
-
-    async def scenario():
-        app = web.Application()
-        app.router.add_post("/bot{t}/{m}", handler)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
-        api = TelegramAPIServer(base=f"http://127.0.0.1:{port}/bot{{token}}/{{method}}",
-                                file=f"http://127.0.0.1:{port}/file/bot{{token}}/{{path}}")
-        t = tgmod.Telegram(token, "@c", ["1"], [], [])
-        t.bot = Bot(token, session=AiohttpSession(api=api))
-        core.ADAPTERS["tg"] = t
-        ran_to_end = []
-        orig = t.run
-
-        async def run2():
-            await orig()
-            ran_to_end.append(1)  # если polling вернулся сам (как делал aiogram по SIGTERM), это ошибка
-        t.run = run2
-        asyncio.get_running_loop().call_later(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM))
-        started = time.time()
-        try:
-            with pytest.raises(SystemExit) as e:
-                await asyncio.wait_for(main.serve([t]), 10)
-            return e.value.code, time.time() - started, ran_to_end
-        finally:
-            await t.bot.session.close()
-            await runner.cleanup()
-    code, took, ran_to_end = run(scenario())
-    assert code == 0 and took < 5 and not ran_to_end
 
 
 # ---------- 3. /status не становится комментарием ----------
@@ -205,27 +121,6 @@ def test_hard_cancel_of_submit_leaves_no_orphan_file(tg, png, monkeypatch):
             await outer
     run(scenario())
     assert set(core.PHOTOS.iterdir()) == before
-
-
-def test_photos_during_shutdown_get_a_reply_not_silence(monkeypatch):
-    import tg as tgmod
-    t = tgmod.Telegram("123456:ABCDEF", "-1", ["1"], ["9"])
-    core.ADAPTERS["tg"] = t
-    monkeypatch.setattr(core, "SHUTTING_DOWN", True)
-
-    class Msg:
-        chat = S(id=5)
-        message_id = 7
-        from_user = S(id=9, full_name="Вася")
-        caption = "Заменили масло"
-        media_group_id = None
-        replies = []
-
-        async def answer(self, text, **kw):
-            self.replies.append(text)
-    m = Msg()
-    run(t._handle_image(m, S(file_size=10)))
-    assert m.replies and "перезапускается" in m.replies[0]
 
 
 def test_housekeeping_removes_only_real_orphans(tg, llm, png):

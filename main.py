@@ -96,32 +96,34 @@ async def main():
     if core.PROVIDER == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
         raise SystemExit("Не задан ANTHROPIC_API_KEY (LLM_PROVIDER=anthropic)")
     log.info("Нейросеть: %s / %s", core.PROVIDER, core.MODEL)
+    if not os.getenv("MAX_TOKEN"):
+        raise SystemExit("Для приёма и согласования нужен MAX_TOKEN")
     if os.getenv("TG_TOKEN"):
-        core.ADAPTERS["tg"] = Telegram(need("TG_TOKEN"), need("TG_CHANNEL"), ids("TG_APPROVERS"), ids("TG_EMPLOYEES"),
-                                     ids("TG_ADMINS"))
-        if ids("TG_ADMINS"):
-            log.info("TG_ADMINS задан: новые люди добавляются кнопками (заявки и приглашения)")
-        elif not ids("TG_EMPLOYEES"):
-            log.warning("TG_EMPLOYEES пуст: фото может прислать кто угодно (защищает только лимит фото в час)")
-    if os.getenv("MAX_TOKEN"):
-        core.ADAPTERS["max"] = Max(need("MAX_TOKEN"), need("MAX_CHANNEL"), ids("MAX_APPROVERS"), ids("MAX_EMPLOYEES"),
-                                    ids("MAX_ADMINS"))
-        if ids("MAX_ADMINS"):
-            log.info("MAX_ADMINS задан: новые люди добавляются кнопками (заявки)")
-        elif not ids("MAX_EMPLOYEES"):
-            log.warning("MAX_EMPLOYEES пуст: фото может прислать кто угодно (защищает только лимит фото в час)")
-    if not core.ADAPTERS:
-        raise SystemExit("Задайте TG_TOKEN и/или MAX_TOKEN в .env")
+        core.ADAPTERS["tg"] = Telegram(need("TG_TOKEN"), need("TG_CHANNEL"))
+    core.ADAPTERS["max"] = Max(need("MAX_TOKEN"), need("MAX_CHANNEL"), ids("MAX_APPROVERS"), ids("MAX_EMPLOYEES"),
+                                ids("MAX_ADMINS"))
+    if ids("MAX_ADMINS"):
+        log.info("MAX_ADMINS задан: новые люди добавляются кнопками (заявки)")
+    elif not ids("MAX_EMPLOYEES"):
+        log.warning("MAX_EMPLOYEES пуст: материалы может прислать кто угодно")
+    working = [core.ADAPTERS["max"]]
     ap = os.getenv("APPROVAL_PLATFORM")
     if ap and ap not in core.ADAPTERS:
         raise SystemExit(f"APPROVAL_PLATFORM={ap}, но этот мессенджер не настроен")
-    for a in core.ADAPTERS.values():
+    if ap and core.ADAPTERS[ap].publish_only:
+        raise SystemExit(f"APPROVAL_PLATFORM={ap}: этот мессенджер работает только на публикацию")
+    for a in working:
         if not (core.ADAPTERS[ap] if ap else a).approvers:
-            raise SystemExit("Не заданы согласующие (TG_APPROVERS / MAX_APPROVERS)")
+            raise SystemExit("Не заданы согласующие (MAX_APPROVERS / MAX_ADMINS)")
     core.startup()
     await core.announce_start()
     await ops.announce_update_result()
-    await serve([*core.ADAPTERS.values(), core.Reminder()])
+    try:
+        await serve([*working, core.Reminder()])
+    finally:
+        await core.ADAPTERS["max"].http.aclose()
+        if "tg" in core.ADAPTERS:
+            await core.ADAPTERS["tg"].bot.session.close()
 
 
 if __name__ == "__main__":

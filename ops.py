@@ -220,7 +220,7 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
             continue
         try:
             kw = {"silent": True} if mode == "silent" else {}
-            await ad.send_for_approval(r["uid"], d["id"], d["photo"], d["post"], **kw)
+            await ad.send_for_approval(r["uid"], d["id"], d["photo"], d["post"], **kw, **core.media_kw(d))
         except Exception:
             log.warning("не удалось доставить отложенный черновик %s человеку %s", r["did"], r["uid"], exc_info=True)
             enqueue(ad, r["uid"], d["id"])  # вернём в очередь: попробуем в следующий круг

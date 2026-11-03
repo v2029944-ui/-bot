@@ -7,7 +7,6 @@ import pytest
 import core
 import main
 import max_
-import tg as tgmod
 from conftest import FakeAdapter, draft_id, run
 
 S = types.SimpleNamespace
@@ -22,44 +21,6 @@ def test_caption_ok_rules(monkeypatch):
     monkeypatch.setenv("REQUIRE_CAPTION", "1")
     monkeypatch.setenv("MIN_CAPTION_CHARS", "3")
     assert core.caption_ok("ТО-2")
-
-
-class Msg:
-    chat = S(id=5)
-    message_id = 7
-    from_user = S(id=9, full_name="Вася")
-
-    def __init__(self, caption=None, group=None):
-        self.caption, self.media_group_id, self.replies = caption, group, []
-
-    async def answer(self, text, **kw):
-        self.replies.append(text)
-
-
-@pytest.fixture
-def bot_tg(monkeypatch):
-    t = tgmod.Telegram("123456:ABCDEF", "-1", ["1"], ["9"])
-    core.ADAPTERS["tg"] = t
-    called = []
-
-    async def fake_submit(*a, **k):
-        called.append(a)
-        return 1
-    monkeypatch.setattr(core, "submit", fake_submit)
-    t.called = called
-    return t
-
-
-def test_photo_without_caption_gets_the_only_reply_in_quiet_mode(bot_tg):
-    m = Msg(caption=None)
-    run(bot_tg._handle_image(m, object()))
-    assert m.replies == [core.CAPTION_ASK] and bot_tg.called == []
-
-
-def test_album_part_without_caption_is_skipped_silently(bot_tg):
-    m = Msg(caption=None, group="g1")
-    run(bot_tg._handle_image(m, object()))
-    assert m.replies == [] and bot_tg.called == []
 
 
 def test_max_photo_without_caption_asks_for_it(monkeypatch):
@@ -135,9 +96,8 @@ def test_only_approver_can_edit(tg, llm, png):
     assert "нет прав" in run(core.on_action(tg, "99", "edit", did, 1))[1]
 
 
-def test_buttons_include_edit_in_both_messengers(tg, llm, png):
+def test_max_buttons_include_edit(tg, llm, png):
     import inspect
-    assert "✍️ Править самому" in inspect.getsource(tgmod.Telegram.send_for_approval)
     assert "✍️ Править самому" in inspect.getsource(max_.Max.send_for_approval)
 
 

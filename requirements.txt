@@ -3,6 +3,7 @@
 aiogram==3.31.0
 anthropic==2.3.0
 httpx==0.28.1
+imageio-ffmpeg==0.8.0  # ffmpeg для видео: кадры для нейросети и сведения о ролике
 pillow==12.1.1
 pillow-heif==1.8.1
 python-dotenv==1.2.2

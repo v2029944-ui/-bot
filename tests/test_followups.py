@@ -6,7 +6,7 @@ import pytest
 
 import core
 import max_
-from conftest import FakeAdapter, draft_id, run
+from conftest import draft_id, run
 
 S = types.SimpleNamespace
 
@@ -132,8 +132,22 @@ def test_max_photo_with_caption_goes_to_submit(mx_bot, monkeypatch):
         async def __aexit__(self, *a):
             pass
 
-        async def get(self, url):
-            return S(content=b"IMG", raise_for_status=lambda: None)
+        def stream(self, method, url):  # MAX-адаптер скачивает вложение потоком
+            class Resp:
+                headers = {}
+
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *a):
+                    pass
+
+                def raise_for_status(self_inner):
+                    pass
+
+                async def aiter_bytes(self_inner):
+                    yield b"IMG"
+            return Resp()
     monkeypatch.setattr(max_.httpx, "AsyncClient", Client)
     msg = {"recipient": {"chat_type": "dialog"}, "sender": {"user_id": 9, "name": "Вася"},
            "body": {"text": "Заменили масло и фильтры", "attachments": [{"type": "image", "payload": {"url": "http://x"}}]}}

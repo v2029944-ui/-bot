@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import httpx
 
@@ -43,31 +44,52 @@ class Max(core.Adapter):
     # --- отправка ---
     async def _upload_image(self, path) -> str:
         info = await self.call("POST", "/uploads", params={"type": "image"})
-        async with httpx.AsyncClient(timeout=120) as c, open(path, "rb") as f:
-            r = await c.post(info["url"], files={"data": ("photo.jpg", f, "image/jpeg")})
+        with open(path, "rb") as f:  # обычный файл: в «async with» его нельзя, поэтому отдельный «with»
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(info["url"], files={"data": ("photo.jpg", f, "image/jpeg")})
         r.raise_for_status()
         return next(iter(r.json()["photos"].values()))["token"]
 
-    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False):
+    async def _upload_video(self, path) -> str:
+        """Для видео MAX отдаёт токен уже в ответе на POST /uploads (по документации; с реальным токеном не проверено)."""
+        info = await self.call("POST", "/uploads", params={"type": "video"})
+        with open(path, "rb") as f:
+            async with httpx.AsyncClient(timeout=600) as c:
+                r = await c.post(info["url"], files={"data": (os.path.basename(path), f, "video/mp4")})
+        r.raise_for_status()
+        token = info.get("token")
+        if not token:  # на случай, если токен придёт в ответе на загрузку файла
+            try:
+                token = (r.json() or {}).get("token")
+            except ValueError:
+                token = None
+        if not token:
+            raise RuntimeError("MAX не вернул токен загруженного видео")
+        return token
+
+    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
         attachments = []
-        if photo:
+        if video:  # само видео; картинка-превью из кадров здесь не нужна
+            attachments.append({"type": "video", "payload": {"token": await self._upload_video(video)}})
+        elif photo:
             attachments.append({"type": "image", "payload": {"token": await self._upload_image(photo)}})
         if buttons:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
         body = {"text": post, "attachments": attachments}
         if silent:
             body["notify"] = False  # без звука (по документации MAX; с реальным токеном не проверено)
-        for i in range(6):  # MAX иногда отвечает "attachment.not.ready", пока картинка обрабатывается
+        tries, pause = (30, 2.0) if video else (6, 1.5)  # видео MAX обрабатывает дольше картинки
+        for i in range(tries):  # MAX отвечает "attachment.not.ready", пока вложение обрабатывается
             try:
                 return await self.call("POST", "/messages", params=target, json=body)
             except httpx.HTTPStatusError as e:
-                if "not.ready" in e.response.text and i < 5:
-                    await asyncio.sleep(1.5)
+                if "not.ready" in e.response.text and i < tries - 1:
+                    await asyncio.sleep(pause)
                     continue
                 raise
 
-    async def send_for_approval(self, approver, did, photo, post, silent=False):
+    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None):
         d = core.get(did)
         if not d:  # черновик успели удалить — не роняем рассылку остальным
             log.warning("черновик %s не найден, отправка согласующему %s пропущена", did, approver)
@@ -77,14 +99,14 @@ class Max(core.Adapter):
         buttons = [[btn("✅ Опубликовать", "ok")],
                    [btn("🔁 Заново", "redo"), btn("✏️ С комментарием", "redoc")],
                    [btn("✍️ Править самому", "edit"), btn("🗑 Удалить", "del")]]
-        await self._send({"user_id": approver}, post, photo, buttons, silent=silent)
+        await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video)
 
-    async def publish(self, photo, post):
+    async def publish(self, photo, post, video=None):
         if str(self.channel).startswith("user:"):
             target = {"user_id": self.channel.split(":", 1)[1]}  # в личку
         else:
             target = {"chat_id": self.channel}  # группа или канал
-        await self._send(target, post, photo)
+        await self._send(target, post, photo, video=video)
 
     async def notify(self, user_id, text):
         await self._send({"user_id": user_id}, text)
@@ -144,7 +166,7 @@ class Max(core.Adapter):
         except Exception:
             log.exception("handle failed")
 
-    HELLO = ("Привет! Пришлите фото вашей работы с кратким описанием в подписи — "
+    HELLO = ("Привет! Пришлите фото или короткое видео вашей работы с кратким описанием в подписи — "
              "я подготовлю пост и отправлю его на согласование.")
 
     async def _stranger(self, uid, name, username=None) -> bool:
@@ -166,17 +188,19 @@ class Max(core.Adapter):
         if await self._stranger(uid, sender.get("name") or sender.get("first_name"), sender.get("username")):
             return
         body = m.get("body", {})
-        images = [a for a in body.get("attachments") or [] if a.get("type") == "image"]
-        if not images:
+        atts = body.get("attachments") or []
+        videos = [a for a in atts if a.get("type") == "video"]
+        images = [a for a in atts if a.get("type") == "image"]
+        if not images and not videos:
             if body.get("text"):
                 if await core.on_text(self, uid, body["text"]):
                     return
                 if str(uid) in self.approvers:
                     return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
-            return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото с описанием в подписи 📷")
+            return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото или видео с описанием в подписи 📷")
         name = sender.get("name") or sender.get("first_name") or str(uid)
         if core.SHUTTING_DOWN:
-            return await self.notify(uid, "🔄 Бот перезапускается. Пришлите фото через минуту.")
+            return await self.notify(uid, "🔄 Бот перезапускается. Пришлите материал через минуту.")
         if ops.is_paused():
             return await self.notify(uid, ops.PAUSED_MSG)
         if not core.caption_ok(body.get("text")):  # единственное, что отвечаем сотруднику в тихом режиме
@@ -184,28 +208,64 @@ class Max(core.Adapter):
         if not quiet:
             await self.notify(uid, "Принято, готовлю пост…")
         try:
-            async with httpx.AsyncClient(timeout=60) as c:
-                r = await c.get(images[0]["payload"]["url"])
-                r.raise_for_status()
-            await core.submit(self, str(uid), name, body.get("text") or "", r.content)
+            if videos:  # видео важнее картинки-обложки, если пришли оба вложения
+                data = await self._download(videos[0], core.MAX_VIDEO_BYTES, "video")
+                await core.submit(self, str(uid), name, body.get("text") or "", data, kind="video", filename="video.mp4")
+            else:
+                data = await self._download(images[0], core.MAX_PHOTO_BYTES, "image")
+                await core.submit(self, str(uid), name, body.get("text") or "", data)
             if not quiet:
                 await self.notify(uid, "Пост отправлен на согласование ✅")
             elif core.confirm_mode() != "off":  # в MAX вместо реакции короткое сообщение
                 await self.notify(uid, "✅ Принято")
         except core.RateLimited:
-            log.warning("лимит фото: %s", uid)
+            log.warning("лимит материалов: %s", uid)
             if not quiet:
-                await self.notify(uid, "Слишком много фото за час. Попробуйте позже.")
+                await self.notify(uid, "Слишком много материалов за час. Попробуйте позже.")
         except core.BadImage as e:  # файл не картинка: согласующих не тревожим
-            log.info("плохое фото от %s: %s", uid, e)
+            log.info("неподходящий материал от %s: %s", uid, e)
             if not quiet:
-                await self.notify(uid, f"⚠️ {e}. Пришлите обычное фото (JPEG/PNG), а не файл HEIC.")
+                await self.notify(uid, f"⚠️ {core.err(e)}. " + ("Пришлите короткое видео в обычном формате (MP4)."
+                                  if videos else "Пришлите обычное фото (JPEG/PNG), а не файл HEIC."))
         except Exception as e:
             log.exception("submit failed")
             if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
-                await core.alert(self, f"⚠️ Не удалось обработать фото от {name}: {core.err(e)}")
+                await core.alert(self, f"⚠️ Не удалось обработать материал от {name}: {core.err(e)}")
             else:
-                await self.notify(uid, "⚠️ Не получилось обработать фото. Попробуйте ещё раз позже.")
+                await self.notify(uid, "⚠️ Не получилось обработать материал. Попробуйте ещё раз позже.")
+
+    async def _download(self, att: dict, limit: int, what: str) -> bytes:
+        """Скачивает вложение по ссылке из сообщения, не читая больше limit байт (защита памяти от огромных файлов)."""
+        payload = att.get("payload") or {}
+        url = payload.get("url")
+        if what == "video":
+            # payload.url у видео не является прямой ссылкой на файл.
+            # Официальный getVideoAttachmentDetails: GET /videos/{videoToken}.
+            token = payload.get("token")
+            if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+                raise RuntimeError("MAX не передал корректный токен видео")
+            url = None
+            for attempt in range(6):
+                details = await self.call("GET", f"/videos/{token}")
+                urls = details.get("urls") or {}
+                url = next((urls[k] for k in ("mp4_1080", "mp4_720", "mp4_480", "mp4_360", "mp4_240", "mp4_144")
+                            if urls.get(k)), None)
+                if url:
+                    break
+                if attempt < 5:
+                    await asyncio.sleep(1.5)
+        if not url:
+            raise RuntimeError(f"MAX не передал ссылку для скачивания {what}")
+        async with httpx.AsyncClient(timeout=300) as c, c.stream("GET", url) as r:
+            r.raise_for_status()
+            if int(r.headers.get("content-length") or 0) > limit:
+                raise core.BadImage(f"Файл больше {limit // 1024 // 1024} МБ")
+            buf = bytearray()
+            async for chunk in r.aiter_bytes():
+                buf += chunk
+                if len(buf) > limit:
+                    raise core.BadImage(f"Файл больше {limit // 1024 // 1024} МБ")
+        return bytes(buf)
 
     async def on_callback(self, cb: dict):
         uid = cb["user"]["user_id"]
