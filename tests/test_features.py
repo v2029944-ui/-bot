@@ -96,9 +96,23 @@ def test_only_approver_can_edit(tg, llm, png):
     assert "нет прав" in run(core.on_action(tg, "99", "edit", did, 1))[1]
 
 
-def test_max_buttons_include_edit(tg, llm, png):
-    import inspect
-    assert "✍️ Править самому" in inspect.getsource(max_.Max.send_for_approval)
+def test_max_approval_has_three_main_buttons(tg, llm, png, monkeypatch):
+    did = new_draft(tg, llm, png)
+    sent = []
+
+    async def scenario():
+        adapter = max_.Max("token", "-1", ["1"], [])
+
+        async def send(target, post, photo, buttons, **kwargs):
+            sent.extend(button for row in buttons for button in row)
+
+        monkeypatch.setattr(adapter, "_send", send)
+        await adapter.send_for_approval("1", did, core.get(did)["photo"], "Текст")
+        await adapter.http.aclose()
+
+    run(scenario())
+    assert [b["text"] for b in sent] == ["❌ Отклонить", "✅ Опубликовать", "✏️ Изменить"]
+    assert [b["payload"] for b in sent] == [f"d:{a}:{did}:1" for a in ("del", "ok", "change")]
 
 
 # ---------- напоминания ----------

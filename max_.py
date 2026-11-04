@@ -100,10 +100,8 @@ class Max(core.Adapter):
             log.warning("черновик %s не найден, отправка согласующему %s пропущена", did, approver)
             return
         n = d["attempts"]
-        btn = lambda t, a: {"type": "callback", "text": t, "payload": f"d:{a}:{did}:{n}"}
-        buttons = [[btn("✅ Опубликовать", "ok")],
-                   [btn("🔁 Заново", "redo"), btn("✏️ С комментарием", "redoc")],
-                   [btn("✍️ Править самому", "edit"), btn("🗑 Удалить", "del")]]
+        buttons = [[{"type": "callback", "text": label, "payload": payload}
+                    for label, payload in row] for row in core.approval_rows(did, n)]
         await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)
 
     async def publish(self, photo, post, video=None, media=None):
