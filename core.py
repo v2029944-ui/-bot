@@ -196,7 +196,7 @@ async def announce_start():
         return
     n = db.execute("SELECT COUNT(*) FROM drafts WHERE status='pending'").fetchone()[0]
     text = ("🟢 Бот запущен." + (f" Ждут согласования: {n}." if n else "")
-            + (f"\nЗакрыто неразобранных черновиков старше {env('DRAFT_TTL_DAYS', '30')} дн.: {LAST_EXPIRED}."
+            + (f"\nЗакрыто неразобранных черновиков старше {env('DRAFT_TTL_DAYS', '7')} дн.: {LAST_EXPIRED}."
                if LAST_EXPIRED else ""))
     for a in ADAPTERS.values():
         for uid in staff(a):
@@ -355,10 +355,10 @@ LAST_EXPIRED = 0
 
 def housekeeping() -> int:
     """Уборка: закрываем черновики без решения старше DRAFT_TTL_DAYS (статус expired, файлы удаляем),
-    стираем файлы старых опубликованных/удалённых постов и файлы-сироты (которых нет ни в одном черновике).
+    стираем оставшиеся файлы опубликованных/удалённых/просроченных постов и файлы-сироты (которых нет ни в одном черновике).
     Вызывается при старте и периодически (HOUSEKEEPING_SEC). Возвращает число закрытых черновиков."""
     expired = 0
-    ttl = int(env("DRAFT_TTL_DAYS", "30"))  # 0 — не закрывать
+    ttl = int(env("DRAFT_TTL_DAYS", "7"))  # 0 — не закрывать
     if ttl > 0:
         for r in db.execute("SELECT * FROM drafts WHERE status='pending' AND "
                             "COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
@@ -369,8 +369,7 @@ def housekeeping() -> int:
         db.commit()
         if expired:
             log.warning("Закрыто черновиков без решения (старше %s дн.): %s", ttl, expired)
-    for r in db.execute("SELECT * FROM drafts WHERE status IN ('published','deleted') AND created < ?",
-                        (time.time() - 30 * 86400,)).fetchall():
+    for r in db.execute("SELECT * FROM drafts WHERE status IN ('published','deleted','expired')").fetchall():
         for path in draft_files(dict(r)):
             _unlink(path)
     known = {p for r in db.execute("SELECT * FROM drafts") for p in draft_files(dict(r))}
@@ -1073,6 +1072,8 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         _set(did, published_to=_dump_marks(marks))
 
     _set(did, status="published")
+    for path in draft_files(d):
+        _unlink(path)
     await _safe_notify(ADAPTERS.get(d["platform"]), d["author_id"], "✅ Ваш пост опубликован. Спасибо!")
     return True, "✅ Опубликовано."
 
