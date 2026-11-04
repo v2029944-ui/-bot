@@ -618,6 +618,8 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
     except Exception as e:
         LLM_STATE.update(err=time.time(), msg=f"{type(e).__name__}: {err(e)}")
         raise
+    if len(out.encode("utf-16-le")) // 2 > min(MAX_POST_CHARS, 3900):
+        raise RuntimeError("Нейросеть вернула слишком длинный пост. Попробуйте ещё раз или сократите описание.")
     LLM_STATE["ok"] = time.time()
     return out
 
@@ -905,6 +907,7 @@ BUSY = "⏳ Пост уже обрабатывается, подождите п�
 # ---------- «Править самому» ----------
 WAITING_EDIT: dict[tuple[str, str], tuple[int, int]] = {}  # (платформа, id) -> (черновик, номер варианта)
 MAX_POST_CHARS = int(env("MAX_POST_CHARS", "3900"))
+PARTIAL_EDIT_BLOCKED = "⚠️ Публикация уже началась. Сначала завершите её в остальных каналах; менять текст этого поста нельзя."
 
 
 async def _apply_edit(adapter: Adapter, user_id, did: int, attempt: int, text: str) -> tuple[bool, str]:
@@ -913,11 +916,15 @@ async def _apply_edit(adapter: Adapter, user_id, did: int, attempt: int, text: s
     text = text.strip()
     if not text:
         return True, "Пустой текст. Пришлите исправленный пост или /cancel."
-    if len(text) > MAX_POST_CHARS:
-        return True, f"Слишком длинно ({len(text)} зн., максимум {MAX_POST_CHARS}). Сократите и пришлите снова."
+    length = len(text.encode("utf-16-le")) // 2
+    limit = min(MAX_POST_CHARS, 3900)
+    if length > limit:
+        return True, f"Слишком длинно ({length} ед. UTF-16, максимум {limit}). Сократите и пришлите снова."
     d = get(did)
     if not d or d["status"] != "pending" or d["attempts"] != attempt:
         return False, "Этот вариант уже изменён или обработан, правка не применена."
+    if _parse_marks(d.get("published_to")):
+        return False, PARTIAL_EDIT_BLOCKED
     if not _claim(did, "pending", "regenerating"):
         return False, BUSY
     _set(did, post=text, attempts=d["attempts"] + 1, status="pending")
@@ -947,6 +954,9 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
         return False, ""
     if d["attempts"] != attempt:
         return True, "Это устаревший вариант. Используйте последнее сообщение с постом."
+
+    if action in ("redo", "redoc", "edit") and _parse_marks(d.get("published_to")):
+        return False, PARTIAL_EDIT_BLOCKED
 
     author = ADAPTERS.get(d["platform"])
 
@@ -1021,6 +1031,9 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
     d = get(did)
     if not d:
         return True, "Черновик не найден."
+    if d["attempts"] != attempt:
+        _set(did, status="pending")
+        return False, "Это устаревший вариант. Используйте последнее сообщение с постом."
 
     if os.getenv("PUBLISH_TO_ALL") == "1":
         targets = [t for a in ADAPTERS.values() for t in [a]]  # все подключённые мессенджеры
@@ -1086,6 +1099,10 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
     d = get(did)
     if not d:
         return True, "Черновик не найден."
+    if d["status"] in ("published", "deleted", "expired"):
+        return True, "Этот пост уже обработан."
+    if _parse_marks(d.get("published_to")):
+        return False, PARTIAL_EDIT_BLOCKED
     if not _claim(did, "pending", "regenerating"):
         cur = get(did)
         if cur and cur["status"] in ("published", "deleted", "expired"):

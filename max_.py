@@ -30,6 +30,7 @@ class Max(core.Adapter):
         self.admins, self.approvers, self.allowed = [str(a) for a in admins], list(approvers), None
         core.refresh_people(self)  # + люди, добавленные кнопками (хранятся в базе)
         self._tasks: set[asyncio.Task] = set()
+        self._processing = asyncio.Semaphore(2)
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
@@ -129,13 +130,18 @@ class Max(core.Adapter):
                 if marker is not None:
                     params["marker"] = marker
                 data = await self.call("GET", "/updates", params=params)
+                # MAX считает события подтверждёнными при следующем запросе с marker.
+                # Не передаём его, пока весь пакет не обработан (включая скачивание).
+                batch = [asyncio.create_task(core._guard(self._handle_limited(u)))
+                         for u in data.get("updates", [])]
+                self._tasks.update(batch)
+                try:
+                    await asyncio.gather(*batch)
+                finally:
+                    self._tasks.difference_update(batch)
                 marker = data.get("marker", marker)
-                for u in data.get("updates", []):
-                    if os.getenv("MAX_LOG_UPDATES") == "1":  # для первой проверки с реальным MAX; в логе чужие данные
-                        log.info("MAX update: %s", json.dumps(u, ensure_ascii=False)[:1000])
-                    t = asyncio.create_task(self.handle(u))
-                    self._tasks.add(t)
-                    t.add_done_callback(self._tasks.discard)
+                if core.SHUTTING_DOWN:
+                    return
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 if code in (401, 403):  # неверный/просроченный токен: не долбим API каждые 3 секунды
@@ -150,6 +156,12 @@ class Max(core.Adapter):
             except Exception:
                 log.exception("polling error")
                 await asyncio.sleep(3)
+
+    async def _handle_limited(self, update):
+        async with self._processing:
+            if os.getenv("MAX_LOG_UPDATES") == "1":
+                log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
+            await self.handle(update)
 
     async def handle(self, u: dict):
         try:
@@ -287,11 +299,14 @@ class Max(core.Adapter):
                             json={"notification": "Работаю…"})
         except Exception:  # ответ на нажатие не критичен (например, он устарел)
             log.warning("callback answer failed", exc_info=True)
+        payload = cb.get("payload")
+        if not isinstance(payload, str):
+            return  # payload не обязателен в официальной схеме Callback
         try:
-            if cb["payload"].startswith("m:"):  # кнопки меню правил
-                text, rows = await core.on_menu(self, uid, cb["payload"])
+            if payload.startswith("m:"):  # кнопки меню правил
+                text, rows = await core.on_menu(self, uid, payload)
                 return await self.send_menu(uid, text, rows)
-            _, action, did, attempt = cb["payload"].split(":")
+            _, action, did, attempt = payload.split(":")
             _, text = await core.on_action(self, uid, action, int(did), int(attempt))
         except Exception as e:
             log.exception("callback failed")
