@@ -42,8 +42,10 @@ class FakeAdapter(core.Adapter):
     def not_sent(self, e):
         return isinstance(e, self.sure)
 
-    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None):
+    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
         self.out.append(("approval", approver, did, post))
+        if media:
+            self.out.append(("approval_media", approver, did, media))
         if video:
             self.out.append(("approval_video", approver, did, video))
         if silent:
@@ -54,10 +56,12 @@ class FakeAdapter(core.Adapter):
         if silent:
             self.out.append(("silent", str(user_id), text))
 
-    async def publish(self, photo, post, video=None):
+    async def publish(self, photo, post, video=None, media=None):
         if self.fail:
             raise self.fail.pop(0)
         self.out.append(("publish", post))
+        if media:
+            self.out.append(("publish_media", media))
         if video:
             self.out.append(("publish_video", video))
 

@@ -2,7 +2,7 @@
 from aiogram import Bot
 from aiogram.exceptions import (TelegramBadRequest, TelegramEntityTooLarge, TelegramForbiddenError,
                                 TelegramNotFound, TelegramRetryAfter, TelegramUnauthorizedError)
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 
 import core
 
@@ -43,10 +43,25 @@ class Telegram(core.Adapter):
                    TelegramUnauthorizedError, TelegramRetryAfter, TelegramEntityTooLarge)
         return isinstance(e, refused) and not getattr(e, "partial", False)
 
-    async def publish(self, photo, post, video=None):
+    async def publish(self, photo, post, video=None, media=None):
         ch = self.channel
         if ch.startswith("user:"):       # пост в личку конкретному человеку
             ch = int(ch.split(":", 1)[1])
         elif ch.lstrip("-").isdigit():   # id пользователя, группы или канала
             ch = int(ch)
-        await self._send(ch, photo, post, track=True, video=video)
+        if media:
+            group = []
+            short = _tg_len(post) <= CAPTION_LIMIT
+            for i, item in enumerate(media):
+                cls = InputMediaVideo if item["type"] == "video" else InputMediaPhoto
+                kw = {"supports_streaming": True} if item["type"] == "video" else {}
+                group.append(cls(media=FSInputFile(item["path"]), caption=post if i == 0 and short else None, **kw))
+            await self.bot.send_media_group(chat_id=ch, media=group)
+            if not short:
+                try:
+                    await self.bot.send_message(ch, post)
+                except Exception as e:
+                    e.partial = True
+                    raise
+        else:
+            await self._send(ch, photo, post, track=True, video=video)

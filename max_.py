@@ -67,10 +67,14 @@ class Max(core.Adapter):
             raise RuntimeError("MAX не вернул токен загруженного видео")
         return token
 
-    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None):
+    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
         attachments = []
-        if video:  # само видео; картинка-превью из кадров здесь не нужна
+        if media:
+            for item in media:
+                upload = self._upload_video if item["type"] == "video" else self._upload_image
+                attachments.append({"type": item["type"], "payload": {"token": await upload(item["path"])}})
+        elif video:  # само видео; картинка-превью из кадров здесь не нужна
             attachments.append({"type": "video", "payload": {"token": await self._upload_video(video)}})
         elif photo:
             attachments.append({"type": "image", "payload": {"token": await self._upload_image(photo)}})
@@ -79,7 +83,7 @@ class Max(core.Adapter):
         body = {"text": post, "attachments": attachments}
         if silent:
             body["notify"] = False  # без звука (по документации MAX; с реальным токеном не проверено)
-        tries, pause = (30, 2.0) if video else (6, 1.5)  # видео MAX обрабатывает дольше картинки
+        tries, pause = (30, 2.0) if video or any(i["type"] == "video" for i in (media or [])) else (6, 1.5)  # видео MAX обрабатывает дольше картинки
         for i in range(tries):  # MAX отвечает "attachment.not.ready", пока вложение обрабатывается
             try:
                 return await self.call("POST", "/messages", params=target, json=body)
@@ -89,7 +93,7 @@ class Max(core.Adapter):
                     continue
                 raise
 
-    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None):
+    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
         d = core.get(did)
         if not d:  # черновик успели удалить — не роняем рассылку остальным
             log.warning("черновик %s не найден, отправка согласующему %s пропущена", did, approver)
@@ -99,14 +103,14 @@ class Max(core.Adapter):
         buttons = [[btn("✅ Опубликовать", "ok")],
                    [btn("🔁 Заново", "redo"), btn("✏️ С комментарием", "redoc")],
                    [btn("✍️ Править самому", "edit"), btn("🗑 Удалить", "del")]]
-        await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video)
+        await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)
 
-    async def publish(self, photo, post, video=None):
+    async def publish(self, photo, post, video=None, media=None):
         if str(self.channel).startswith("user:"):
             target = {"user_id": self.channel.split(":", 1)[1]}  # в личку
         else:
             target = {"chat_id": self.channel}  # группа или канал
-        await self._send(target, post, photo, video=video)
+        await self._send(target, post, photo, video=video, media=media)
 
     async def notify(self, user_id, text):
         await self._send({"user_id": user_id}, text)
@@ -198,6 +202,9 @@ class Max(core.Adapter):
                 if str(uid) in self.approvers:
                     return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
             return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото или видео с описанием в подписи 📷")
+        media_atts = [a for a in atts if a.get("type") in ("image", "video")]
+        if len(media_atts) > core.MAX_ALBUM_ITEMS:
+            return await self.notify(uid, f"В одном посте можно отправить до {core.MAX_ALBUM_ITEMS} фото и видео. Разделите материалы.")
         name = sender.get("name") or sender.get("first_name") or str(uid)
         if core.SHUTTING_DOWN:
             return await self.notify(uid, "🔄 Бот перезапускается. Пришлите материал через минуту.")
@@ -208,7 +215,15 @@ class Max(core.Adapter):
         if not quiet:
             await self.notify(uid, "Принято, готовлю пост…")
         try:
-            if videos:  # видео важнее картинки-обложки, если пришли оба вложения
+            if len(media_atts) > 1:
+                items, total = [], 0
+                for att in media_atts:
+                    limit = core.MAX_VIDEO_BYTES if att["type"] == "video" else core.MAX_PHOTO_BYTES
+                    data = await self._download(att, min(limit, core.MAX_ALBUM_BYTES - total), att["type"])
+                    total += len(data)
+                    items.append({"type": att["type"], "data": data})
+                await core.submit_album(self, str(uid), name, body.get("text") or "", items)
+            elif videos:
                 data = await self._download(videos[0], core.MAX_VIDEO_BYTES, "video")
                 await core.submit(self, str(uid), name, body.get("text") or "", data, kind="video", filename="video.mp4")
             else:
@@ -224,9 +239,7 @@ class Max(core.Adapter):
                 await self.notify(uid, "Слишком много материалов за час. Попробуйте позже.")
         except core.BadImage as e:  # файл не картинка: согласующих не тревожим
             log.info("неподходящий материал от %s: %s", uid, e)
-            if not quiet:
-                await self.notify(uid, f"⚠️ {core.err(e)}. " + ("Пришлите короткое видео в обычном формате (MP4)."
-                                  if videos else "Пришлите обычное фото (JPEG/PNG), а не файл HEIC."))
+            await self.notify(uid, f"⚠️ {core.err(e)}. Материал не принят. Исправьте файл и отправьте весь набор заново.")
         except Exception as e:
             log.exception("submit failed")
             if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
