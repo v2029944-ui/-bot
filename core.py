@@ -87,11 +87,22 @@ try:  # миграция старых баз: в какие каналы пос�
 except sqlite3.OperationalError:
     pass
 for _col in ("last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
-             "post_length TEXT DEFAULT ''"):
+             "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
+             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'"):
     try:
         db.execute(f"ALTER TABLE drafts ADD COLUMN {_col}")
     except sqlite3.OperationalError:
         pass
+db.execute("CREATE UNIQUE INDEX IF NOT EXISTS drafts_source_key ON drafts(source_key)")
+db.execute("""CREATE TABLE IF NOT EXISTS max_inbox (
+    event_key TEXT PRIMARY KEY, payload TEXT, state TEXT DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0, next_try REAL DEFAULT 0, created REAL,
+    error TEXT DEFAULT '')""")
+try:
+    db.execute("ALTER TABLE max_inbox ADD COLUMN rate_counted INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
+db.execute("CREATE INDEX IF NOT EXISTS max_inbox_work ON max_inbox(state,next_try,created)")
 db.commit()
 
 
@@ -298,6 +309,7 @@ async def reminder_loop():
         try:
             await ops.flush_deferred()  # придержанные черновики уходят, когда началось рабочее время
             await remind_once()
+            await warn_expiring_once()
             if time.time() - last_clean > int(env("HOUSEKEEPING_SEC", "21600")):  # раз в 6 часов
                 last_clean = time.time()
                 housekeeping()  # в потоке нельзя: соединение SQLite принадлежит потоку с event loop
@@ -313,6 +325,37 @@ class Reminder:
     async def run(self):
         asyncio.create_task(ops.probation_watch())  # после обновления: прожили 2 минуты — версия удачная
         await reminder_loop()
+
+
+async def warn_expiring_once(now=None):
+    now = time.time() if now is None else now
+    ttl = int(env("DRAFT_TTL_DAYS", "7")) * 86400
+    if ttl <= 0:
+        return 0
+    count = 0
+    for row in db.execute("SELECT * FROM drafts WHERE status='pending'").fetchall():
+        d = dict(row)
+        deadline = (d["last_sent"] or d["created"]) + ttl
+        if not now < deadline <= now + 86400 or d["expiry_warned"] == deadline:
+            continue
+        ad = _approval_adapter(d, None)
+        if not ad or not ad.approvers:
+            continue
+        sent = 0
+        for uid in ad.approvers:
+            try:
+                await ad.send_menu(uid, f"⏳ Пост №{d['id']} от {d['author_name'] or 'сотрудника'} "
+                                   f"будет удалён примерно через {_ago(deadline - now)}.\n"
+                                   "Проверьте материал до истечения срока хранения.",
+                                   [[("📨 Открыть пост", f"d:show:{d['id']}:{d['attempts']}")]],
+                                   silent=ops.delivery_for(ad, uid, now) != "normal")
+                sent += 1
+            except Exception:
+                log.warning("не удалось предупредить об удалении %s", d["id"], exc_info=True)
+        if sent == len(ad.approvers):
+            _set(d["id"], expiry_warned=deadline)
+            count += 1
+    return count
 
 
 # ---------- БД ----------
@@ -365,6 +408,7 @@ def housekeeping() -> int:
                             "COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
             for path in draft_files(dict(r)):
                 _unlink(path)
+            clear_source_cache(dict(r))
             db.execute("UPDATE drafts SET status='expired' WHERE id=?", (r["id"],))
             expired += 1
         db.commit()
@@ -373,6 +417,7 @@ def housekeeping() -> int:
     for r in db.execute("SELECT * FROM drafts WHERE status IN ('published','deleted','expired')").fetchall():
         for path in draft_files(dict(r)):
             _unlink(path)
+        clear_source_cache(dict(r))
     known = {p for r in db.execute("SELECT * FROM drafts") for p in draft_files(dict(r))}
     for folder in (PHOTOS, VIDEOS):
         for f in folder.glob("*"):  # файл моложе часа может принадлежать материалу, который сейчас обрабатывается
@@ -390,6 +435,12 @@ def _unlink(path):
         Path(path or "").unlink(missing_ok=True)
     except (OSError, IsADirectoryError):
         log.warning("не удалось удалить фото %s", path, exc_info=True)
+
+
+def clear_source_cache(d):
+    if d.get("source_key"):
+        import max_queue
+        max_queue.clear_cache(d["source_key"])
 
 
 def startup():
@@ -752,10 +803,14 @@ _HITS: dict[str, list[float]] = {}
 _RL_ALERT: dict[str, float] = {}
 
 
-async def _check_rate(adapter: Adapter, author_id: str, author_name: str):
+async def _check_rate(adapter: Adapter, author_id: str, author_name: str, source_key=None):
     """Защита бюджета: не больше RATE_LIMIT_PER_HOUR фото в час от сотрудника (согласующие без лимита)."""
     if str(author_id) in adapter.approvers:
         return
+    if source_key:
+        row = db.execute("SELECT rate_counted FROM max_inbox WHERE event_key=?", (source_key,)).fetchone()
+        if row and row[0]:
+            return  # повтор обработки одного материала не расходует лимит сотрудника
     limit = int(env("RATE_LIMIT_PER_HOUR", "20"))
     key, now = f"{adapter.name}:{author_id}", time.time()
     hits = [t for t in _HITS.get(key, []) if now - t < 3600]
@@ -766,6 +821,9 @@ async def _check_rate(adapter: Adapter, author_id: str, author_name: str):
             await alert(adapter, f"⚠️ {author_name} отправил больше {limit} фото за час. Новые фото игнорируются.")
         raise RateLimited(key)
     _HITS[key] = hits + [now]
+    if source_key:
+        db.execute("UPDATE max_inbox SET rate_counted=1 WHERE event_key=?", (source_key,))
+        db.commit()
 
 
 def _approval_adapter(d: dict, fallback: Adapter) -> Adapter:
@@ -803,11 +861,25 @@ async def _send_draft(d: dict, did: int, post: str, fallback: Adapter,
 
 
 async def submit(adapter: Adapter, author_id: str, author_name: str, text: str, photo_bytes: bytes,
-                 kind: str = "photo", filename: str = ""):
+                 kind: str = "photo", filename: str = "", source_key: str | None = None):
     """Сотрудник прислал фото + описание -> пост -> на согласование.
     Работа идёт в отдельной задаче под shield: при остановке бота main.serve дожидается её завершения
     (drain_inflight), а не обрывает на середине, когда фото уже принято, а черновика ещё нет."""
-    return await _guard(_submit(adapter, author_id, author_name, text, photo_bytes, kind, filename))
+    return await _guard(_submit(adapter, author_id, author_name, text, photo_bytes, kind, filename, source_key))
+
+
+async def resume_submission(adapter: Adapter, source_key: str | None):
+    if not source_key:
+        return None
+    row = db.execute("SELECT * FROM drafts WHERE source_key=?", (source_key,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    if d["status"] == "pending" and not d["last_sent"]:
+        sent, last = await _send_draft(d, d["id"], d["post"], adapter)
+        if not sent:
+            raise RuntimeError(f"Не удалось отправить сохранённый черновик: {err(last)}")
+    return d["id"]
 
 
 async def _guard(coro):
@@ -833,7 +905,9 @@ async def drain_inflight(timeout: float) -> int:
 
 
 async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str, photo_bytes: bytes,
-                  kind: str = "photo", filename: str = ""):
+                  kind: str = "photo", filename: str = "", source_key: str | None = None):
+    if (existing := await resume_submission(adapter, source_key)) is not None:
+        return existing
     if kind == "video":  # path — картинка из кадров (для нейросети и превью), vpath — само видео
         vpath, path = await asyncio.to_thread(save_video, photo_bytes, filename)
     else:
@@ -841,7 +915,7 @@ async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str,
     files = [path, vpath] if vpath else [path]
     rm = lambda: [Path(f).unlink(missing_ok=True) for f in files]
     try:
-        await _check_rate(adapter, author_id, author_name)  # лимит считаем только за валидные файлы
+        await _check_rate(adapter, author_id, author_name, source_key)  # лимит считаем только за валидные файлы
     except BaseException:
         rm()
         raise
@@ -851,13 +925,15 @@ async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str,
         rm()
         raise
     cur = db.execute(
-        "INSERT INTO drafts(platform,author_id,author_name,source_text,photo,video,post,created) VALUES(?,?,?,?,?,?,?,?)",
-        (adapter.name, author_id, author_name, text, path, vpath, post, time.time()))
+        "INSERT INTO drafts(platform,author_id,author_name,source_text,photo,video,post,created,source_key) VALUES(?,?,?,?,?,?,?,?,?)",
+        (adapter.name, author_id, author_name, text, path, vpath, post, time.time(), source_key))
     db.commit()
     did = cur.lastrowid
     d = get(did)
     sent, last = await _send_draft(d, did, post, adapter)
     if not sent:  # иначе черновик-сирота: в базе есть, никто не видел
+        if source_key:  # очередь повторит доставку уже готового черновика
+            raise RuntimeError(f"Не удалось отправить черновик согласующим: {err(last)}")
         db.execute("DELETE FROM drafts WHERE id=?", (did,))
         db.commit()
         rm()
@@ -865,15 +941,18 @@ async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str,
     return did
 
 
-async def submit_album(adapter: Adapter, author_id: str, author_name: str, text: str, items: list[dict]):
+async def submit_album(adapter: Adapter, author_id: str, author_name: str, text: str, items: list[dict],
+                       source_key: str | None = None):
     if not 2 <= len(items) <= MAX_ALBUM_ITEMS:
         raise BadImage(f"В одном посте должно быть от 2 до {MAX_ALBUM_ITEMS} вложений")
     if sum(len(item["data"]) for item in items) > MAX_ALBUM_BYTES:
         raise BadImage("Общий размер альбома больше 100 МиБ")
-    return await _guard(_submit_album(adapter, author_id, author_name, text, items))
+    return await _guard(_submit_album(adapter, author_id, author_name, text, items, source_key))
 
 
-async def _submit_album(adapter, author_id, author_name, text, items):
+async def _submit_album(adapter, author_id, author_name, text, items, source_key=None):
+    if (existing := await resume_submission(adapter, source_key)) is not None:
+        return existing
     media, files, did = [], set(), None
     try:
         for item in items:
@@ -887,17 +966,19 @@ async def _submit_album(adapter, author_id, author_name, text, items):
             media.append({"type": item["type"], "path": path, "preview": preview})
         if sum(Path(i["path"]).stat().st_size for i in media) > MAX_ALBUM_BYTES:
             raise BadImage("После обработки общий размер альбома больше 100 МиБ")
-        await _check_rate(adapter, author_id, author_name)  # один альбом — один пост
+        await _check_rate(adapter, author_id, author_name, source_key)  # один альбом — один пост
         preview = await asyncio.to_thread(album_preview, media)
         files.add(preview)
         post = await generate_post(preview, text, media=media)
         cur = db.execute(
-            "INSERT INTO drafts(platform,author_id,author_name,source_text,photo,media,post,created) VALUES(?,?,?,?,?,?,?,?)",
-            (adapter.name, author_id, author_name, text, preview, json.dumps(media), post, time.time()))
+            "INSERT INTO drafts(platform,author_id,author_name,source_text,photo,media,post,created,source_key) VALUES(?,?,?,?,?,?,?,?,?)",
+            (adapter.name, author_id, author_name, text, preview, json.dumps(media), post, time.time(), source_key))
         db.commit()
         did = cur.lastrowid
         sent, last = await _send_draft(get(did), did, post, adapter)
         if not sent:
+            if source_key:
+                raise RuntimeError(f"Не удалось отправить черновик согласующим: {err(last)}")
             db.execute("DELETE FROM drafts WHERE id=?", (did,))
             db.commit()
             did = None
@@ -916,6 +997,7 @@ BUSY = "⏳ Пост уже обрабатывается, подождите п�
 
 # ---------- «Править самому» ----------
 WAITING_EDIT: dict[tuple[str, str], tuple[int, int]] = {}  # (платформа, id) -> (черновик, номер варианта)
+WAITING_REJECT: dict[tuple[str, str], tuple[int, int]] = {}
 MAX_POST_CHARS = int(env("MAX_POST_CHARS", "3900"))
 PARTIAL_EDIT_BLOCKED = "⚠️ Публикация уже началась. Сначала завершите её в остальных каналах; менять текст этого поста нельзя."
 POST_LENGTHS = {
@@ -976,6 +1058,24 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
     if d["attempts"] != attempt:
         return True, "Это устаревший вариант. Используйте последнее сообщение с постом."
 
+    if action == "pubstatus":
+        text, rows = publication_view(d, adapter)
+        await adapter.send_menu(str(user_id), text, rows)
+        return False, ""
+
+    if action.startswith("seen_"):
+        target = action.removeprefix("seen_")
+        marks = _parse_marks(d.get("published_to"))
+        if marks.get(target) != "unknown":
+            return False, "Для этого канала подтверждение не требуется."
+        marks[target] = "done"
+        _set(did, published_to=_dump_marks(marks))
+        if all(marks.get(t.name) == "done" for t in publication_targets(d, adapter)):
+            await finish_publication(d)
+        text, rows = publication_view(get(did), adapter)
+        await adapter.send_menu(str(user_id), text, rows)
+        return False, ""
+
     if (action in ("redo", "redoc", "edit", "change", "length") or action.startswith("len_")) and _parse_marks(d.get("published_to")):
         return False, PARTIAL_EDIT_BLOCKED
 
@@ -985,6 +1085,7 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
         key = (adapter.name, str(user_id))
         WAITING.pop(key, None)
         WAITING_EDIT.pop(key, None)
+        WAITING_REJECT.pop(key, None)
         WAITING_RULE.discard(key)
         button = lambda label, act: (label, f"d:{act}:{did}:{attempt}")
         if action == "change":
@@ -1019,25 +1120,35 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
 
     if action == "del":  # сначала спрашиваем подтверждение, ничего не удаляя
         preview = d["post"][:100] + ("…" if len(d["post"]) > 100 else "")
-        rows = [[("❌ Да, отклонить", f"d:delyes:{did}:{attempt}"), ("↩️ Отмена", f"d:delno:{did}:{attempt}")]]
+        rows = [[("📷 Нужны другие фото", f"d:rejectphoto:{did}:{attempt}")],
+                [("📝 Нужно описание", f"d:rejecttext:{did}:{attempt}")],
+                [("✍️ Своя причина", f"d:rejectcustom:{did}:{attempt}")],
+                [("❌ Без причины", f"d:delyes:{did}:{attempt}"), ("↩️ Отмена", f"d:delno:{did}:{attempt}")]]
         await adapter.send_menu(str(user_id), f"Отклонить этот пост? Черновик и его файлы будут удалены без возможности восстановления.\n\n«{preview}»", rows)
         return False, ""
 
     if action == "delno":
+        WAITING_REJECT.pop((adapter.name, str(user_id)), None)
         return True, "↩️ Действие отменено. Пост остался на согласовании."
 
-    if action == "delyes":
-        if not _claim(did, "pending", "deleted"):
-            return False, BUSY
-        for path in draft_files(d):
-            _unlink(path)
-        await _safe_notify(author, d["author_id"], "Пост по вашему материалу не был опубликован.")
-        return True, "❌ Пост отклонён."
+    if action == "rejectcustom":
+        key = (adapter.name, str(user_id))
+        WAITING.pop(key, None)
+        WAITING_EDIT.pop(key, None)
+        WAITING_RULE.discard(key)
+        WAITING_REJECT[key] = (did, attempt)
+        return False, "Напишите причину отклонения (до 1000 знаков). Она будет отправлена сотруднику. Отмена: /cancel"
+
+    if action in ("delyes", "rejectphoto", "rejecttext"):
+        reason = {"rejectphoto": "Нужны другие фотографии. Пожалуйста, отправьте материал заново.",
+                  "rejecttext": "Добавьте описание выполненной работы и отправьте материал заново."}.get(action, "")
+        return await reject_post(adapter, user_id, did, attempt, reason)
 
     if action == "redo":
         return await _regenerate(adapter, user_id, did, attempt=attempt)
 
     if action == "redoc":
+        WAITING_REJECT.pop((adapter.name, str(user_id)), None)
         WAITING[(adapter.name, str(user_id))] = did
         WAITING_RULE.discard((adapter.name, str(user_id)))
         WAITING_EDIT.pop((adapter.name, str(user_id)), None)
@@ -1045,6 +1156,7 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
 
     if action == "edit":  # «Править самому»: следующее сообщение согласующего станет текстом поста
         key = (adapter.name, str(user_id))
+        WAITING_REJECT.pop(key, None)
         WAITING.pop(key, None)
         WAITING_RULE.discard(key)
         WAITING_EDIT[key] = (did, attempt)
@@ -1055,14 +1167,85 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
     return False, "Неизвестное действие."
 
 
+async def reject_post(adapter, user_id, did, attempt, reason):
+    if str(user_id) not in adapter.approvers:
+        return False, "⛔ У вас нет прав согласования."
+    d = get(did)
+    if not d or d["status"] != "pending" or d["attempts"] != attempt:
+        return False, "Этот вариант уже изменён или обработан."
+    if _parse_marks(d.get("published_to")):
+        return False, "Публикация уже началась. Завершите её или подтвердите результат в каналах; отклонение недоступно."
+    if not _claim(did, "pending", "deleted"):
+        return False, BUSY
+    _set(did, rejection_reason=reason)
+    WAITING_REJECT.pop((adapter.name, str(user_id)), None)
+    for path in draft_files(d):
+        _unlink(path)
+    clear_source_cache(d)
+    author = ADAPTERS.get(d["platform"])
+    text = f"❌ Материал «{d['source_text'][:100]}» отклонён." + (f"\nПричина: {reason}" if reason else "")
+    # Причина — необходимая обратная связь, даже при тихом режиме сотрудников.
+    try:
+        if author and not author.publish_only:
+            await author.notify(d["author_id"], text)
+    except Exception:
+        log.warning("причина отклонения не доставлена", exc_info=True)
+        return True, "❌ Пост отклонён. ⚠️ Причину не удалось доставить сотруднику; сообщите ему отдельно."
+    return True, "❌ Пост отклонён."
+
+
 async def _publish(adapter: Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
     return await _guard(_publish_safe(adapter, user_id, did, attempt, force))
+
+
+def publication_targets(d, adapter):
+    if os.getenv("PUBLISH_TO_ALL") == "1":
+        return list(ADAPTERS.values())
+    source = ADAPTERS.get(d["platform"])
+    targets = [source if source is not None and not source.publish_only else _approval_adapter(d, adapter)]
+    return [t for t in targets if t] + [a for a in ADAPTERS.values() if a.publish_only and a not in targets]
+
+
+def publication_view(d, adapter):
+    marks = _parse_marks(d.get("published_to"))
+    errors = json.loads(d.get("publish_errors") or "{}")
+    names = {"max": "MAX", "tg": "Telegram"}
+    lines = [f"Публикация поста №{d['id']}:"]
+    rows = []
+    for target in publication_targets(d, adapter):
+        name = names.get(target.name, target.name)
+        mark = marks.get(target.name)
+        status = "✅ опубликовано" if mark == "done" else "❓ результат неизвестен" if mark == "unknown" else "❌ ошибка" if target.name in errors else "⏳ не отправлено"
+        lines.append(f"{name} — {status}")
+        if mark != "done" and target.name in errors:
+            lines.append(errors[target.name][:180])
+        if mark == "unknown":
+            rows.append([(f"Проверил: пост есть в {name}", f"d:seen_{target.name}:{d['id']}:{d['attempts']}")])
+    if d["status"] == "pending":
+        rows.append([("🔁 Отправить в оставшиеся каналы", f"d:ok:{d['id']}:{d['attempts']}")])
+    return "\n".join(lines), rows
+
+
+async def finish_publication(d):
+    _set(d["id"], status="published")
+    for path in draft_files(d):
+        _unlink(path)
+    clear_source_cache(d)
+    await _safe_notify(ADAPTERS.get(d["platform"]), d["author_id"], "✅ Ваш пост опубликован. Спасибо!")
 
 
 async def _publish_safe(adapter: Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
     """Обёртка: непредвиденный сбой не должен оставить черновик навсегда в статусе «publishing»."""
     try:
-        return await _publish_inner(adapter, user_id, did, attempt, force)
+        result = await _publish_inner(adapter, user_id, did, attempt, force)
+        d = get(did)
+        if result[1] and d and (d.get("published_to") or d.get("publish_errors") != "{}"):
+            try:
+                text, rows = publication_view(d, adapter)
+                await adapter.send_menu(str(user_id), text, rows)
+            except Exception:
+                log.warning("не удалось отправить статус публикации", exc_info=True)
+        return result
     except Exception as e:
         log.exception("publish crashed")
         try:
@@ -1086,26 +1269,20 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         _set(did, status="pending")
         return False, "Это устаревший вариант. Используйте последнее сообщение с постом."
 
-    if os.getenv("PUBLISH_TO_ALL") == "1":
-        targets = [t for a in ADAPTERS.values() for t in [a]]  # все подключённые мессенджеры
-    else:
-        source = ADAPTERS.get(d["platform"])
-        targets = [source if source is not None and not source.publish_only else _approval_adapter(d, adapter)]
-        # Telegram в режиме «только публикация» получает каждый пост всегда
-        targets += [a for a in ADAPTERS.values() if a.publish_only and a not in targets]
+    targets = publication_targets(d, adapter)
 
     marks = _parse_marks(d.get("published_to"))
     todo = [t for t in targets if marks.get(t.name) != "done"]
     risky = [t.name for t in todo if marks.get(t.name) == "unknown"]
     if risky and not force:
         _set(did, status="pending")  # черновик снова рабочий: кнопки ниже
+        summary, rows = publication_view(get(did), adapter)
         await adapter.send_menu(
             str(user_id),
-            f"⚠️ Прошлая публикация в {', '.join(risky)} оборвалась: пост мог выйти.\n"
-            f"Проверьте канал. Если пост уже там — под сообщением с черновиком нажмите «🗑 Удалить».\n"
-            f"Если его там нет — опубликуйте ещё раз.",
+            summary + f"\n\n⚠️ Прошлая публикация в {', '.join(risky)} оборвалась: пост мог выйти.\n"
+            "Проверьте канал. Если пост уже там — подтвердите это кнопкой. Если его нет — разрешите повторную отправку.",
             [[("✅ Опубликовать ещё раз", f"d:okforce:{did}:{attempt}")],
-             [("↩️ Не публиковать (пост остаётся на согласовании)", f"d:delno:{did}:{attempt}")]])
+             *rows[:-1], [("↩️ Не публиковать (пост остаётся на согласовании)", f"d:delno:{did}:{attempt}")]])
         return False, ""
 
     for t in todo:
@@ -1116,6 +1293,9 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
             await t.publish(d["photo"], d["post"], **media_kw(d))
         except Exception as e:
             log.exception("publish failed")
+            errors = json.loads(get(did).get("publish_errors") or "{}")
+            errors[t.name] = err(e)[:180]
+            _set(did, publish_errors=json.dumps(errors, ensure_ascii=False))
             try:
                 sure = t.not_sent(e)  # сервис явно отклонил запрос: поста в канале точно нет
             except Exception:
@@ -1133,12 +1313,11 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
                     "Пост мог всё же выйти — проверьте канал, прежде чем нажимать ✅ снова.")
             return False, f"⚠️ Не удалось опубликовать в {t.name}: {err(e)}{part}\n{tail}"
         marks[t.name] = "done"
-        _set(did, published_to=_dump_marks(marks))
+        errors = json.loads(get(did).get("publish_errors") or "{}")
+        errors.pop(t.name, None)
+        _set(did, published_to=_dump_marks(marks), publish_errors=json.dumps(errors, ensure_ascii=False))
 
-    _set(did, status="published")
-    for path in draft_files(d):
-        _unlink(path)
-    await _safe_notify(ADAPTERS.get(d["platform"]), d["author_id"], "✅ Ваш пост опубликован. Спасибо!")
+    await finish_publication(d)
     return True, "✅ Опубликовано."
 
 
@@ -1166,6 +1345,7 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
     key = (adapter.name, str(user_id))
     WAITING.pop(key, None)
     WAITING_EDIT.pop(key, None)
+    WAITING_REJECT.pop(key, None)
     WAITING_RULE.discard(key)
     try:
         length = (d.get("post_length") or "") if post_length is None else post_length
@@ -1406,9 +1586,11 @@ async def redeem_invite(adapter: Adapter, uid, name: str, token: str) -> str | N
 
 def menu_for(adapter: Adapter, uid) -> list:
     rows = [list(r) for r in MENU]
+    rows.append([("📋 На проверке", "m:pending")])
     if is_admin(adapter, uid):
         rows.append([("👥 Люди", "m:people"), ("🔗 Пригласить", "m:inv"), ("📊 Статус", "m:status")])
         rows.append([("⏯ Пауза", "m:pause"), ("🔄 Обновить", "m:upd")])
+        rows.append([("📥 Обработка материалов", "m:inbox")])
     return rows
 
 
@@ -1601,13 +1783,25 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
         return "⛔ У вас нет прав.", None
     if payload == "m:admin" and not is_admin(adapter, uid):
         return "⛔ Меню доступно только администратору.", None
-    for waiting in (WAITING, WAITING_EDIT):  # любой переход по меню отменяет ожидание текста
+    for waiting in (WAITING, WAITING_EDIT, WAITING_REJECT):  # любой переход по меню отменяет ожидание текста
         waiting.pop((adapter.name, uid), None)
     WAITING_RULE.discard((adapter.name, uid))
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
     if act == "admin":
         return "Меню администратора:", menu_for(adapter, uid)
+    if act == "pending":
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() and len(parts[2]) < 8 else 0
+        return pending_view(adapter, page)
+    if act in ("inbox", "inretry"):
+        if not is_admin(adapter, uid):
+            return "⛔ Очередь доступна только администратору.", None
+        import max_queue
+        if act == "inretry" and len(parts) == 3:
+            db.execute("UPDATE max_inbox SET state='pending',attempts=0,next_try=0 WHERE event_key=? AND state='failed'",
+                        (parts[2],))
+            db.commit()
+        return max_queue.view()
     if act == "rules":
         return rules_view()
     if act == "del" and len(parts) > 2 and parts[2].isdigit():
@@ -1638,6 +1832,34 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
     return "Выберите действие:", menu_for(adapter, uid)
 
 
+def pending_view(adapter, page=0):
+    from datetime import datetime
+    drafts = [dict(r) for r in db.execute("SELECT * FROM drafts WHERE status='pending' ORDER BY created,id")
+              if _approval_adapter(dict(r), adapter) is adapter]
+    total = len(drafts)
+    page = min(max(0, page), max(0, (total - 1) // 8))
+    lines = [f"📋 На проверке: {total}. Страница {page + 1}."]
+    rows = []
+    for d in drafts[page * 8:(page + 1) * 8]:
+        date = datetime.fromtimestamp(d["created"], ops._tz()).strftime("%d.%m %H:%M")
+        name = (d["author_name"] or "Сотрудник")[:40]
+        snippet = " ".join((d["post"] or d["source_text"]).split())[:120]
+        partial = " · публикация не завершена" if d["published_to"] else ""
+        lines.append(f"\n№{d['id']} · {name} · {date}{partial}\n{snippet}")
+        rows.append([(f"📨 Открыть №{d['id']}", f"d:show:{d['id']}:{d['attempts']}")])
+        if d["published_to"] or d.get("publish_errors") != "{}":
+            rows.append([(f"📊 Публикация №{d['id']}", f"d:pubstatus:{d['id']}:{d['attempts']}")])
+    nav = []
+    if page:
+        nav.append(("← Назад", f"m:pending:{page - 1}"))
+    if (page + 1) * 8 < total:
+        nav.append(("Далее →", f"m:pending:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("🔄 Обновить список", f"m:pending:{page}")])
+    return "\n".join(lines), rows
+
+
 SAFE_CMDS = {"/rules", "/rule_add", "/rule_del", "/status", "/cancel"}  # их понимаем и в режиме ожидания текста
 
 
@@ -1653,6 +1875,18 @@ async def on_text(adapter: Adapter, user_id, text: str) -> bool:
         await adapter.send_menu(uid, msg, rows)
         return True
     cmd = t.split(maxsplit=1)[0].split("@")[0].lower() if t.startswith("/") else ""
+    if key in WAITING_REJECT and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
+        if cmd == "/cancel":
+            WAITING_REJECT.pop(key, None)
+            await adapter.notify(uid, "Отклонение отменено. Пост остался на проверке.")
+            return True
+        if cmd or not t or len(t.encode("utf-16-le")) // 2 > 1000:
+            await adapter.notify(uid, "Пришлите причину текстом до 1000 знаков или /cancel.")
+            return True
+        did, attempt = WAITING_REJECT.pop(key)
+        _, message = await reject_post(adapter, uid, did, attempt, t)
+        await adapter.notify(uid, message)
+        return True
     if cmd == "/status":  # ни при каких условиях не должна уходить дальше как комментарий к посту
         await adapter.notify(uid, await status_text(adapter) if can_status(adapter, uid)
                              else "⛔ Статус показывается администратору.")

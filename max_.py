@@ -9,6 +9,7 @@ import httpx
 
 import core
 import ops
+import max_queue
 
 log = logging.getLogger("max")
 API = "https://platform-api.max.ru"
@@ -136,7 +137,8 @@ class Max(core.Adapter):
                     params["marker"] = marker
                 data = await self.call("GET", "/updates", params=params)
                 # MAX считает события подтверждёнными при следующем запросе с marker.
-                # Не передаём его, пока весь пакет не обработан (включая скачивание).
+                # Медиа сначала фиксируются в постоянной очереди; остальные события
+                # обрабатываются здесь. Ошибка записи в БД не подтверждает пакет.
                 batch = [asyncio.create_task(core._guard(self._handle_limited(u)))
                          for u in data.get("updates", [])]
                 self._tasks.update(batch)
@@ -166,7 +168,10 @@ class Max(core.Adapter):
         async with self._processing:
             if os.getenv("MAX_LOG_UPDATES") == "1":
                 log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
-            await self.handle(update)
+            if max_queue.is_material(update) and not ops.is_paused():
+                max_queue.enqueue(update)
+            else:
+                await self.handle(update)
 
     async def handle(self, u: dict):
         try:
@@ -200,7 +205,7 @@ class Max(core.Adapter):
                               else "У вас нет доступа к этому боту.")
         return True
 
-    async def on_message(self, m: dict):
+    async def on_message(self, m: dict, source_key=None):
         if m.get("recipient", {}).get("chat_type", "dialog") != "dialog":
             return  # отвечаем только в личке
         sender = m["sender"]
@@ -208,6 +213,8 @@ class Max(core.Adapter):
         quiet = core.quiet(self, uid)
         if await self._stranger(uid, sender.get("name") or sender.get("first_name"), sender.get("username")):
             return
+        if source_key and await core.resume_submission(self, source_key) is not None:
+            return  # готовый черновик уже есть: повтор события не создаёт ещё один
         body = m.get("body", {})
         atts = body.get("attachments") or []
         videos = [a for a in atts if a.get("type") == "video"]
@@ -224,6 +231,8 @@ class Max(core.Adapter):
             return await self.notify(uid, f"В одном посте можно отправить до {core.MAX_ALBUM_ITEMS} фото и видео. Разделите материалы.")
         name = sender.get("name") or sender.get("first_name") or str(uid)
         if core.SHUTTING_DOWN:
+            if source_key:
+                raise RuntimeError("Бот перезапускается; материал сохранён в очереди")
             return await self.notify(uid, "🔄 Бот перезапускается. Пришлите материал через минуту.")
         if ops.is_paused():
             return await self.notify(uid, ops.PAUSED_MSG)
@@ -232,25 +241,28 @@ class Max(core.Adapter):
         if not quiet:
             await self.notify(uid, "Принято, готовлю пост…")
         try:
+            source_opts = {"source_key": source_key} if source_key else {}
             if len(media_atts) > 1:
                 items, total = [], 0
-                for att in media_atts:
+                for index, att in enumerate(media_atts):
                     limit = core.MAX_VIDEO_BYTES if att["type"] == "video" else core.MAX_PHOTO_BYTES
-                    data = await self._download(att, min(limit, core.MAX_ALBUM_BYTES - total), att["type"])
+                    data = await max_queue.download(self, att, min(limit, core.MAX_ALBUM_BYTES - total), att["type"], source_key, index)
                     total += len(data)
                     items.append({"type": att["type"], "data": data})
-                await core.submit_album(self, str(uid), name, body.get("text") or "", items)
+                await core.submit_album(self, str(uid), name, body.get("text") or "", items, **source_opts)
             elif videos:
-                data = await self._download(videos[0], core.MAX_VIDEO_BYTES, "video")
-                await core.submit(self, str(uid), name, body.get("text") or "", data, kind="video", filename="video.mp4")
+                data = await max_queue.download(self, videos[0], core.MAX_VIDEO_BYTES, "video", source_key, 0)
+                await core.submit(self, str(uid), name, body.get("text") or "", data, kind="video", filename="video.mp4", **source_opts)
             else:
-                data = await self._download(images[0], core.MAX_PHOTO_BYTES, "image")
-                await core.submit(self, str(uid), name, body.get("text") or "", data)
+                data = await max_queue.download(self, images[0], core.MAX_PHOTO_BYTES, "image", source_key, 0)
+                await core.submit(self, str(uid), name, body.get("text") or "", data, **source_opts)
             if not quiet:
                 await self.notify(uid, "Пост отправлен на согласование ✅")
             elif core.confirm_mode() != "off":  # в MAX вместо реакции короткое сообщение
                 await self.notify(uid, "✅ Принято")
         except core.RateLimited:
+            if source_key:
+                raise
             log.warning("лимит материалов: %s", uid)
             if not quiet:
                 await self.notify(uid, "Слишком много материалов за час. Попробуйте позже.")
@@ -259,6 +271,8 @@ class Max(core.Adapter):
             await self.notify(uid, f"⚠️ {core.err(e)}. Материал не принят. Исправьте файл и отправьте весь набор заново.")
         except Exception as e:
             log.exception("submit failed")
+            if source_key:
+                raise  # очередь повторит временный сбой без повторного запроса сотруднику
             if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
                 await core.alert(self, f"⚠️ Не удалось обработать материал от {name}: {core.err(e)}")
             else:

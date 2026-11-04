@@ -7,6 +7,7 @@ import core  # noqa: E402  (после load_dotenv, чтобы подхвати�
 import ops  # noqa: E402
 from max_ import Max  # noqa: E402
 from tg import Telegram  # noqa: E402
+import max_queue  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -119,7 +120,7 @@ async def main():
     await core.announce_start()
     await ops.announce_update_result()
     try:
-        await serve([*working, core.Reminder()])
+        await serve([*working, max_queue.Worker(core.ADAPTERS["max"]), core.Reminder()])
     finally:
         await core.ADAPTERS["max"].http.aclose()
         if "tg" in core.ADAPTERS:

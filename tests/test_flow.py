@@ -89,7 +89,7 @@ def test_delete_needs_confirmation(tg, llm, png):
     photo = core.get(did)["photo"]
     assert run(core.on_action(tg, "1", "del", did, 1)) == (False, "")
     assert core.get(did)["status"] == "pending" and Path(photo).exists()
-    assert [b[0] for b in tg.sent("menu")[-1][3][0]] == ["❌ Да, отклонить", "↩️ Отмена"]
+    assert [b[0] for b in tg.sent("menu")[-1][3][-1]] == ["❌ Без причины", "↩️ Отмена"]
     run(core.on_action(tg, "1", "delno", did, 1))
     assert core.get(did)["status"] == "pending"
     assert "нет прав" in run(core.on_action(tg, "7", "delyes", did, 1))[1]
