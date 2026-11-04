@@ -58,12 +58,14 @@ def test_edit_replaces_text_without_llm_and_resends_to_everyone(tg, llm, png):
     assert not core.WAITING_EDIT
 
 
-def test_edit_then_publish_makes_it_a_style_example(tg, llm, png):
+def test_edit_then_publish_does_not_retain_a_style_example(tg, llm, png):
     did = new_draft(tg, llm, png)
     run(core.on_action(tg, "1", "edit", did, 1))
     run(core.on_text(tg, "1", "Эталонный текст."))
     run(core.on_action(tg, "1", "ok", did, 2))
-    assert "Эталонный текст." in core.build_system()
+    assert tg.sent("publish")[-1][1] == "Эталонный текст."
+    assert "Эталонный текст." not in core.build_system()
+    assert core.get(did)["post"] == ""
 
 
 def test_edit_cancel_and_too_long_keep_state(tg, llm, png, monkeypatch):

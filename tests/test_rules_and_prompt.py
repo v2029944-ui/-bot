@@ -28,7 +28,7 @@ def test_legacy_commands_still_work(tg):
     assert "без восклицательных" in run(core.on_menu(tg, "1", "m:rules"))[0]
 
 
-def test_prompt_contains_rules_examples_and_caps_rules(tg, llm, png):
+def test_prompt_contains_rules_but_no_published_examples(tg, llm, png):
     for i in range(40):
         core.db.execute("INSERT INTO rules(text,created) VALUES(?,0)", (f"правило-{i}",))
     core.db.commit()
@@ -38,7 +38,7 @@ def test_prompt_contains_rules_examples_and_caps_rules(tg, llm, png):
     core.db.commit()
     system = core.build_system()
     assert "правило-39" in system and "правило-10" in system and "правило-9\n" not in system
-    assert "ОПУБЛИКОВАННЫЙ-3" in system and "ОПУБЛИКОВАННЫЙ-1" in system and "ОПУБЛИКОВАННЫЙ-0" not in system
+    assert "ОПУБЛИКОВАННЫЙ" not in system
 
 
 def test_caption_is_data_not_instruction(tg, llm, png):

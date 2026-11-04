@@ -418,6 +418,8 @@ def housekeeping() -> int:
         for path in draft_files(dict(r)):
             _unlink(path)
         clear_source_cache(dict(r))
+        if r["status"] == "published":
+            scrub_published(dict(r))
     known = {p for r in db.execute("SELECT * FROM drafts") for p in draft_files(dict(r))}
     for folder in (PHOTOS, VIDEOS):
         for f in folder.glob("*"):  # файл моложе часа может принадлежать материалу, который сейчас обрабатывается
@@ -441,6 +443,17 @@ def clear_source_cache(d):
     if d.get("source_key"):
         import max_queue
         max_queue.clear_cache(d["source_key"])
+
+
+def scrub_published(d):
+    """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
+    db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
+                  photo='',video='',media='[]',published_to='',publish_errors='{}',
+                  post_length='',rejection_reason='',attempts=1,last_sent=0,reminded=0,expiry_warned=0
+                  WHERE id=? AND status='published'""", (d["id"],))
+    if d.get("source_key"):
+        db.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))
+    db.commit()
 
 
 def startup():
@@ -686,7 +699,7 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
 
 
 def build_system() -> str:
-    """Базовые правила + накопленные правила редакции + примеры утверждённых постов."""
+    """Базовые правила и отдельно сохранённые пожелания редакции."""
     s = SYSTEM
     # в запрос идут последние 30 правил, чтобы он не разрастался
     rules = [r["text"] for r in db.execute(
@@ -694,10 +707,6 @@ def build_system() -> str:
     if rules:
         s += ("\n\nПостоянные пожелания редакции (дополняют правила выше, учитывай всегда):\n"
               + "\n".join(f"- {r}" for r in rules))
-    ex = [r["post"] for r in db.execute("SELECT post FROM drafts WHERE status='published' ORDER BY id DESC LIMIT 3")]
-    if ex:
-        s += ("\n\nПримеры недавно утверждённых постов (ориентир по стилю и подаче; факты из них не переноси):\n"
-              + "\n---\n".join(ex))
     return s
 
 
@@ -1071,7 +1080,8 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
         marks[target] = "done"
         _set(did, published_to=_dump_marks(marks))
         if all(marks.get(t.name) == "done" for t in publication_targets(d, adapter)):
-            await finish_publication(d)
+            await finish_publication(d, adapter, user_id)
+            return False, ""
         text, rows = publication_view(get(did), adapter)
         await adapter.send_menu(str(user_id), text, rows)
         return False, ""
@@ -1207,6 +1217,8 @@ def publication_targets(d, adapter):
 
 
 def publication_view(d, adapter):
+    if d["status"] == "published" and not d.get("published_to"):
+        return f"✅ Пост №{d['id']} опубликован. Содержимое удалено с сервера.", []
     marks = _parse_marks(d.get("published_to"))
     errors = json.loads(d.get("publish_errors") or "{}")
     names = {"max": "MAX", "tg": "Telegram"}
@@ -1226,12 +1238,20 @@ def publication_view(d, adapter):
     return "\n".join(lines), rows
 
 
-async def finish_publication(d):
+async def finish_publication(d, adapter=None, user_id=None):
     _set(d["id"], status="published")
+    snapshot = get(d["id"])  # статус каналов нужен только для заключительного сообщения
     for path in draft_files(d):
         _unlink(path)
     clear_source_cache(d)
+    scrub_published(snapshot)
     await _safe_notify(ADAPTERS.get(d["platform"]), d["author_id"], "✅ Ваш пост опубликован. Спасибо!")
+    if adapter is not None:
+        try:
+            text, rows = publication_view(snapshot, adapter)
+            await adapter.send_menu(str(user_id), text, rows)
+        except Exception:
+            log.warning("не удалось отправить статус публикации", exc_info=True)
 
 
 async def _publish_safe(adapter: Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
@@ -1317,7 +1337,7 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         errors.pop(t.name, None)
         _set(did, published_to=_dump_marks(marks), publish_errors=json.dumps(errors, ensure_ascii=False))
 
-    await finish_publication(d)
+    await finish_publication(d, adapter, user_id)
     return True, "✅ Опубликовано."
 
 

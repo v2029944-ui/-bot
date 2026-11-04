@@ -86,7 +86,7 @@ def test_shutdown_waits_for_publish_in_progress(llm, png, monkeypatch):
         return await drain
     assert run(scenario()) == 0
     assert core.get(did)["status"] == "published" and ad.sent("publish")  # пометка и статус сохранены, вопроса «могло выйти» нет
-    assert core._parse_marks(core.get(did)["published_to"]) == {"tg": "done"}
+    assert core.get(did)["published_to"] == ""  # конечного статуса достаточно для защиты от дублей
 
 
 def test_drain_returns_how_many_did_not_finish():

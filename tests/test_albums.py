@@ -81,7 +81,7 @@ def test_mixed_album_max_approval_and_both_channels(png, clip, llm, monkeypatch)
     assert [i.type for i in group] == ["photo", "video", "photo"]
     assert [str(i.media.path) for i in group] == [i["path"] for i in media]
     assert group[0].caption == d["post"] and group[1].caption is None
-    assert core._parse_marks(core.get(did)["published_to"]) == {"max": "done", "tg": "done"}
+    assert core.get(did)["status"] == "published" and core.get(did)["published_to"] == ""
     assert all(not Path(p).exists() for p in core.draft_files(d))
     run(core.on_action(mx, "5", "ok", did, 1))
     assert len(tg.bot.groups) == 1

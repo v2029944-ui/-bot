@@ -142,7 +142,7 @@ def test_publish_only_telegram_does_not_poll_and_gets_every_post(llm, png, monke
     assert mx.sent("approval") and not t.bot.calls  # Telegram согласующим ничего не слал
     ok, msg = run(core.on_action(mx, "5", "ok", did, 1))
     assert ok and mx.sent("publish") and [c[0] for c in t.bot.calls] == ["send_photo"]
-    assert core._parse_marks(core.get(did)["published_to"]) == {"max": "done", "tg": "done"}
+    assert core.get(did)["status"] == "published" and core.get(did)["published_to"] == ""
 
 
 def test_telegram_failure_is_reported_in_max_and_retry_does_not_duplicate_max(llm, png):
@@ -179,7 +179,7 @@ def test_video_from_max_is_approved_then_sent_to_both_channels(llm, mp4):
     assert mx.sent("publish_video") == [("publish_video", d["video"])]
     name, args, kw = t.bot.calls[0]
     assert name == "send_video" and str(args[1].path) == d["video"]
-    assert core._parse_marks(core.get(did)["published_to"]) == {"max": "done", "tg": "done"}
+    assert core.get(did)["status"] == "published" and core.get(did)["published_to"] == ""
 
 
 def test_publish_only_ignores_old_telegram_roles_and_sends_no_service_messages():

@@ -108,18 +108,20 @@ class Worker:
         try:
             await self.adapter.on_message(json.loads(row["payload"])["message"], source_key=key)
         except asyncio.CancelledError:
-            core.db.execute("UPDATE max_inbox SET state='pending' WHERE event_key=?", (key,))
+            core.db.execute("UPDATE max_inbox SET state='pending' WHERE event_key=? AND state='processing'", (key,))
             core.db.commit()
             raise
         except core.RateLimited:
-            core.db.execute("UPDATE max_inbox SET state='pending',attempts=?,next_try=?,error=? WHERE event_key=?",
+            core.db.execute("UPDATE max_inbox SET state='pending',attempts=?,next_try=?,error=? WHERE event_key=? AND state='processing'",
                             (row["attempts"], now + 3600, "Лимит материалов: повтор через час", key))
             core.db.commit()
         except Exception as exc:
             state = "failed" if attempt >= 8 else "pending"
-            core.db.execute("UPDATE max_inbox SET state=?,next_try=?,error=? WHERE event_key=?",
-                            (state, now + min(30 * 2 ** min(attempt - 1, 7), 3600), core.err(exc)[:300], key))
+            changed = core.db.execute("UPDATE max_inbox SET state=?,next_try=?,error=? WHERE event_key=? AND state='processing'",
+                                      (state, now + min(30 * 2 ** min(attempt - 1, 7), 3600), core.err(exc)[:300], key)).rowcount
             core.db.commit()
+            if not changed:
+                return True  # пост уже полностью опубликован; очищенную очередь не оживляем
             log.warning("материал %s: попытка %s не удалась: %s", key[:8], attempt, core.err(exc))
             if state == "failed":
                 text, rows = view()
