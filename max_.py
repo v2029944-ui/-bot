@@ -68,8 +68,15 @@ class Max(core.Adapter):
             raise RuntimeError("MAX не вернул токен загруженного видео")
         return token
 
-    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None):
+    async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None,
+                    admin_menu=True):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
+        if admin_menu and "user_id" in target and core.is_admin(self, target["user_id"]):
+            # Каждое новое сообщение в личке оставляет доступ к меню под рукой.
+            # Не меняем переданную клавиатуру: она может использоваться для других получателей.
+            buttons = [list(row) for row in (buttons or [])]
+            if not any(b.get("payload") == "m:admin" for row in buttons for b in row):
+                buttons.append([{"type": "callback", "text": "⚙️ Меню админа", "payload": "m:admin"}])
         attachments = []
         if media:
             for item in media:
@@ -109,7 +116,7 @@ class Max(core.Adapter):
             target = {"user_id": self.channel.split(":", 1)[1]}  # в личку
         else:
             target = {"chat_id": self.channel}  # группа или канал
-        await self._send(target, post, photo, video=video, media=media)
+        await self._send(target, post, photo, video=video, media=media, admin_menu=False)
 
     async def notify(self, user_id, text):
         await self._send({"user_id": user_id}, text)

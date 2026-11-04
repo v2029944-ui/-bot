@@ -1599,11 +1599,15 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
     uid = str(user_id)
     if uid not in adapter.approvers:
         return "⛔ У вас нет прав.", None
+    if payload == "m:admin" and not is_admin(adapter, uid):
+        return "⛔ Меню доступно только администратору.", None
     for waiting in (WAITING, WAITING_EDIT):  # любой переход по меню отменяет ожидание текста
         waiting.pop((adapter.name, uid), None)
     WAITING_RULE.discard((adapter.name, uid))
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    if act == "admin":
+        return "Меню администратора:", menu_for(adapter, uid)
     if act == "rules":
         return rules_view()
     if act == "del" and len(parts) > 2 and parts[2].isdigit():
