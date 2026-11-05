@@ -5,6 +5,7 @@ from test_admin_menu_button import Api, make
 
 
 def test_preview_contains_link_and_publication_uses_same_snapshot(monkeypatch, png, llm):
+    llm.reply = "Для заказа используйте нашего {bot}"
     async def scenario():
         api = Api()
         adapter = make(api)

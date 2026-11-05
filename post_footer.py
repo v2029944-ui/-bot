@@ -15,7 +15,9 @@ class LinkedPost(str):
 
 def config():
     import ops
-    return json.loads(ops.get_setting("post_footer", '{"enabled":false,"text":"Подробнее","max":"","tg":""}'))
+    value = json.loads(ops.get_setting("post_footer", '{"enabled":false,"text":"Подробнее","max":"","tg":""}'))
+    value.setdefault("marker", "{bot}")
+    return value
 
 
 def save(value):
@@ -36,15 +38,19 @@ def for_draft(did):
 def view():
     c = config()
     return (f"🔗 Ссылка в постах: {'включена' if c['enabled'] else 'выключена'}.\n"
-            f"Текст: {c['text']}\nMAX: {c['max'] or 'не задан'}\nTelegram: {c['tg'] or 'не задан'}\n"
+            f"Маркер: {c['marker']}\nТекст: {c['text']}\nMAX: {c['max'] or 'не задан'}\nTelegram: {c['tg'] or 'не задан'}\n"
+            "Маркер в тексте заменяется ссылкой. Если его нет, ссылка добавляется в конце.\n"
             "Ссылка видна в варианте на проверке и добавляется в публикации. Для одного адреса в обоих каналах укажите его в обоих полях.",
-            [[("✏️ Текст ссылки", "m:footer_text")], [("Адрес MAX", "m:footer_max"), ("Адрес Telegram", "m:footer_tg")],
+            [[("✏️ Текст ссылки", "m:footer_text"), ("Маркер", "m:footer_marker")], [("Адрес MAX", "m:footer_max"), ("Адрес Telegram", "m:footer_tg")],
              [("Выключить" if c['enabled'] else "Включить", "m:footer_toggle")]])
 
 
 def validate(field, value):
     value = value.strip()
-    if field == "text":
+    if field == "marker":
+        if not value or len(value.encode("utf-16-le")) // 2 > 32 or any(ch.isspace() for ch in value):
+            raise ValueError("Маркер должен содержать от 1 до 32 знаков без пробелов, например {bot}.")
+    elif field == "text":
         if not value or len(value.encode("utf-16-le")) // 2 > 80 or "\n" in value:
             raise ValueError("Текст ссылки должен занимать одну строку от 1 до 80 знаков.")
     elif value == "-":
@@ -60,10 +66,21 @@ def validate(field, value):
 
 
 def render(post, channel, settings):
+    marker = settings.get("marker", "{bot}")
+    label = settings.get("text", "Подробнее")
+    has_marker = bool(marker) and marker in post
     if not settings.get("enabled") or not settings.get(channel):
-        return post
-    plain = post + "\n\n" + settings["text"]
-    markup = html.escape(post) + '\n\n<a href="' + html.escape(settings[channel], quote=True) + '">' + html.escape(settings["text"]) + '</a>'
+        result = post.replace(marker, label) if has_marker else post
+        if len(result.encode("utf-16-le")) // 2 > 4000:
+            raise ValueError("Пост после замены маркера слишком длинный. Сократите текст.")
+        return result
+    link = '<a href="' + html.escape(settings[channel], quote=True) + '">' + html.escape(label) + '</a>'
+    if has_marker:
+        plain = post.replace(marker, label)
+        markup = link.join(html.escape(part) for part in post.split(marker))
+    else:
+        plain = post + "\n\n" + label
+        markup = html.escape(post) + '\n\n' + link
     if len(markup.encode("utf-16-le")) // 2 > 4000:
         raise ValueError("Пост со ссылкой слишком длинный. Сократите текст и подтвердите публикацию заново.")
     return LinkedPost(markup, plain)

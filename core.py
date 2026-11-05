@@ -750,6 +750,12 @@ def build_system() -> str:
     if rules:
         s += ("\n\nПостоянные пожелания редакции (дополняют правила выше, учитывай всегда):\n"
               + "\n".join(f"- {r}" for r in rules))
+    footer = post_footer.config()
+    if footer.get("enabled"):
+        s += (f"\n\nСлужебный маркер ссылки: {footer.get('marker', '{bot}')}. "
+              "Если правила редакции требуют этот маркер в предложении, оставь его буквально, "
+              "не заменяй ссылкой или названием: бот сам выполнит подстановку. "
+              "Служебный маркер разрешён независимо от запрета разметки.")
     return s
 
 
@@ -1893,8 +1899,10 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
                 return "Сначала задайте хотя бы один адрес.", post_footer.view()[1]
             c["enabled"] = not c["enabled"]
             post_footer.save(c)
-        elif field in ("text", "max", "tg"):
+        elif field in ("text", "max", "tg", "marker"):
             post_footer.WAITING[(adapter.name, uid)] = field
+            if field == "marker":
+                return "Пришлите маркер без пробелов (до 32 знаков), например {bot}. Отмена: /cancel", None
             return ("Пришлите текст ссылки (до 80 знаков). Отмена: /cancel" if field == "text" else
                     "Пришлите HTTPS-адрес бота или «-», чтобы убрать ссылку для этого канала. Отмена: /cancel"), None
         return post_footer.view()
