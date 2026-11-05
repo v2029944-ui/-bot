@@ -1495,7 +1495,7 @@ def rules_command(adapter: Adapter, user_id, text: str) -> str | None:
         return None
     if cmd == "/rules":
         rows = db.execute("SELECT id, text FROM rules ORDER BY id").fetchall()
-        body = "\n".join(f"{r['id']}. {r['text']}" for r in rows) or "Пока пусто."
+        body = "\n".join(f"{n}. {r['text']}" for n, r in enumerate(rows, 1)) or "Пока пусто."
         return f"📝 Правила стиля:\n{body}\n\nДобавить: /rule_add текст\nУдалить: /rule_del номер"
     if cmd == "/rule_add":
         if not arg:
@@ -1505,7 +1505,12 @@ def rules_command(adapter: Adapter, user_id, text: str) -> str | None:
         return "✅ Правило добавлено."
     if not arg.isdigit():
         return "Формат: /rule_del номер (номера смотрите в /rules)"
-    cur = db.execute("DELETE FROM rules WHERE id=?", (int(arg),))
+    if len(arg) > 9 or int(arg) < 1:
+        return "Правила с таким номером нет."
+    row = db.execute("SELECT id FROM rules ORDER BY id LIMIT 1 OFFSET ?", (int(arg) - 1,)).fetchone()
+    if not row:
+        return "Правила с таким номером нет."
+    cur = db.execute("DELETE FROM rules WHERE id=?", (row["id"],))
     db.commit()
     return "🗑 Правило удалено." if cur.rowcount else "Правила с таким номером нет."
 
@@ -1843,7 +1848,8 @@ def rules_view() -> tuple[str, list]:
     # показываем последние 40: иначе длинный список не влезет в сообщение (4096 знаков) и в 100 кнопок
     rows = db.execute("SELECT id, text FROM (SELECT id, text FROM rules ORDER BY id DESC LIMIT 40) ORDER BY id").fetchall()
     total = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
-    body = "\n".join(f"{r['id']}. {r['text']}" for r in rows) or "Пока пусто."
+    numbered = list(enumerate(rows, total - len(rows) + 1))
+    body = "\n".join(f"{n}. {r['text']}" for n, r in numbered) or "Пока пусто."
     if len(body) > 3500:
         body = body[:3500] + "\n…"
     text = "📝 Правила стиля:\n" + body
@@ -1851,7 +1857,7 @@ def rules_view() -> tuple[str, list]:
         text += f"\n\nПоказаны последние {len(rows)} из {total}. Старые удаляются командой /rule_del номер."
     if rows:
         text += "\n\nНажмите 🗑 с номером, чтобы удалить правило."
-    dels = [(f"🗑 {r['id']}", f"m:del:{r['id']}") for r in rows]
+    dels = [(f"🗑 {n}", f"m:del:{r['id']}") for n, r in numbered]
     buttons = [dels[i:i + 4] for i in range(0, len(dels), 4)]
     buttons.append([("➕ Добавить правило", "m:add")])
     return text, buttons

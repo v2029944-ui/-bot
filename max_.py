@@ -20,6 +20,7 @@ API = "https://platform-api.max.ru"
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
+core.db.execute("CREATE TABLE IF NOT EXISTS max_notices (mid TEXT PRIMARY KEY, uid TEXT, remaining INTEGER)")
 for _row in core.db.execute("SELECT uid,btn FROM max_ui WHERE btn IS NOT NULL").fetchall():
     try:
         _old = json.loads(_row["btn"])
@@ -121,10 +122,12 @@ class Max(core.Adapter):
             await self.call("DELETE", "/messages", params={"message_id": mid})
         except Exception:
             log.warning("не удалось удалить сообщение %s", mid, exc_info=True)
+            return False
         if uid is not None:  # удалённое сообщение больше не держит кнопку «Меню админа»
             btn = self._ui(uid)["btn"]
             if btn and btn.get("mid") == mid:
                 self._ui_set(uid, btn=None)
+        return True
 
     async def _strip_admin_button(self, prev: dict, draft_buttons=False):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
@@ -212,6 +215,17 @@ class Max(core.Adapter):
             self._ui_set(uid, btn={"mid": mid} if mid else prev)
             if prev and prev.get("mid") and prev["mid"] != mid:
                 await self._strip_admin_button(prev)
+        if admin_menu and mid and "user_id" in target:
+            uid = str(target["user_id"])
+            core.db.execute("UPDATE max_notices SET remaining=remaining-1 WHERE uid=?", (uid,))
+            core.db.commit()
+            for notice in core.db.execute("SELECT mid FROM max_notices WHERE uid=? AND remaining<=0", (uid,)).fetchall():
+                if await self._delete(notice["mid"], uid):
+                    core.db.execute("DELETE FROM max_notices WHERE mid=?", (notice["mid"],))
+                    core.db.commit()
+            if post.startswith("Это устаревший вариант."):
+                core.db.execute("INSERT OR REPLACE INTO max_notices VALUES(?,?,3)", (mid, uid))
+                core.db.commit()
         return resp
 
     async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
