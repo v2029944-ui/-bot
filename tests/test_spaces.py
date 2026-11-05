@@ -5,6 +5,7 @@ import time
 
 import core
 import max_
+import max_actions
 import max_queue
 import ops
 import post_footer
@@ -156,12 +157,40 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "edit-owner", "user": {"user_id": 11},
                                   "payload": f"w:{bid}:d:edit:2:2"}})
             assert spaces.for_user("11") == aid  # последнее нажатие не меняет пространство по умолчанию
-            text_reply = {"update_type": "message_created", "message": {"sender": {"user_id": 11}, "body": {"text": "Ответ на открытую правку"}}}
+            text_reply = {"update_type": "message_created", "message": {"sender": {"user_id": 11}, "body": {"text": "Ответ на открытую правку {bot}"}}}
             assert spaces.stamp(text_reply)["message"]["_space"] == bid
             assert spaces.stamp(material(11))["message"]["_space"] == aid
             menu_reply = {"update_type": "message_created", "message": {"sender": {"user_id": 11}, "body": {"text": "/menu"}}}
             assert spaces.stamp(menu_reply)["message"]["_space"] == aid
             assert spaces.stamp(text_reply)["message"]["_space"] == aid
+
+            # Polling принимает кнопку и ответ раньше, чем фоновый обработчик
+            # успевает открыть правку в другой команде владельца.
+            await root_max._handle_limited({"update_type": "message_callback", "callback": {
+                "callback_id": "queued-edit", "user": {"user_id": 11}, "payload": f"w:{bid}:d:edit:2:2"}})
+            await root_max._handle_limited(text_reply)
+            actions = max_actions.Worker(root_max)
+            for row in root.db.execute("SELECT * FROM max_actions WHERE state='pending' ORDER BY id").fetchall():
+                await actions.process(row)
+            with spaces.enter(b):
+                assert core.get(2)["post"] == "Ответ на открытую правку {bot}"
+                core.WAITING_EDIT[("max", "11")] = (2, 3)
+            # /menu в общей группе не отменяет приватный ввод.
+            group_menu = {"update_type": "message_created", "message": {"sender": {"user_id": 11},
+                "recipient": {"chat_type": "chat"}, "body": {"text": "/menu"}}}
+            assert "_space" not in spaces.stamp(group_menu)["message"]
+            with spaces.enter(b):
+                assert ("max", "11") in core.WAITING_EDIT
+                core.WAITING_EDIT.clear()
+
+            # Истёкшие материалы уведомляют только свою команду.
+            root.db.execute("INSERT INTO max_inbox(event_key,state,created,space_id) VALUES('expired-a','pending',?,?)", (time.time() - 8 * 86400, aid))
+            root.db.commit()
+            calls.clear()
+            await worker.process_once()
+            expiry_notices = [(sid, kw["params"]["user_id"]) for sid, method, path, kw in calls
+                              if method == "POST" and path == "/messages" and "Истёк срок обработки" in kw["json"]["text"]]
+            assert expiry_notices == [(aid, 11)]
 
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-a','failed','ОШИБКА_А',?)", (aid,))
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-b','failed','ОШИБКА_Б',?)", (bid,))

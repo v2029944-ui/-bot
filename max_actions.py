@@ -6,6 +6,7 @@ import logging
 import time
 
 import core
+import spaces
 
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, uid TEXT,
@@ -46,7 +47,10 @@ class Worker:
 
     async def process(self, row):
         try:
-            await self.adapter.handle(json.loads(row["payload"]))
+            update = json.loads(row["payload"])
+            if update.pop("_route_on_process", False):
+                update = spaces.stamp(update)
+            await self.adapter.handle(update)
         except asyncio.CancelledError:
             core.db.execute("UPDATE max_actions SET state='pending' WHERE id=?", (row["id"],))
             core.db.commit()

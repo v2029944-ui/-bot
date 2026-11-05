@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+import weakref
 from pathlib import Path
 from urllib.parse import quote
 
@@ -69,7 +70,7 @@ class Max(core.Adapter):
         core.refresh_people(self)  # + люди, добавленные кнопками (хранятся в базе)
         self._tasks: set[asyncio.Task] = set()
         self._processing = asyncio.Semaphore(2)
-        self._send_locks = {}
+        self._send_locks = weakref.WeakValueDictionary()
         self._upload_cache = {}
         self._upload_locks = {}
 
@@ -86,7 +87,11 @@ class Max(core.Adapter):
             if path != "/updates":
                 log.info("timing stage=max_api method=%s endpoint=%s seconds=%.3f", method, path.split("/")[1], time.monotonic() - started)
         r.raise_for_status()
-        return r.json() if r.content else {}
+        result = r.json() if r.content else {}
+        if isinstance(result, dict) and result.get("success") is False:
+            # SimpleQueryResult допускает отказ операции даже при HTTP 200.
+            raise RuntimeError("MAX не выполнил запрос: " + str(result.get("message") or "success=false"))
+        return result
 
     # --- отправка ---
     def forget_uploads(self, paths):
@@ -436,10 +441,10 @@ class Max(core.Adapter):
 
     async def _handle_limited(self, update):
         async with self._processing:
-            update = spaces.stamp(update)
             if os.getenv("MAX_LOG_UPDATES") == "1":
                 log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
             if max_queue.is_material(update):
+                update = spaces.stamp(update)
                 sid = (update.get("message") or {}).get("_space", 0)
                 if spaces.INSTALLED and sid:
                     with spaces.enter(spaces.get(sid)):
@@ -451,7 +456,9 @@ class Max(core.Adapter):
                 else:
                     max_queue.enqueue(update)
             elif update.get("update_type") == "message_callback" or (update.get("message") or {}).get("body", {}).get("text"):
-                max_actions.enqueue(update)
+                # Текст маршрутизируем после предыдущих команд этого человека:
+                # нажатие «Править» могло ещё не успеть открыть ожидание ввода.
+                max_actions.enqueue({**update, "_route_on_process": True})
             else:
                 await self.handle(update)
 
@@ -475,6 +482,7 @@ class Max(core.Adapter):
                 await self.on_callback({**u["callback"], "message": u.get("message")})
         except Exception:
             log.exception("handle failed")
+            raise  # постоянная очередь должна увидеть ошибку, а не пометить команду выполненной
 
     HELLO = ("Привет! Пришлите фото или короткое видео вашей работы с кратким описанием в подписи — "
              "я подготовлю пост и отправлю его на согласование.")

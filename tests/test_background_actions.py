@@ -56,6 +56,62 @@ def test_poll_dispatch_saves_action_without_running_it(monkeypatch):
     run(scenario())
 
 
+def test_adapter_error_is_recorded_as_failed_action(monkeypatch):
+    async def scenario():
+        api = Api()
+        adapter = make(api)
+
+        async def fail(*args, **kwargs):
+            raise RuntimeError("cannot handle command")
+
+        monkeypatch.setattr(adapter, "on_message", fail)
+        max_actions.enqueue({"update_type": "message_created", "message": {
+            "sender": {"user_id": 1}, "body": {"mid": "broken-command", "text": "/menu"}}})
+        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+        await max_actions.Worker(adapter).process(row)
+        result = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        assert tuple(result) == ("failed", "")
+        assert any("Не удалось выполнить действие" in entry[3].get("text", "") for entry in api.of("POST"))
+        await adapter.http.aclose()
+    run(scenario())
+
+
+def test_completed_message_locks_are_not_retained():
+    async def scenario():
+        api = Api()
+        adapter = make(api)
+        for i in range(25):
+            await adapter.notify("1", f"Сообщение {i}")
+        assert not adapter._send_locks
+        await adapter.http.aclose()
+    run(scenario())
+
+
+def test_message_locks_keep_waiting_sends_serial(monkeypatch):
+    async def scenario():
+        adapter = make(Api())
+        started, release = asyncio.Event(), asyncio.Event()
+        active, peak = 0, 0
+
+        async def send(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            started.set()
+            await release.wait()
+            active -= 1
+
+        monkeypatch.setattr(adapter, "_send_inner", send)
+        tasks = [asyncio.create_task(adapter.notify("1", str(i))) for i in range(3)]
+        await asyncio.wait_for(started.wait(), 2)
+        assert len(adapter._send_locks) == 1
+        release.set()
+        await asyncio.gather(*tasks)
+        assert peak == 1 and not adapter._send_locks
+        await adapter.http.aclose()
+    run(scenario())
+
+
 def test_old_post_keyboard_removed_but_post_preserved():
     async def scenario():
         api = Api()

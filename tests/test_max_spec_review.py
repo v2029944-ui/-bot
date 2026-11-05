@@ -128,3 +128,18 @@ def test_official_callback_without_payload_is_acknowledged(monkeypatch):
         assert r.headers["Authorization"] == "token" and json.loads(r.content) == {"notification": "Работаю…"}
         await mx.http.aclose()
     run(scenario())
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE"])
+def test_unsuccessful_query_result_does_not_remove_tracking(method):
+    async def scenario():
+        mx = max_.Max("token", "-1", ["5"], ["9"])
+        await mx.http.aclose()
+        mx.http = httpx.AsyncClient(base_url=max_.API, transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"success": False, "message": "denied"})))
+        try:
+            with pytest.raises(RuntimeError, match="denied"):
+                await mx.call(method, "/messages", params={"message_id": "m1"})
+        finally:
+            await mx.http.aclose()
+    run(scenario())

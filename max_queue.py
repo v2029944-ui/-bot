@@ -1,5 +1,6 @@
 """Постоянная очередь входящих фото/видео MAX. Один обработчик, независимый от polling."""
 import asyncio
+from collections import Counter
 import hashlib
 import json
 import logging
@@ -98,7 +99,10 @@ class Worker:
         for key, sid in expired_keys:
             clear_cache(key, sid)
         if expired:
-            await core.alert_staff(self.adapter, f"⚠️ Истёк срок обработки {expired} материалов в очереди. Попросите сотрудников отправить их заново.")
+            for sid, count in Counter(sid for _, sid in expired_keys).items():
+                with spaces.enter(spaces.get(sid) if spaces.INSTALLED else None):
+                    adapter = core.ADAPTERS["max"] if spaces.INSTALLED else self.adapter
+                    await core.alert_staff(adapter, f"⚠️ Истёк срок обработки {count} материалов в очереди. Попросите сотрудников отправить их заново.")
         if core.SHUTTING_DOWN or (not spaces.INSTALLED and ops.is_paused()):
             return False
         row = core.db.execute("SELECT * FROM max_inbox WHERE state='pending' AND next_try<=? ORDER BY created LIMIT 1",
