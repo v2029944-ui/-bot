@@ -162,8 +162,14 @@ class Max(core.Adapter):
                 rows = replacement + [row for row in admin_rows if row]
                 if rows:
                     atts.append({"type": "inline_keyboard", "payload": {"buttons": rows}})
-            await self.call("PUT", "/messages", params={"message_id": prev["mid"]},
-                            json={"text": body.get("text") or "", "attachments": atts})
+            edit = {"attachments": atts}
+            if not body.get("markup"):
+                edit["text"] = body.get("text") or ""
+                if body.get("format") in ("html", "markdown"):
+                    edit["format"] = body["format"]
+            # У форматированного сообщения меняем только вложения: текст и ссылки
+            # остаются в MAX без повторного преобразования разметки.
+            await self.call("PUT", "/messages", params={"message_id": prev["mid"]}, json=edit)
             return True
         except Exception:
             log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
@@ -250,6 +256,11 @@ class Max(core.Adapter):
             log.warning("черновик %s не найден, отправка согласующему %s пропущена", did, approver)
             return
         n = d["attempts"]
+        settings = post_footer.for_draft(did)
+        preview = dict(settings)
+        if not preview.get("max"):
+            preview["max"] = preview.get("tg", "")
+        post = post_footer.render(post, "max", preview)
         buttons = [[{"type": "callback", "text": label, "payload": payload}
                     for label, payload in row] for row in core.approval_rows(did, n)]
         await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)

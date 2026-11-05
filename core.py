@@ -1086,10 +1086,10 @@ async def _apply_edit(adapter: Adapter, user_id, did: int, attempt: int, text: s
         return False, PARTIAL_EDIT_BLOCKED
     if not _claim(did, "pending", "regenerating"):
         return False, BUSY
-    _set(did, post=text, attempts=d["attempts"] + 1, status="pending")
+    _set(did, post=text, footer=None, attempts=d["attempts"] + 1, status="pending")
     sent, last = await _send_draft(d, did, text, adapter, actor=str(user_id))
     if not sent:  # откат, как при пересоздании: сообщения с новыми кнопками нет
-        _set(did, post=d["post"], attempts=d["attempts"], status="pending")
+        _set(did, post=d["post"], footer=d.get("footer"), attempts=d["attempts"], status="pending")
         return False, f"⚠️ Текст сохранить не удалось: {err(last)}"
     return False, "✍️ Ваш текст заменил черновик. Проверьте пост выше и нажмите ✅ Опубликовать."
 
@@ -1442,10 +1442,10 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
         _set(did, status="pending")
         return False, f"⚠️ Не удалось пересоздать: {err(e)}"
 
-    _set(did, post=post, post_length=length, attempts=d["attempts"] + 1, status="pending")
+    _set(did, post=post, footer=None, post_length=length, attempts=d["attempts"] + 1, status="pending")
     sent, last = await _send_draft(d, did, post, adapter, actor=str(user_id))
     if not sent:  # откат: иначе в базе attempts=N+1, а сообщения с такими кнопками нет
-        _set(did, post=d["post"], post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
+        _set(did, post=d["post"], footer=d.get("footer"), post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
         return False, f"⚠️ Новый вариант готов, но не отправился: {err(last)}"
     # новый вариант уходит всем согласующим: у остальных кнопки не должны «протухать»
     if adapter.name == "max":

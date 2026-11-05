@@ -23,11 +23,21 @@ def save(value):
     ops.set_setting("post_footer", json.dumps(value, ensure_ascii=False))
 
 
+def for_draft(did):
+    import core
+    d = core.get(did)
+    if d.get("footer") is not None:
+        return json.loads(d["footer"])
+    settings = config()
+    core._set(did, footer=json.dumps(settings, ensure_ascii=False))
+    return settings
+
+
 def view():
     c = config()
     return (f"🔗 Ссылка в постах: {'включена' if c['enabled'] else 'выключена'}.\n"
             f"Текст: {c['text']}\nMAX: {c['max'] or 'не задан'}\nTelegram: {c['tg'] or 'не задан'}\n"
-            "Ссылка добавляется при публикации. Для одного адреса в обоих каналах укажите его в обоих полях.",
+            "Ссылка видна в варианте на проверке и добавляется в публикации. Для одного адреса в обоих каналах укажите его в обоих полях.",
             [[("✏️ Текст ссылки", "m:footer_text")], [("Адрес MAX", "m:footer_max"), ("Адрес Telegram", "m:footer_tg")],
              [("Выключить" if c['enabled'] else "Включить", "m:footer_toggle")]])
 
