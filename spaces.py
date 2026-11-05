@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 import time
+import dialog_state
 
 CURRENT = contextvars.ContextVar("workspace", default=None)
 INSTALLED = False
@@ -141,8 +142,12 @@ def get(sid):
             db.execute(obj["sql"])
     db.commit()
     memory = {name: {} for name in ROOT.memories}
+    for name, original in ROOT.memories.items():
+        if isinstance(original, dialog_state.PendingMap):
+            memory[name] = dialog_state.PendingMap(db, original.kind)
     memory["LLM_STATE"] = {"ok": 0., "err": 0., "msg": ""}
-    space = SimpleNamespace(id=sid, name=row["name"], folder=folder, db=db, memory=memory, waiting_rule=set(), last_housekeeping=time.monotonic())
+    space = SimpleNamespace(id=sid, name=row["name"], folder=folder, db=db, memory=memory,
+                            waiting_rule=dialog_state.PendingSet(db), last_housekeeping=time.monotonic())
     memory["ADAPTERS"] = {}
     with enter(space):
         core.PHOTOS.mkdir(parents=True, exist_ok=True)

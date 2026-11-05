@@ -14,8 +14,8 @@ INTERNAL = {"REQ_STAMP"}
 
 def _vars_read_by_code() -> set[str]:
     found = set()
-    for name in ("core.py", "ops.py", "tg.py", "max_.py", "main.py", "updater.py"):
-        src = (ROOT / name).read_text(encoding="utf-8")
+    for path in [*ROOT.glob("*.py"), *ROOT.glob("services/*.py")]:
+        src = path.read_text(encoding="utf-8")
         found |= set(re.findall(r'(?:getenv|environ\.get|need|ids|env)\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
         found |= set(re.findall(r'environ\[["\']([A-Z][A-Z0-9_]+)["\']\]', src))
         found |= set(re.findall(r'_env\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
@@ -38,7 +38,8 @@ def test_example_does_not_advertise_settings_the_code_ignores():
 
 
 def test_no_silent_openai_default():
-    assert "api.openai.com" not in (ROOT / "core.py").read_text(encoding="utf-8")
+    source = "\n".join(path.read_text() for path in [ROOT / "core.py", *ROOT.glob("services/*.py")])
+    assert "api.openai.com" not in source
 
 
 def test_missing_base_url_is_reported(monkeypatch):
@@ -62,6 +63,12 @@ def test_anthropic_provider_does_not_need_base_url(monkeypatch):
     monkeypatch.setattr(core, "PROVIDER", "anthropic")
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     assert core.llm_config_problem() is None
+
+
+@pytest.mark.parametrize("value", ["0", "3", "invalid"])
+def test_material_worker_setting_is_validated_before_start(monkeypatch, value):
+    monkeypatch.setenv("MATERIAL_WORKERS", value)
+    assert "MATERIAL_WORKERS" in core.ops.config_problem()
 
 
 def test_bot_refuses_to_start_without_base_url(monkeypatch):

@@ -136,6 +136,32 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             assert results == [2, 2]
             with spaces.enter(a):
                 assert core.get(2)["source_text"] == "Параллельно А"
+
+            # Общая очередь действительно обрабатывает две команды одновременно,
+            # сохраняя ContextVar, базу, каталог и получателей каждого материала.
+            downloads_started = set()
+            both_downloading = asyncio.Event()
+
+            async def simultaneous_download(adapter, *args):
+                downloads_started.add(spaces.active_id())
+                if len(downloads_started) == 2:
+                    both_downloading.set()
+                await asyncio.wait_for(both_downloading.wait(), 2)
+                return png
+
+            monkeypatch.setattr(max_.Max, "_download", simultaneous_download)
+            for uid in (11, 22):
+                item = material(uid)
+                item["message"]["body"]["mid"] = "parallel-inbox"
+                max_queue.enqueue(spaces.stamp(item))
+            assert await asyncio.gather(worker.process_once(), worker.process_once()) == [True, True]
+            assert downloads_started == {aid, bid}
+            for space in (a, b):
+                with spaces.enter(space):
+                    assert core.get(3)["source_text"] == "Описание работы"
+                    assert core.get(3)["photo"].startswith(str(space.folder))
+            monkeypatch.setattr(max_.Max, "_download", download)
+
             with spaces.enter(b):
                 assert core.get(2)["source_text"] == "Параллельно Б"
                 ad = core.ADAPTERS["max"]
@@ -226,6 +252,9 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             assert spaces.stamp(material(1))["message"]["_space"] == own
             post_footer.WAITING.clear()
 
+            await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "before-restart",
+                "user": {"user_id": 11}, "payload": f"w:{bid}:d:edit:2:3"}})
+
             # Повторное открытие использует сохранённые базы и настройки.
             await spaces.close()
             reopened_a, reopened_b = spaces.get(aid), spaces.get(bid)
@@ -233,6 +262,14 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 assert core.get(1)["status"] == "published" and core.get(2)["source_text"] == "Параллельно А"
             with spaces.enter(reopened_b):
                 assert core.get(1)["status"] == "pending" and "ТОЛЬКО_ПРАВИЛО_Б" in core.build_system()
+                assert core.WAITING_EDIT[("max", "11")] == (2, 3)
+            resumed = {"update_type": "message_created", "message": {"sender": {"user_id": 11},
+                "body": {"text": "Правка после перезапуска {bot}"}}}
+            assert spaces.stamp(resumed)["message"]["_space"] == bid
+            await root_max.handle(spaces.stamp(resumed))
+            with spaces.enter(reopened_b):
+                assert core.get(2)["post"] == "Правка после перезапуска {bot}"
+                assert ("max", "11") not in core.WAITING_EDIT
         finally:
             await spaces.close()
             for name, original in root.memories.items():

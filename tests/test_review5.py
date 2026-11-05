@@ -142,8 +142,9 @@ def test_error_text_is_never_interpolated_without_redaction():
     allowed = ("Пришлите обычное фото",  # BadImage: текст — собственный текст бота, а не сетевой ошибки
                "Генерация: {last}")  # status_text: тут last — готовая строка (текст ошибки уже прошёл err())
     offenders = []
-    for name in ("core.py", "ops.py", "tg.py", "max_.py", "main.py", "updater.py"):
-        for n, line in enumerate((ROOT / name).read_text(encoding="utf-8").splitlines(), 1):
+    for path in [*ROOT.glob("*.py"), *ROOT.glob("services/*.py")]:
+        name = str(path.relative_to(ROOT))
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
             leaky = re.search(r'\{(e|exc|ex|last)\}', line) or (

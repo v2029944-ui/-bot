@@ -107,6 +107,8 @@ def _days() -> set[int]:
 
 def config_problem() -> str | None:
     """Проверка настроек времени при запуске: ошибка видна сразу, а не как «черновики не приходят»."""
+    if core.env("MATERIAL_WORKERS", "2") not in ("1", "2"):
+        return "MATERIAL_WORKERS: укажите 1 или 2 обработчика материалов."
     raw_h = core.env("NOTIFY_HOURS", "10-18")
     try:
         a, b = (int(x) for x in raw_h.split("-"))

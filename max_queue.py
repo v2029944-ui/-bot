@@ -1,4 +1,4 @@
-"""Постоянная очередь входящих фото/видео MAX. Один обработчик, независимый от polling."""
+"""Очередь материалов: ограниченный параллелизм между пространствами, порядок внутри каждого."""
 import asyncio
 from collections import Counter
 import hashlib
@@ -105,7 +105,9 @@ class Worker:
                     await core.alert_staff(adapter, f"⚠️ Истёк срок обработки {count} материалов в очереди. Попросите сотрудников отправить их заново.")
         if core.SHUTTING_DOWN or (not spaces.INSTALLED and ops.is_paused()):
             return False
-        row = core.db.execute("SELECT * FROM max_inbox WHERE state='pending' AND next_try<=? ORDER BY created LIMIT 1",
+        row = core.db.execute("SELECT a.* FROM max_inbox a WHERE a.state='pending' AND a.next_try<=? "
+                              "AND NOT EXISTS (SELECT 1 FROM max_inbox busy WHERE busy.space_id=a.space_id AND busy.state='processing') "
+                              "ORDER BY a.created LIMIT 1",
                               (now,)).fetchone()
         if not row:
             return False
@@ -162,6 +164,16 @@ class Worker:
 
     async def run(self):
         recover()  # также после перезапуска фоновой задачи супервизором
+        count = max(1, min(2, int(core.env("MATERIAL_WORKERS", "2"))))
+        tasks = [asyncio.create_task(self.run_lane()) for _ in range(count)]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def run_lane(self):
         while not core.SHUTTING_DOWN:
             if not await core._guard(self.process_once()):
                 await asyncio.sleep(2)
