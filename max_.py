@@ -17,6 +17,7 @@ import max_queue
 import max_actions
 import post_footer
 import comparison
+import spaces
 import html
 
 log = logging.getLogger("max")
@@ -191,10 +192,10 @@ class Max(core.Adapter):
                 kind, payload = att["type"], att["payload"]
                 if kind == "inline_keyboard":
                     if replacement is not None:
-                        admin_rows += [[b for b in row if b.get("payload") == "m:admin"] for row in payload["buttons"]]
+                        admin_rows += [[b for b in row if spaces.payload(b) == "m:admin"] for row in payload["buttons"]]
                         continue
-                    rows = [[b for b in row if (not str(b.get("payload", "")).startswith("d:") if draft_buttons
-                                               else b.get("payload") != "m:admin")] for row in payload["buttons"]]
+                    rows = [[b for b in row if (not spaces.payload(b).startswith("d:") if draft_buttons
+                                               else spaces.payload(b) != "m:admin")] for row in payload["buttons"]]
                     rows = [row for row in rows if row]
                     if rows:
                         atts.append({"type": kind, "payload": {"buttons": rows}})
@@ -203,7 +204,7 @@ class Max(core.Adapter):
                 else:
                     return  # неизвестное вложение не удаляем при замене клавиатуры
             if replacement is not None:
-                rows = replacement + [row for row in admin_rows if row]
+                rows = spaces.namespace(replacement, getattr(self, "workspace_id", None)) + [row for row in admin_rows if row]
                 if rows:
                     atts.append({"type": "inline_keyboard", "payload": {"buttons": rows}})
             edit = {"attachments": atts}
@@ -268,7 +269,7 @@ class Max(core.Adapter):
         elif photo:
             attachments.append({"type": "image", "payload": {"token": await self._cached_upload(photo, "image")}})
         if buttons:
-            attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
+            attachments.append({"type": "inline_keyboard", "payload": {"buttons": spaces.namespace(buttons, getattr(self, "workspace_id", None))}})
         body = {"text": post, "attachments": attachments}
         if isinstance(post, post_footer.LinkedPost):
             body["format"] = "html"
@@ -369,6 +370,11 @@ class Max(core.Adapter):
         await self._send({"user_id": user_id}, text)
 
     async def send_menu(self, user_id, text, rows, silent=False):
+        if spaces.INSTALLED:
+            name = spaces.CURRENT.get().name if spaces.active_id() else "Основное"
+            titled = f"Пространство: {name}\n\n{text}"
+            if len(titled.encode("utf-16-le")) // 2 <= 4000:
+                text = titled
         buttons = [[{"type": "callback", "text": t, "payload": p} for t, p in row] for row in rows] if rows else None
         nav = _NAV.get()
         if nav is None or str(nav["uid"]) != str(user_id):  # рассылка (напоминания и т. п.): обычное сообщение
@@ -430,10 +436,20 @@ class Max(core.Adapter):
 
     async def _handle_limited(self, update):
         async with self._processing:
+            update = spaces.stamp(update)
             if os.getenv("MAX_LOG_UPDATES") == "1":
                 log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
-            if max_queue.is_material(update) and not ops.is_paused():
-                max_queue.enqueue(update)
+            if max_queue.is_material(update):
+                sid = (update.get("message") or {}).get("_space", 0)
+                if spaces.INSTALLED and sid:
+                    with spaces.enter(spaces.get(sid)):
+                        paused = ops.is_paused()
+                else:
+                    paused = ops.is_paused()
+                if paused:
+                    await self.handle(update)
+                else:
+                    max_queue.enqueue(update)
             elif update.get("update_type") == "message_callback" or (update.get("message") or {}).get("body", {}).get("text"):
                 max_actions.enqueue(update)
             else:
@@ -441,6 +457,8 @@ class Max(core.Adapter):
 
     async def handle(self, u: dict):
         try:
+            if await spaces.route_update(self, u):
+                return
             kind = u.get("update_type")
             if kind == "bot_started":
                 uid = u["user"]["user_id"]
@@ -472,6 +490,8 @@ class Max(core.Adapter):
         return True
 
     async def on_message(self, m: dict, source_key=None):
+        if await spaces.route_message(self, m, source_key):
+            return
         if m.get("recipient", {}).get("chat_type", "dialog") != "dialog":
             return  # отвечаем только в личке
         sender = m["sender"]

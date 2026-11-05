@@ -9,6 +9,7 @@ from max_ import Max  # noqa: E402
 from tg import Telegram  # noqa: E402
 import max_queue  # noqa: E402
 import max_actions  # noqa: E402
+import spaces  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -117,12 +118,14 @@ async def main():
     for a in working:
         if not (core.ADAPTERS[ap] if ap else a).approvers:
             raise SystemExit("Не заданы согласующие (MAX_APPROVERS / MAX_ADMINS)")
+    spaces.install()
     core.startup()
     await core.announce_start()
     await ops.announce_update_result()
     try:
-        await serve([*working, max_queue.Worker(core.ADAPTERS["max"]), max_actions.Worker(core.ADAPTERS["max"]), core.Reminder()])
+        await serve([*working, max_queue.Worker(core.ADAPTERS["max"]), max_actions.Worker(core.ADAPTERS["max"]), core.Reminder(), spaces.Maintenance()])
     finally:
+        await spaces.close()
         await core.ADAPTERS["max"].http.aclose()
         if "tg" in core.ADAPTERS:
             await core.ADAPTERS["tg"].bot.session.close()

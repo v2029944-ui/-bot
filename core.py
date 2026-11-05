@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 import post_footer
 import comparison
+import spaces
 from PIL import Image, ImageOps, ImageDraw, UnidentifiedImageError
 
 log = logging.getLogger("core")
@@ -105,6 +106,10 @@ try:
 except sqlite3.OperationalError:
     pass
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_work ON max_inbox(state,next_try,created)")
+try:
+    db.execute("ALTER TABLE max_inbox ADD COLUMN space_id INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
 db.commit()
 
 
@@ -285,7 +290,9 @@ async def status_text(adapter: Adapter) -> str:
             return "✅ отвечает"
         except Exception as e:
             return f"❌ {type(e).__name__}: {err(e)[:150]}"
-    llm, balance = await asyncio.gather(check_llm(), aitunnel_balance())
+    async def balance_for_space():
+        return await aitunnel_balance() if not spaces.active_id() else None
+    llm, balance = await asyncio.gather(check_llm(), balance_for_space())
     last = ("нет данных" if not (LLM_STATE["ok"] or LLM_STATE["err"]) else
             f"последний пост написан {_ago(now - LLM_STATE['ok'])} назад" if LLM_STATE["ok"] >= LLM_STATE["err"] else
             f"последняя генерация закончилась ошибкой {_ago(now - LLM_STATE['err'])} назад: {LLM_STATE['msg'][:100]}")
@@ -504,7 +511,9 @@ def scrub_published(d):
                   post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0
                   WHERE id=? AND status='published'""", (d["id"],))
     if d.get("source_key"):
-        db.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))
+        queue = spaces.queue_db()
+        queue.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))
+        queue.commit()
     db.commit()
 
 
@@ -757,6 +766,8 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
 def build_system() -> str:
     """Базовые правила и отдельно сохранённые пожелания редакции."""
     s = SYSTEM
+    if spaces.active_id():
+        s = s.replace(f"компании «{env('COMPANY', 'нашей компании')}»", f"компании «{spaces.CURRENT.get().name}»", 1)
     # в запрос идут последние 30 правил, чтобы он не разрастался
     rules = [r["text"] for r in db.execute(
         "SELECT text FROM (SELECT id, text FROM rules ORDER BY id DESC LIMIT 30) ORDER BY id")]
@@ -883,7 +894,7 @@ async def _check_rate(adapter: Adapter, author_id: str, author_name: str, source
     if str(author_id) in adapter.approvers:
         return
     if source_key:
-        row = db.execute("SELECT rate_counted FROM max_inbox WHERE event_key=?", (source_key,)).fetchone()
+        row = spaces.queue_db().execute("SELECT rate_counted FROM max_inbox WHERE event_key=?", (source_key,)).fetchone()
         if row and row[0]:
             return  # повтор обработки одного материала не расходует лимит сотрудника
     limit = int(env("RATE_LIMIT_PER_HOUR", "20"))
@@ -897,8 +908,9 @@ async def _check_rate(adapter: Adapter, author_id: str, author_name: str, source
         raise RateLimited(key)
     _HITS[key] = hits + [now]
     if source_key:
-        db.execute("UPDATE max_inbox SET rate_counted=1 WHERE event_key=?", (source_key,))
-        db.commit()
+        queue = spaces.queue_db()
+        queue.execute("UPDATE max_inbox SET rate_counted=1 WHERE event_key=?", (source_key,))
+        queue.commit()
 
 
 def _approval_adapter(d: dict, fallback: Adapter) -> Adapter:
@@ -1664,6 +1676,9 @@ def refresh_people(adapter: Adapter):
     apr = list(dict.fromkeys([*map(str, base_apr), *adm, *(p["uid"] for p in people if p["role"] == "apr")]))
     emp = [*map(str, base_emp), *(p["uid"] for p in people if p["role"] == "emp")]
     adapter.approvers = apr
+    if spaces.INSTALLED and spaces.active_id() == 0:
+        owners = {r[0] for r in spaces.ROOT.db.execute("SELECT owner FROM workspaces")}
+        adapter.approvers = [uid for uid in adapter.approvers if uid not in owners or uid in adapter.admins]
     # пустой список сотрудников = писать может кто угодно (как раньше), кроме режима с заявками
     adapter.allowed = (set(emp) | set(apr)) if (emp or requests_enabled(adapter)) else None
 
@@ -1760,8 +1775,15 @@ def menu_for(adapter: Adapter, uid) -> list:
     rows = [list(r) for r in MENU]
     rows.append([("📋 На проверке", "m:pending")])
     if is_admin(adapter, uid):
+        if spaces.active_id():
+            rows.append([("➕ Добавить человека", "m:space_member")])
+        if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
+            rows.append([("🏢 Рабочие пространства", "m:spaces")])
         rows.append([("👥 Люди", "m:people"), ("🔗 Пригласить", "m:inv"), ("📊 Статус", "m:status")])
-        rows.append([("⏯ Пауза", "m:pause"), ("🔄 Обновить", "m:upd")])
+        if spaces.active_id():
+            rows.append([("⏯ Пауза пространства", "m:pause")])
+        else:
+            rows.append([("⏯ Пауза", "m:pause"), ("🔄 Обновить", "m:upd")])
         rows.append([("📥 Обработка материалов", "m:inbox")])
         rows.append([("🔗 Ссылка в постах", "m:footer")])
         rows.append([("🧪 Сравнение моделей", "m:compare")])
@@ -1962,8 +1984,24 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
         waiting.pop((adapter.name, uid), None)
     WAITING_RULE.discard((adapter.name, uid))
     post_footer.WAITING.pop((adapter.name, uid), None)
+    spaces.WAITING_CREATE.discard(uid)
+    spaces.WAITING_MEMBER.discard((spaces.active_id(), uid))
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    if act == "space_member":
+        if not spaces.active_id() or not is_admin(adapter, uid):
+            return "⛔ Человека добавляет администратор своего пространства.", None
+        spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
+        return "Отправьте две строки:\nID человека в MAX\nсотрудник или проверяющий\n\nОтмена: /cancel", None
+    if act in ("spaces", "space_add"):
+        if spaces.active_id() != 0 or not spaces.global_admin(uid):
+            return "⛔ Пространства создаёт главный администратор.", None
+        if act == "space_add":
+            spaces.WAITING_CREATE.add(uid)
+            return "Отправьте четыре строки:\nНазвание пространства\nID владельца в MAX\nID группы MAX\nID группы Telegram\n\nОтмена: /cancel", None
+        return spaces.view()
+    if spaces.active_id() and act in ("upd", "updgo"):
+        return "Эта операция доступна главному администратору в основном пространстве.", None
     if act in ("compare", "compare_toggle"):
         if not is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None
@@ -1995,9 +2033,12 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
             return "⛔ Очередь доступна только администратору.", None
         import max_queue
         if act == "inretry" and len(parts) == 3:
-            db.execute("UPDATE max_inbox SET state='pending',attempts=0,next_try=0 WHERE event_key=? AND state='failed'",
-                        (parts[2],))
-            db.commit()
+            queue = spaces.queue_db()
+            if spaces.active_id():
+                queue.execute("UPDATE max_inbox SET state='pending',attempts=0,next_try=0 WHERE event_key=? AND state='failed' AND space_id=?", (parts[2], spaces.active_id()))
+            else:
+                queue.execute("UPDATE max_inbox SET state='pending',attempts=0,next_try=0 WHERE event_key=? AND state='failed'", (parts[2],))
+            queue.commit()
         return max_queue.view()
     if act == "rules":
         return rules_view()
@@ -2064,8 +2105,17 @@ async def on_text(adapter: Adapter, user_id, text: str) -> bool:
     """Текст от согласующего: кнопки нижнего меню, текст нового правила, комментарий к посту, старые команды.
     True = сообщение обработано."""
     uid, t = str(user_id), text.strip()
+    if spaces.INSTALLED and await spaces.create_input(adapter, uid, t):
+        return True
+    if spaces.INSTALLED and await spaces.member_input(adapter, uid, t):
+        return True
     if uid not in adapter.approvers:
         return False
+    if t in ("/menu", "/admin", "/myspace"):
+        action = "m:admin" if is_admin(adapter, uid) else "m:menu"
+        message, rows = await on_menu(adapter, uid, action)
+        await adapter.send_menu(uid, message, rows)
+        return True
     key = (adapter.name, uid)
     if key in post_footer.WAITING:
         if not is_admin(adapter, uid):
