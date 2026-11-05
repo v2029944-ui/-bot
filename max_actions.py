@@ -36,6 +36,13 @@ class Worker:
         self.adapter = adapter
         self.active = {}
         self.clean_task = None
+        self.clean_requested = True
+        self.last_cleanup = 0
+
+    def finished(self, task):
+        self.clean_requested = True
+        if not task.cancelled():
+            task.exception()
 
     async def process(self, row):
         try:
@@ -71,14 +78,16 @@ class Worker:
             core.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (row["id"],))
             core.db.commit()
             self.active[row["uid"]] = asyncio.create_task(core._guard(self.process(dict(row))))
-            self.active[row["uid"]].add_done_callback(lambda t: t.cancelled() or t.exception())
+            self.active[row["uid"]].add_done_callback(self.finished)
 
     async def run(self):
         core.db.execute("UPDATE max_actions SET state='pending' WHERE state='processing'")
         core.db.commit()
         while not core.SHUTTING_DOWN:
             self.schedule()
-            if self.clean_task is None or self.clean_task.done():
+            if (self.clean_requested or time.monotonic() - self.last_cleanup >= 30) and (self.clean_task is None or self.clean_task.done()):
+                self.clean_requested = False
+                self.last_cleanup = time.monotonic()
                 self.clean_task = asyncio.create_task(core._guard(self.adapter.cleanup_stale_buttons()))
                 self.clean_task.add_done_callback(lambda t: t.cancelled() or t.exception())
             await asyncio.sleep(1)

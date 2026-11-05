@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import time
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -65,6 +67,8 @@ class Max(core.Adapter):
         self._tasks: set[asyncio.Task] = set()
         self._processing = asyncio.Semaphore(2)
         self._send_locks = {}
+        self._upload_cache = {}
+        self._upload_locks = {}
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
@@ -72,11 +76,39 @@ class Max(core.Adapter):
                 and 400 <= e.response.status_code < 500 and e.response.status_code != 408)
 
     async def call(self, method, path, **kw):
-        r = await self.http.request(method, path, **kw)
+        started = time.monotonic()
+        try:
+            r = await self.http.request(method, path, **kw)
+        finally:
+            if path != "/updates":
+                log.info("timing stage=max_api method=%s endpoint=%s seconds=%.3f", method, path.split("/")[1], time.monotonic() - started)
         r.raise_for_status()
         return r.json() if r.content else {}
 
     # --- отправка ---
+    def forget_uploads(self, paths):
+        for path in paths:
+            self._upload_cache.pop(str(Path(path).resolve()), None)
+
+    async def _cached_upload(self, path, kind, force=False):
+        key = str(Path(path).resolve())
+        lock = self._upload_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            stat = Path(path).stat()
+            signature = (stat.st_size, stat.st_mtime_ns, kind)
+            entry = self._upload_cache.get(key)
+            if not force and entry and entry[0] == signature and time.monotonic() < entry[2]:
+                log.info("timing stage=max_upload cache=hit kind=%s", kind)
+                return entry[1]
+            upload = self._upload_video if kind == "video" else self._upload_image
+            started = time.monotonic()
+            try:
+                token = await upload(path)
+            finally:
+                log.info("timing stage=max_upload kind=%s seconds=%.3f", kind, time.monotonic() - started)
+            self._upload_cache[key] = (signature, token, time.monotonic() + 600)
+            return token
+
     async def _upload_image(self, path) -> str:
         info = await self.call("POST", "/uploads", params={"type": "image"})
         with open(path, "rb") as f:  # обычный файл: в «async with» его нельзя, поэтому отдельный «with»
@@ -194,6 +226,12 @@ class Max(core.Adapter):
             log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
 
     async def cleanup_stale_buttons(self):
+        for path, entry in list(self._upload_cache.items()):
+            if time.monotonic() >= entry[2] or not Path(path).exists():
+                self._upload_cache.pop(path, None)
+        for path, lock in list(self._upload_locks.items()):
+            if path not in self._upload_cache and not lock.locked():
+                self._upload_locks.pop(path, None)
         for row in core.db.execute("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
                                    "WHERE d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt LIMIT 20").fetchall():
             if await self._strip_admin_button({"mid": row["mid"]}, draft_buttons=True):
@@ -219,14 +257,14 @@ class Max(core.Adapter):
             # Не меняем переданную клавиатуру: она может использоваться для других получателей.
             buttons.append([{"type": "callback", "text": "⚙️ Меню админа", "payload": "m:admin"}])
         attachments = []
+        upload_items = media or ([{"type": "video", "path": video}] if video else [{"type": "image", "path": photo}] if photo else [])
         if media:
             for item in media:
-                upload = self._upload_video if item["type"] == "video" else self._upload_image
-                attachments.append({"type": item["type"], "payload": {"token": await upload(item["path"])}})
+                attachments.append({"type": item["type"], "payload": {"token": await self._cached_upload(item["path"], item["type"])}})
         elif video:  # само видео; картинка-превью из кадров здесь не нужна
-            attachments.append({"type": "video", "payload": {"token": await self._upload_video(video)}})
+            attachments.append({"type": "video", "payload": {"token": await self._cached_upload(video, "video")}})
         elif photo:
-            attachments.append({"type": "image", "payload": {"token": await self._upload_image(photo)}})
+            attachments.append({"type": "image", "payload": {"token": await self._cached_upload(photo, "image")}})
         if buttons:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
         body = {"text": post, "attachments": attachments}
@@ -235,6 +273,7 @@ class Max(core.Adapter):
         if silent:
             body["notify"] = False  # без звука (по документации MAX; с реальным токеном не проверено)
         tries, pause = (30, 2.0) if video or any(i["type"] == "video" for i in (media or [])) else (6, 1.5)  # видео MAX обрабатывает дольше картинки
+        refreshed = False
         for i in range(tries):  # MAX отвечает "attachment.not.ready", пока вложение обрабатывается
             try:
                 resp = await self.call("POST", "/messages", params=target, json=body)
@@ -242,6 +281,11 @@ class Max(core.Adapter):
             except httpx.HTTPStatusError as e:
                 if "not.ready" in e.response.text and i < tries - 1:
                     await asyncio.sleep(pause)
+                    continue
+                if not refreshed and i < tries - 1 and e.response.status_code in (400, 404, 422) and "attachment" in e.response.text.lower() and "not.ready" not in e.response.text and upload_items:
+                    refreshed = True
+                    for index, item in enumerate(upload_items):
+                        attachments[index]["payload"]["token"] = await self._cached_upload(item["path"], item["type"], force=True)
                     continue
                 raise
         mid = _mid(resp)
@@ -479,6 +523,13 @@ class Max(core.Adapter):
                 await self.notify(uid, "⚠️ Не получилось обработать материал. Попробуйте ещё раз позже.")
 
     async def _download(self, att: dict, limit: int, what: str) -> bytes:
+        started = time.monotonic()
+        try:
+            return await self._download_inner(att, limit, what)
+        finally:
+            log.info("timing stage=download kind=%s seconds=%.3f", what, time.monotonic() - started)
+
+    async def _download_inner(self, att: dict, limit: int, what: str) -> bytes:
         """Скачивает вложение по ссылке из сообщения, не читая больше limit байт (защита памяти от огромных файлов)."""
         payload = att.get("payload") or {}
         url = payload.get("url")

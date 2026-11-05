@@ -278,11 +278,13 @@ async def status_text(adapter: Adapter) -> str:
     stuck = one("SELECT COUNT(*) FROM drafts WHERE status IN ('publishing','regenerating')")
     day = one("SELECT COUNT(*) FROM drafts WHERE created > ?", now - 86400)
     pub7 = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND created > ?", now - 7 * 86400)
-    try:
-        await asyncio.wait_for(_complete("Отвечай одним словом.", "Ответь: ОК"), 30)
-        llm = "✅ отвечает"
-    except Exception as e:
-        llm = f"❌ {type(e).__name__}: {err(e)[:150]}"
+    async def check_llm():
+        try:
+            await asyncio.wait_for(_complete("Отвечай одним словом.", "Ответь: ОК"), 30)
+            return "✅ отвечает"
+        except Exception as e:
+            return f"❌ {type(e).__name__}: {err(e)[:150]}"
+    llm, balance = await asyncio.gather(check_llm(), aitunnel_balance())
     last = ("нет данных" if not (LLM_STATE["ok"] or LLM_STATE["err"]) else
             f"последний пост написан {_ago(now - LLM_STATE['ok'])} назад" if LLM_STATE["ok"] >= LLM_STATE["err"] else
             f"последняя генерация закончилась ошибкой {_ago(now - LLM_STATE['err'])} назад: {LLM_STATE['msg'][:100]}")
@@ -299,7 +301,7 @@ async def status_text(adapter: Adapter) -> str:
              f"За сутки получено фото: {day}, опубликовано за неделю: {pub7}"]
     if stuck:
         lines.append(f"⚠️ Зависших черновиков: {stuck} (после перезапуска вернутся в работу)")
-    if balance := await aitunnel_balance():
+    if balance:
         lines.append(balance)
     lines.append(f"Свободно на диске: {free}")
     return "\n".join(lines)
@@ -483,6 +485,9 @@ def _unlink(path):
 
 
 def clear_source_cache(d):
+    for adapter in ADAPTERS.values():
+        if forget := getattr(adapter, "forget_uploads", None):
+            forget(draft_files(d))
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_button_cache'").fetchone():
         db.execute("DELETE FROM max_button_cache WHERE mid IN (SELECT mid FROM max_draft_ui WHERE did=?)", (d["id"],))
         db.commit()
@@ -734,7 +739,11 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
             system += (f"\n\nДля этого поста редактор выбрал длину «{label}»: ориентир {low}–{high} символов. "
                        "Этот выбор заменяет остальные пожелания о длине, но не правила достоверности. "
                        "Если фактов мало, напиши короче: не выдумывай подробности и не добавляй воду.")
-        out = await _complete(system, text, b64)
+        started = time.monotonic()
+        try:
+            out = await _complete(system, text, b64)
+        finally:
+            log.info("timing stage=llm seconds=%.3f", time.monotonic() - started)
     except Exception as e:
         LLM_STATE.update(err=time.time(), msg=f"{type(e).__name__}: {err(e)}")
         raise
@@ -1384,6 +1393,7 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         prev = marks.get(t.name)  # None или "unknown" (если прошлая попытка оборвалась)
         marks[t.name] = "unknown"  # сначала фиксируем намерение: сбой после отправки не даст дубль
         _set(did, published_to=_dump_marks(marks))
+        started = time.monotonic()
         try:
             await t.publish(d["photo"], posts[t.name], **media_kw(d))
         except Exception as e:
@@ -1407,6 +1417,8 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
             tail = ("Пост не вышел: исправьте причину и нажмите ✅ ещё раз." if sure else
                     "Пост мог всё же выйти — проверьте канал, прежде чем нажимать ✅ снова.")
             return False, f"⚠️ Не удалось опубликовать в {t.name}: {err(e)}{part}\n{tail}"
+        finally:
+            log.info("timing stage=publish channel=%s seconds=%.3f", t.name, time.monotonic() - started)
         marks[t.name] = "done"
         errors = json.loads(get(did).get("publish_errors") or "{}")
         errors.pop(t.name, None)

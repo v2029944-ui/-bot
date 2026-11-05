@@ -68,7 +68,9 @@ def test_real_adapters_enable_html_for_linked_posts(monkeypatch, tmp_path):
         monkeypatch.setattr(mx, "call", call)
         monkeypatch.setattr(mx, "_upload_image", upload)
         text = post_footer.render("Пост & текст", "max", {"enabled": True, "text": "Бот", "max": "https://max.ru/bot"})
-        await mx.publish("photo.jpg", text)
+        path = tmp_path / "photo.jpg"
+        path.write_bytes(b"image")
+        await mx.publish(str(path), text)
         assert messages[0]["format"] == "html" and '<a href=' in messages[0]["text"]
         await mx.http.aclose()
         telegram = tg.Telegram("123456:ABCDEF", "-1")
