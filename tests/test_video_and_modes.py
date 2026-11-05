@@ -60,7 +60,7 @@ def test_video_goes_through_approval_and_publish_with_the_file(tg, llm, mp4):
     call = llm.calls[-1]
     assert call["b64"] and "ВИДЕО" in call["text"] and "три кадра" in call["text"]  # нейросеть видит кадры
     assert "на видео" in call["system"]  # и ей запрещено писать «на видео»
-    ok, msg = run(core.on_action(tg, "1", "ok", did, 1))
+    ok, msg = run(core.on_action(tg, "1", "okyes", did, 1))
     assert ok and tg.sent("publish_video")[0][1] == d["video"]
 
 
@@ -140,7 +140,7 @@ def test_publish_only_telegram_does_not_poll_and_gets_every_post(llm, png, monke
     run(core.submit(mx, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
     assert mx.sent("approval") and not t.bot.calls  # Telegram согласующим ничего не слал
-    ok, msg = run(core.on_action(mx, "5", "ok", did, 1))
+    ok, msg = run(core.on_action(mx, "5", "okyes", did, 1))
     assert ok and mx.sent("publish") and [c[0] for c in t.bot.calls] == ["send_photo"]
     assert core.get(did)["status"] == "published" and core.get(did)["published_to"] == ""
 
@@ -155,11 +155,11 @@ def test_telegram_failure_is_reported_in_max_and_retry_does_not_duplicate_max(ll
     core.ADAPTERS.update(tg=t, max=mx)
     run(core.submit(mx, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
-    ok, msg = run(core.on_action(mx, "5", "ok", did, 1))
+    ok, msg = run(core.on_action(mx, "5", "okyes", did, 1))
     assert not ok and "tg" in msg and len(mx.sent("publish")) == 1  # в MAX вышло, в Telegram нет
     assert core._parse_marks(core.get(did)["published_to"])["max"] == "done"
     # Обычный повтор требует подтверждения, а подтверждённый не дублирует MAX.
-    run(core.on_action(mx, "5", "ok", did, 1))
+    run(core.on_action(mx, "5", "okyes", did, 1))
     assert len(mx.sent("publish")) == 1 and "оборвалась" in mx.sent("menu")[-1][2]
     t.bot = RecBot()
     assert run(core.on_action(mx, "5", "okforce", did, 1))[0]
@@ -175,7 +175,7 @@ def test_video_from_max_is_approved_then_sent_to_both_channels(llm, mp4):
     did = run(core.submit(mx, "9", "Анна", "Установили новый насос", mp4, kind="video"))
     d = core.get(did)
     assert mx.sent("approval_video") and not mx.sent("publish") and not t.bot.calls
-    assert run(core.on_action(mx, "5", "ok", did, 1))[0]
+    assert run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert mx.sent("publish_video") == [("publish_video", d["video"])]
     name, args, kw = t.bot.calls[0]
     assert name == "send_video" and str(args[1].path) == d["video"]
@@ -206,7 +206,7 @@ def test_old_telegram_draft_is_approved_in_max_and_published_to_both(llm, png):
     did = run(core.submit(mx, "9", "Анна", "Заменили масло и фильтры", png))
     core._set(did, platform="tg")  # черновик, оставшийся до смены режима
     assert core._approval_adapter(core.get(did), None) is mx
-    assert run(core.on_action(mx, "5", "ok", did, 1))[0]
+    assert run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert mx.sent("publish") and [c[0] for c in t.bot.calls] == ["send_photo"]
 
 

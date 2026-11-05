@@ -30,7 +30,7 @@ def test_stale_approval_cannot_publish_concurrently_edited_text(png, llm):
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
 
     async def scenario():
-        return await asyncio.gather(core.on_action(mx, "5", "ok", did, 1),
+        return await asyncio.gather(core.on_action(mx, "5", "okyes", did, 1),
                                     core._apply_edit(mx, "5", did, 1, "Новый ещё не согласованный текст"))
     answers = run(scenario())
     assert "устаревший" in answers[0][1] and not mx.sent("publish")

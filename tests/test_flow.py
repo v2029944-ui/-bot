@@ -21,18 +21,18 @@ def test_without_vision_photo_is_not_sent_to_llm(tg, llm, png, monkeypatch):
 
 def test_publish_and_author_notification_modes(tg, llm, png, monkeypatch):
     did = run(core.submit(tg, "9", "Вася", "x", png))
-    assert run(core.on_action(tg, "1", "ok", did, 1)) == (True, "✅ Опубликовано.")
+    assert run(core.on_action(tg, "1", "okyes", did, 1)) == (True, "✅ Опубликовано.")
     assert tg.sent("publish") and core.get(did)["status"] == "published"
     assert not [o for o in tg.sent("notify") if o[1] == "9"]  # тихий режим: сотрудник ничего не получает
     monkeypatch.setenv("EMPLOYEE_NOTIFY", "1")
     did2 = run(core.submit(tg, "9", "Вася", "y", png))
-    run(core.on_action(tg, "1", "ok", did2, 1))
+    run(core.on_action(tg, "1", "okyes", did2, 1))
     assert [o for o in tg.sent("notify") if o[1] == "9"]
 
 
 def test_only_approvers_can_press_buttons(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "x", png))
-    ok, text = run(core.on_action(tg, "7", "ok", did, 1))
+    ok, text = run(core.on_action(tg, "7", "okyes", did, 1))
     assert not ok and "нет прав" in text and core.get(did)["status"] == "pending"
 
 
@@ -42,7 +42,7 @@ def test_regenerate_sends_to_everyone_and_old_buttons_expire(tg, llm, png):
     run(core.on_action(tg, "1", "redo", did, 1))
     assert core.get(did)["attempts"] == 2 and core.get(did)["post"] == "Новый вариант"
     assert len(tg.sent("approval")) == 4  # 2 первоначальных + 2 новых: кнопки у второго согласующего не протухают
-    ok, text = run(core.on_action(tg, "1", "ok", did, 1))  # кнопка под старым вариантом
+    ok, text = run(core.on_action(tg, "1", "okyes", did, 1))  # кнопка под старым вариантом
     assert "устаревший" in text and core.get(did)["status"] == "pending"
 
 
@@ -58,7 +58,7 @@ def test_busy_message_keeps_buttons(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "x", png))
     core.db.execute("UPDATE drafts SET status='publishing' WHERE id=?", (did,))
     core.db.commit()
-    ok, text = run(core.on_action(tg, "1", "ok", did, 1))
+    ok, text = run(core.on_action(tg, "1", "okyes", did, 1))
     assert ok is False and "обрабатывается" in text  # ok=False: кнопки у черновика не убираются
 
 

@@ -92,7 +92,7 @@ def test_per_channel_status_retry_and_manual_confirmation(mx, llm, png):
     core.ADAPTERS["tg"] = tg
     did = draft(mx, png)
     paths = core.draft_files(core.get(did))
-    run(core.on_action(mx, "5", "ok", did, 1))
+    run(core.on_action(mx, "5", "okyes", did, 1))
     text, rows = mx.sent("menu")[-1][2:]
     assert "MAX — ✅ опубликовано" in text and "Telegram — ❓ результат неизвестен" in text
     assert f"d:seen_tg:{did}:1" in [b[1] for row in rows for b in row]
@@ -107,8 +107,8 @@ def test_definite_failure_status_and_retry_only_remaining_channel(mx, llm, png):
     tg.publish_only = True
     core.ADAPTERS["tg"] = tg
     did = draft(mx, png)
-    run(core.on_action(mx, "5", "ok", did, 1))
+    run(core.on_action(mx, "5", "okyes", did, 1))
     assert "Telegram — ❌ ошибка" in mx.sent("menu")[-1][2]
-    run(core.on_action(mx, "5", "ok", did, 1))
+    run(core.on_action(mx, "5", "okyes", did, 1))
     assert len(mx.sent("publish")) == len(tg.sent("publish")) == 1
     assert "Telegram — ✅ опубликовано" in mx.sent("menu")[-1][2]

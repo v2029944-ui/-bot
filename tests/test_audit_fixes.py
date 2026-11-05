@@ -61,7 +61,7 @@ def test_show_works_after_regeneration(tg, llm, png):
     ok, msg = run(core.on_action(tg, "2", "show", did, 1))  # кнопка из старого напоминания
     assert msg == "" and len(tg.sent("approval")) == before + 1
     assert tg.sent("approval")[-1][3] == core.get(did)["post"]  # показан актуальный текст
-    assert "устаревший" in run(core.on_action(tg, "2", "ok", did, 1))[1]  # а вот ✅ по старому — нет
+    assert "устаревший" in run(core.on_action(tg, "2", "okyes", did, 1))[1]  # а вот ✅ по старому — нет
 
 
 # 1.4 — залипшие ожидания
@@ -91,14 +91,14 @@ def test_unexpected_crash_returns_draft_to_pending(tg, llm, png, monkeypatch):
     async def boom(*a, **k):
         raise RuntimeError("диск")
     monkeypatch.setattr(core, "_safe_notify", boom)  # сбой уже после публикации
-    ok, msg = run(core.on_action(tg, "1", "ok", did, 1))
+    ok, msg = run(core.on_action(tg, "1", "okyes", did, 1))
     assert core.get(did)["status"] in ("published", "pending")  # главное — не «publishing»
     assert "Сбой" in msg or core.get(did)["status"] == "published"
 
     run(core.submit(tg, "9", "Анна", "Ещё одно описание", png))
     did2 = draft_id()
     monkeypatch.setattr(core, "_set", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sqlite")))
-    ok, msg = run(core.on_action(tg, "1", "ok", did2, 1))
+    ok, msg = run(core.on_action(tg, "1", "okyes", did2, 1))
     monkeypatch.undo()
     assert not ok and "Сбой при публикации" in msg and core.get(did2)["status"] == "pending"
 

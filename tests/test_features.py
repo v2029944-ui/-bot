@@ -54,7 +54,7 @@ def test_edit_replaces_text_without_llm_and_resends_to_everyone(tg, llm, png):
     assert len(llm.calls) == calls  # нейросеть не вызывалась
     assert [o for o in tg.sent("approval") if o[3] == "Мой точный текст поста."].__len__() == 2  # обоим согласующим
     assert "заменил черновик" in tg.sent("notify")[-1][2]
-    assert "устаревший" in run(core.on_action(tg, "1", "ok", did, 1))[1]  # старые кнопки погашены
+    assert "устаревший" in run(core.on_action(tg, "1", "okyes", did, 1))[1]  # старые кнопки погашены
     assert not core.WAITING_EDIT
 
 
@@ -62,7 +62,7 @@ def test_edit_then_publish_does_not_retain_a_style_example(tg, llm, png):
     did = new_draft(tg, llm, png)
     run(core.on_action(tg, "1", "edit", did, 1))
     run(core.on_text(tg, "1", "Эталонный текст."))
-    run(core.on_action(tg, "1", "ok", did, 2))
+    run(core.on_action(tg, "1", "okyes", did, 2))
     assert tg.sent("publish")[-1][1] == "Эталонный текст."
     assert "Эталонный текст." not in core.build_system()
     assert core.get(did)["post"] == ""
@@ -162,7 +162,7 @@ def test_reminder_respects_off_window_and_published(tg, llm, png, monkeypatch):
     monkeypatch.setenv("REMIND_AFTER_MIN", "0")
     assert run(core.remind_once()) == 0  # выключено
     monkeypatch.setenv("REMIND_AFTER_MIN", "180")
-    run(core.on_action(tg, "1", "ok", did, 1))
+    run(core.on_action(tg, "1", "okyes", did, 1))
     assert run(core.remind_once()) == 0  # опубликованный не напоминаем
 
 

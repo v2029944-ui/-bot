@@ -285,7 +285,7 @@ def test_remind_marks_only_shown_drafts(tg, llm, png, monkeypatch):
 def test_comment_on_published_post_says_already_handled(tg, llm, png):
     run(core.submit(tg, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
-    run(core.on_action(tg, "1", "ok", did, 1))
+    run(core.on_action(tg, "1", "okyes", did, 1))
     ok, msg = run(core._regenerate(tg, "1", did, comment="короче"))
     assert "уже обработан" in msg
 

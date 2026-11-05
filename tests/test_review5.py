@@ -67,7 +67,7 @@ def test_shutdown_waits_for_publish_in_progress(llm, png, monkeypatch):
 
     async def scenario():
         ad.gate = asyncio.Event()
-        press = asyncio.create_task(core.on_action(ad, "1", "ok", did, 1))
+        press = asyncio.create_task(core.on_action(ad, "1", "okyes", did, 1))
         for _ in range(200):
             if core.INFLIGHT:
                 break

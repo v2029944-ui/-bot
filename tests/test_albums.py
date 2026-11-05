@@ -74,7 +74,7 @@ def test_mixed_album_max_approval_and_both_channels(png, clip, llm, monkeypatch)
     assert len(llm.calls) == 1 and "АЛЬБОМ из 3" in llm.calls[0]["text"] and llm.calls[0]["b64"]
     assert messages[0]["params"] == {"user_id": 5} and not tg.bot.groups
     assert [a["type"] for a in messages[0]["json"]["attachments"]] == ["image", "video", "image", "inline_keyboard"]
-    assert run(core.on_action(mx, "5", "ok", did, 1))[0]
+    assert run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert messages[1]["params"] == {"chat_id": -100}
     assert [a["type"] for a in messages[1]["json"]["attachments"]] == ["image", "video", "image"]
     group = tg.bot.groups[0]["media"]
@@ -83,7 +83,7 @@ def test_mixed_album_max_approval_and_both_channels(png, clip, llm, monkeypatch)
     assert group[0].caption == d["post"] and group[1].caption is None
     assert core.get(did)["status"] == "published" and core.get(did)["published_to"] == ""
     assert all(not Path(p).exists() for p in core.draft_files(d))
-    run(core.on_action(mx, "5", "ok", did, 1))
+    run(core.on_action(mx, "5", "okyes", did, 1))
     assert len(tg.bot.groups) == 1
 
 
@@ -144,9 +144,9 @@ def test_partial_telegram_album_requires_confirmation_and_does_not_repeat_max(pn
     core.ADAPTERS.update(max=mx, tg=tg)
     llm.reply = "Пост " * 300
     did = run(core.submit_album(mx, "9", "Анна", "Заменили насос", photos(png)))
-    assert not run(core.on_action(mx, "5", "ok", did, 1))[0]
+    assert not run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert core._parse_marks(core.get(did)["published_to"]) == {"max": "done", "tg": "unknown"}
-    run(core.on_action(mx, "5", "ok", did, 1))
+    run(core.on_action(mx, "5", "okyes", did, 1))
     assert len(tg.bot.groups) == 1 and len(mx.sent("publish_media")) == 1
     tg.bot.fail_text = False
     assert run(core.on_action(mx, "5", "okforce", did, 1))[0]
@@ -213,7 +213,7 @@ def test_ten_photos_are_kept_and_sent_as_one_telegram_group(png, llm):
     core.ADAPTERS.update(max=mx, tg=tg)
     did = run(core.submit_album(mx, "9", "Анна", "Результаты работы", photos(png, 10)))
     assert len(core.draft_media(core.get(did))) == 10
-    assert run(core.on_action(mx, "5", "ok", did, 1))[0]
+    assert run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert len(tg.bot.groups) == 1 and len(tg.bot.groups[0]["media"]) == 10
 
 

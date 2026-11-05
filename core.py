@@ -1123,6 +1123,21 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
         return await _regenerate(adapter, user_id, did, post_length=length, attempt=attempt)
 
     if action == "ok":
+        names = {"max": "MAX", "tg": "Telegram"}
+        marks = _parse_marks(d.get("published_to"))
+        targets = [names.get(t.name, t.name) for t in publication_targets(d, adapter)
+                   if marks.get(t.name) != "done"]
+        preview = d["post"][:200] + ("…" if len(d["post"]) > 200 else "")
+        await adapter.send_menu(str(user_id),
+                                f"Опубликовать пост №{did} в {', '.join(targets)}?\n\n«{preview}»",
+                                [[("✅ Да, опубликовать", f"d:okyes:{did}:{attempt}")],
+                                 [("↩️ Отмена", f"d:okno:{did}:{attempt}")]])
+        return False, ""
+
+    if action == "okno":
+        return False, "Публикация отменена. Пост остался на согласовании."
+
+    if action == "okyes":
         return await _publish(adapter, user_id, did, attempt)
 
     if action == "okforce":  # «да, опубликовать повторно, хотя прошлая попытка оборвалась»

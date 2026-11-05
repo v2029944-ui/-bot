@@ -63,7 +63,7 @@ def test_stale_pending_drafts_are_closed_at_startup(tg, llm, png, monkeypatch):
     assert core.get(old)["status"] == "expired" and core.get(fresh)["status"] == "pending"
     from pathlib import Path
     assert not Path(photo).exists() and core.LAST_EXPIRED == 1
-    assert "уже обработан" in run(core.on_action(tg, "1", "ok", old, 1))[1]
+    assert "уже обработан" in run(core.on_action(tg, "1", "okyes", old, 1))[1]
     tg.admins = ["1"]
     run(core.announce_start())
     assert "Закрыто неразобранных" in tg.sent("notify")[-1][2]
