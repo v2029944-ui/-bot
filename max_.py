@@ -104,12 +104,16 @@ class Max(core.Adapter):
                         (str(uid), cur["menu"], json.dumps(cur["btn"], ensure_ascii=False) if cur["btn"] else None))
         core.db.commit()
 
-    async def _delete(self, mid):
+    async def _delete(self, mid, uid=None):
         """Удаляет своё сообщение. Ошибка (уже удалено, истёк срок) не страшна."""
         try:
             await self.call("DELETE", "/messages", params={"message_id": mid})
         except Exception:
             log.warning("не удалось удалить сообщение %s", mid, exc_info=True)
+        if uid is not None:  # удалённое сообщение больше не держит кнопку «Меню админа»
+            btn = self._ui(uid)["btn"]
+            if btn and btn.get("mid") == mid:
+                self._ui_set(uid, btn=None)
 
     async def _strip_admin_button(self, prev: dict):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
@@ -191,14 +195,16 @@ class Max(core.Adapter):
         nav = _NAV.get()
         if nav is None or str(nav["uid"]) != str(user_id):  # рассылка (напоминания и т. п.): обычное сообщение
             return await self._send({"user_id": user_id}, text, None, buttons, silent=silent)
-        # Шаг меню: кнопки «Меню админа» нет, а прошлое меню этого человека удаляется — остаётся одно.
-        resp = await self._send({"user_id": user_id}, text, None, buttons, silent=silent, admin_menu=False)
+        # Шаг меню: прошлое меню этого человека удаляется — остаётся одно. Кнопка «Меню админа» есть на всех
+        # экранах, кроме самой главной страницы меню админа (там она не нужна, а на остальных — путь назад).
+        main = bool(rows) and rows == core.menu_for(self, user_id)
+        resp = await self._send({"user_id": user_id}, text, None, buttons, silent=silent, admin_menu=not main)
         old, new = self._ui(user_id)["menu"], _mid(resp)
         nav["sent_menu"] = True
         self._ui_set(user_id, menu=new)
         if old and old != new:
             nav["deleted"] = old
-            await self._delete(old)
+            await self._delete(old, user_id)
         return resp
 
     # --- входящие ---
@@ -425,7 +431,7 @@ class Max(core.Adapter):
             tracked = self._ui(uid)["menu"]
             if payload.startswith("m:"):
                 if payload != "m:admin" and pressed != tracked:
-                    await self._delete(pressed)  # старое меню вне учёта (например, от прошлой версии бота)
+                    await self._delete(pressed, uid)  # старое меню вне учёта (например, от прошлой версии бота)
             elif pressed == tracked and not ctx["sent_menu"]:
-                await self._delete(pressed)  # подтверждение или подменю закрыто нажатием без нового меню
+                await self._delete(pressed, uid)  # подтверждение или подменю закрыто нажатием без нового меню
                 self._ui_set(uid, menu=None)
