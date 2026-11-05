@@ -1093,18 +1093,23 @@ async def _apply_edit(adapter: Adapter, user_id, did: int, attempt: int, text: s
     text = text.strip()
     if not text:
         return True, "Пустой текст. Пришлите исправленный пост или /cancel."
-    length = len(text.encode("utf-16-le")) // 2
-    limit = min(MAX_POST_CHARS, 3900)
-    if length > limit:
-        return True, f"Слишком длинно ({length} ед. UTF-16, максимум {limit}). Сократите и пришлите снова."
     d = get(did)
     if not d or d["status"] != "pending" or d["attempts"] != attempt:
         return False, "Этот вариант уже изменён или обработан, правка не применена."
     if _parse_marks(d.get("published_to")):
         return False, PARTIAL_EDIT_BLOCKED
+    footer = json.loads(d["footer"]) if d.get("footer") is not None else post_footer.config()
+    try:
+        text = post_footer.restore_copied_marker(text, d["post"], footer)
+    except ValueError as e:
+        return True, err(e)
+    length = len(text.encode("utf-16-le")) // 2
+    limit = min(MAX_POST_CHARS, 3900)
+    if length > limit:
+        return True, f"Слишком длинно ({length} ед. UTF-16, максимум {limit}). Сократите и пришлите снова."
     if not _claim(did, "pending", "regenerating"):
         return False, BUSY
-    _set(did, post=text, footer=None, attempts=d["attempts"] + 1, status="pending")
+    _set(did, post=text, footer=json.dumps(footer, ensure_ascii=False), attempts=d["attempts"] + 1, status="pending")
     sent, last = await _send_draft(d, did, text, adapter, actor=str(user_id))
     if not sent:  # откат, как при пересоздании: сообщения с новыми кнопками нет
         _set(did, post=d["post"], footer=d.get("footer"), attempts=d["attempts"], status="pending")

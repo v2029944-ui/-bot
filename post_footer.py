@@ -84,3 +84,20 @@ def render(post, channel, settings):
     if len(markup.encode("utf-16-le")) // 2 > 4000:
         raise ValueError("Пост со ссылкой слишком длинный. Сократите текст и подтвердите публикацию заново.")
     return LinkedPost(markup, plain)
+
+
+def restore_copied_marker(text, original, settings):
+    """Восстановить неизменённый скопированный заключительный абзац без угадывания ссылки."""
+    marker = settings.get("marker", "{bot}")
+    if not settings.get("enabled") or not (settings.get("max") or settings.get("tg")) or marker in text:
+        return text
+    label = settings["text"]
+    if marker in original:
+        tail = original.strip().split("\n\n")[-1]
+        visible = tail.replace(marker, label)
+        if marker in tail and text.endswith(visible):
+            return text[:-len(visible)] + tail
+    elif text == label or text.endswith("\n" + label):
+        return text[:-len(label)] + marker
+    raise ValueError(f"Чтобы сохранить ссылку в предложении, замените её слово на {marker} и пришлите текст снова. "
+                     "Бот сам сделает его кликабельным. Отмена: /cancel")
