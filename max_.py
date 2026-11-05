@@ -130,16 +130,25 @@ class Max(core.Adapter):
                 self._ui_set(uid, btn=None)
         return True
 
-    async def _strip_admin_button(self, prev: dict, draft_buttons=False):
+    async def _strip_admin_button(self, prev: dict, draft_buttons=False, replacement=None):
+        lock = self._send_locks.setdefault("message:" + str(prev["mid"]), asyncio.Lock())
+        async with lock:
+            return await self._edit_buttons(prev, draft_buttons, replacement)
+
+    async def _edit_buttons(self, prev, draft_buttons=False, replacement=None):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
         По документации MAX вложения при правке заменяются целиком, поэтому передаём их заново (те же токены)."""
         try:
             message = await self.call("GET", "/messages/" + quote(str(prev["mid"]), safe=""))
             body = message["body"]
             atts = []
+            admin_rows = []
             for att in body.get("attachments") or []:
                 kind, payload = att["type"], att["payload"]
                 if kind == "inline_keyboard":
+                    if replacement is not None:
+                        admin_rows += [[b for b in row if b.get("payload") == "m:admin"] for row in payload["buttons"]]
+                        continue
                     rows = [[b for b in row if (not str(b.get("payload", "")).startswith("d:") if draft_buttons
                                                else b.get("payload") != "m:admin")] for row in payload["buttons"]]
                     rows = [row for row in rows if row]
@@ -149,6 +158,10 @@ class Max(core.Adapter):
                     atts.append({"type": kind, "payload": {"token": payload["token"]}})
                 else:
                     return  # неизвестное вложение не удаляем при замене клавиатуры
+            if replacement is not None:
+                rows = replacement + [row for row in admin_rows if row]
+                if rows:
+                    atts.append({"type": "inline_keyboard", "payload": {"buttons": rows}})
             await self.call("PUT", "/messages", params={"message_id": prev["mid"]},
                             json={"text": body.get("text") or "", "attachments": atts})
             return True
@@ -256,6 +269,11 @@ class Max(core.Adapter):
         nav = _NAV.get()
         if nav is None or str(nav["uid"]) != str(user_id):  # рассылка (напоминания и т. п.): обычное сообщение
             return await self._send({"user_id": user_id}, text, None, buttons, silent=silent)
+        if nav.get("inline_mid") and buttons:
+            if await self._strip_admin_button({"mid": nav["inline_mid"]}, replacement=buttons):
+                nav["sent_menu"] = True
+                return {"message": {"body": {"mid": nav["inline_mid"]}}}
+            # Если сервис не разрешил правку, оставляем доступное отдельное меню.
         # Шаг меню: прошлое меню этого человека удаляется — остаётся одно. Кнопка «Меню админа» есть на всех
         # экранах, кроме самой главной страницы меню админа (там она не нужна, а на остальных — путь назад).
         main = bool(rows) and rows == core.menu_for(self, user_id)
@@ -471,6 +489,9 @@ class Max(core.Adapter):
             return  # payload не обязателен в официальной схеме Callback
         pressed = ((cb.get("message") or {}).get("body") or {}).get("mid")  # сообщение, под которым нажали
         ctx = {"uid": str(uid), "sent_menu": False}
+        parts = payload.split(":")
+        if pressed and len(parts) == 4 and parts[0] == "d" and parts[1] in ("change", "length", "back"):
+            ctx["inline_mid"] = pressed
         token = _NAV.set(ctx)
         if pressed and pressed == self._ui(uid)["menu"] and payload.startswith("d:"):
             await self._delete(pressed, uid)
