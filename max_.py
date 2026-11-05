@@ -1,5 +1,6 @@
 """MAX-адаптер на прямых запросах к официальному Bot API (https://dev.max.ru/docs-api)."""
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -13,6 +14,21 @@ import max_queue
 
 log = logging.getLogger("max")
 API = "https://platform-api.max.ru"
+
+
+core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
+core.db.commit()
+
+# Кто сейчас нажал кнопку или написал команду: сообщения-меню для этого человека считаются «шагами меню».
+_NAV: contextvars.ContextVar = contextvars.ContextVar("max_nav", default=None)
+
+
+def _mid(resp):
+    """id отправленного сообщения из ответа MAX ({"message": {"body": {"mid": ...}}})."""
+    try:
+        return (resp or {})["message"]["body"]["mid"] or None
+    except (KeyError, TypeError):
+        return None
 
 
 def _id(x):
@@ -69,15 +85,54 @@ class Max(core.Adapter):
             raise RuntimeError("MAX не вернул токен загруженного видео")
         return token
 
+    # --- состояние интерфейса: одно меню и одна кнопка «Меню админа» на человека ---
+    def _ui(self, uid) -> dict:
+        r = core.db.execute("SELECT menu_mid, btn FROM max_ui WHERE uid=?", (str(uid),)).fetchone()
+        try:
+            btn = json.loads(r["btn"]) if r and r["btn"] else None
+        except ValueError:
+            btn = None
+        return {"menu": r["menu_mid"] if r else None, "btn": btn}
+
+    def _ui_set(self, uid, menu=..., btn=...):
+        cur = self._ui(uid)
+        if menu is not ...:
+            cur["menu"] = menu
+        if btn is not ...:
+            cur["btn"] = btn
+        core.db.execute("INSERT OR REPLACE INTO max_ui(uid, menu_mid, btn) VALUES(?,?,?)",
+                        (str(uid), cur["menu"], json.dumps(cur["btn"], ensure_ascii=False) if cur["btn"] else None))
+        core.db.commit()
+
+    async def _delete(self, mid):
+        """Удаляет своё сообщение. Ошибка (уже удалено, истёк срок) не страшна."""
+        try:
+            await self.call("DELETE", "/messages", params={"message_id": mid})
+        except Exception:
+            log.warning("не удалось удалить сообщение %s", mid, exc_info=True)
+
+    async def _strip_admin_button(self, prev: dict):
+        """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
+        По документации MAX вложения при правке заменяются целиком, поэтому передаём их заново (те же токены)."""
+        atts = list(prev.get("attachments") or [])
+        if prev.get("buttons"):
+            atts.append({"type": "inline_keyboard", "payload": {"buttons": prev["buttons"]}})
+        try:
+            await self.call("PUT", "/messages", params={"message_id": prev["mid"]},
+                            json={"text": prev.get("text") or "", "attachments": atts})
+        except Exception:
+            log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
+
     async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None,
                     admin_menu=True):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
-        if admin_menu and "user_id" in target and core.is_admin(self, target["user_id"]):
-            # Каждое новое сообщение в личке оставляет доступ к меню под рукой.
+        with_admin = bool(admin_menu and "user_id" in target and core.is_admin(self, target["user_id"]))
+        base_buttons = [list(row) for row in (buttons or [])]  # без кнопки админа: нужны, чтобы потом её убрать
+        buttons = [list(row) for row in base_buttons]
+        if with_admin and not any(b.get("payload") == "m:admin" for row in buttons for b in row):
+            # Кнопка стоит только под последним сообщением: при отправке нового она убирается из прежнего.
             # Не меняем переданную клавиатуру: она может использоваться для других получателей.
-            buttons = [list(row) for row in (buttons or [])]
-            if not any(b.get("payload") == "m:admin" for row in buttons for b in row):
-                buttons.append([{"type": "callback", "text": "⚙️ Меню админа", "payload": "m:admin"}])
+            buttons.append([{"type": "callback", "text": "⚙️ Меню админа", "payload": "m:admin"}])
         attachments = []
         if media:
             for item in media:
@@ -87,6 +142,7 @@ class Max(core.Adapter):
             attachments.append({"type": "video", "payload": {"token": await self._upload_video(video)}})
         elif photo:
             attachments.append({"type": "image", "payload": {"token": await self._upload_image(photo)}})
+        media_atts = list(attachments)
         if buttons:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
         body = {"text": post, "attachments": attachments}
@@ -95,12 +151,20 @@ class Max(core.Adapter):
         tries, pause = (30, 2.0) if video or any(i["type"] == "video" for i in (media or [])) else (6, 1.5)  # видео MAX обрабатывает дольше картинки
         for i in range(tries):  # MAX отвечает "attachment.not.ready", пока вложение обрабатывается
             try:
-                return await self.call("POST", "/messages", params=target, json=body)
+                resp = await self.call("POST", "/messages", params=target, json=body)
+                break
             except httpx.HTTPStatusError as e:
                 if "not.ready" in e.response.text and i < tries - 1:
                     await asyncio.sleep(pause)
                     continue
                 raise
+        if with_admin:
+            uid = target["user_id"]
+            prev, mid = self._ui(uid)["btn"], _mid(resp)
+            self._ui_set(uid, btn={"mid": mid, "text": post, "attachments": media_atts, "buttons": base_buttons} if mid else None)
+            if prev and prev.get("mid") and prev["mid"] != mid:
+                await self._strip_admin_button(prev)
+        return resp
 
     async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
         d = core.get(did)
@@ -124,7 +188,18 @@ class Max(core.Adapter):
 
     async def send_menu(self, user_id, text, rows, silent=False):
         buttons = [[{"type": "callback", "text": t, "payload": p} for t, p in row] for row in rows] if rows else None
-        await self._send({"user_id": user_id}, text, None, buttons, silent=silent)
+        nav = _NAV.get()
+        if nav is None or str(nav["uid"]) != str(user_id):  # рассылка (напоминания и т. п.): обычное сообщение
+            return await self._send({"user_id": user_id}, text, None, buttons, silent=silent)
+        # Шаг меню: кнопки «Меню админа» нет, а прошлое меню этого человека удаляется — остаётся одно.
+        resp = await self._send({"user_id": user_id}, text, None, buttons, silent=silent, admin_menu=False)
+        old, new = self._ui(user_id)["menu"], _mid(resp)
+        nav["sent_menu"] = True
+        self._ui_set(user_id, menu=new)
+        if old and old != new:
+            nav["deleted"] = old
+            await self._delete(old)
+        return resp
 
     # --- входящие ---
     async def run(self):
@@ -221,10 +296,14 @@ class Max(core.Adapter):
         images = [a for a in atts if a.get("type") == "image"]
         if not images and not videos:
             if body.get("text"):
-                if await core.on_text(self, uid, body["text"]):
-                    return
-                if str(uid) in self.approvers:
-                    return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
+                token = _NAV.set({"uid": str(uid), "sent_menu": False})
+                try:
+                    if await core.on_text(self, uid, body["text"]):
+                        return
+                    if str(uid) in self.approvers:
+                        return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
+                finally:
+                    _NAV.reset(token)
             return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото или видео с описанием в подписи 📷")
         media_atts = [a for a in atts if a.get("type") in ("image", "video")]
         if len(media_atts) > core.MAX_ALBUM_ITEMS:
@@ -321,14 +400,32 @@ class Max(core.Adapter):
         payload = cb.get("payload")
         if not isinstance(payload, str):
             return  # payload не обязателен в официальной схеме Callback
+        pressed = ((cb.get("message") or {}).get("body") or {}).get("mid")  # сообщение, под которым нажали
+        ctx = {"uid": str(uid), "sent_menu": False}
+        token = _NAV.set(ctx)
+        ok = True
         try:
-            if payload.startswith("m:"):  # кнопки меню правил
+            if payload.startswith("m:"):  # кнопки меню
                 text, rows = await core.on_menu(self, uid, payload)
-                return await self.send_menu(uid, text, rows)
-            _, action, did, attempt = payload.split(":")
-            _, text = await core.on_action(self, uid, action, int(did), int(attempt))
+                await self.send_menu(uid, text, rows)
+                text = None
+            else:
+                _, action, did, attempt = payload.split(":")
+                _, text = await core.on_action(self, uid, action, int(did), int(attempt))
         except Exception as e:
+            ok = False
             log.exception("callback failed")
             text = f"⚠️ Ошибка: {core.err(e)}"
+        finally:
+            _NAV.reset(token)
         if text:
             await self.notify(uid, text)
+        # Прошлый шаг не должен висеть. Пост на согласование (кнопки d:) не трогаем: удаляем только сообщения-меню.
+        if ok and pressed and pressed != ctx.get("deleted"):
+            tracked = self._ui(uid)["menu"]
+            if payload.startswith("m:"):
+                if payload != "m:admin" and pressed != tracked:
+                    await self._delete(pressed)  # старое меню вне учёта (например, от прошлой версии бота)
+            elif pressed == tracked and not ctx["sent_menu"]:
+                await self._delete(pressed)  # подтверждение или подменю закрыто нажатием без нового меню
+                self._ui_set(uid, menu=None)
