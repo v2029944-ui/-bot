@@ -346,6 +346,7 @@ class Max(core.Adapter):
                     await self.notify(approver, f"Вариант {option['model']} слишком длинный для показа со ссылкой.")
                     continue
                 rows = [[{"type": "callback", "text": "✅ Выбрать этот вариант", "payload": f"d:choose_{index}:{did}:{n}"}],
+                        [{"type": "callback", "text": "🔁 Заново", "payload": f"d:redo:{did}:{n}"}],
                         [{"type": "callback", "text": "❌ Отклонить материал", "payload": f"d:del:{did}:{n}"}]]
                 await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media)
                 delivered += 1

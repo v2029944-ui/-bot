@@ -59,10 +59,40 @@ def test_three_generations_one_draft_selection_and_publication(mx, png, llm, alb
     assert "устаревший" in run(core.on_action(mx, "5", "choose_0", did, 1))[1]
     assert comparison.MODEL.get() is None
     run(core.on_action(mx, "5", "redo", did, 2))
-    assert core.get(did)["post"] == "Пост от " + MODELS[1]
-    run(core.on_action(mx, "5", "okyes", did, 3))
+    assert len(llm.calls) == 6 and len(json.loads(core.get(did)["candidates"])) == 3
+    run(core.on_action(mx, "5", "choose_1", did, 3))
+    run(core.on_action(mx, "5", "okyes", did, 4))
     assert mx.sent("publish")[0][1] == "Пост от " + MODELS[1]
     assert core.get(did)["candidates"] == "[]" and core.get(did)["selected_model"] == ""
+
+
+def test_redo_before_selection_replaces_all_candidates(mx, png, llm):
+    enable()
+    llm.reply = lambda system, text: "Вариант " + comparison.MODEL.get()
+    did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
+    assert run(core.on_action(mx, "5", "redo", did, 1))[0]
+    assert len(llm.calls) == 6 and core.get(did)["attempts"] == 2
+    assert "устаревший" in run(core.on_action(mx, "5", "choose_0", did, 1))[1]
+    assert "выберите" in run(core.on_action(mx, "5", "okyes", did, 2))[1]
+
+
+def test_failed_regeneration_keeps_old_candidates(mx, png, llm):
+    enable()
+    did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
+    before = core.get(did)
+    llm.reply = RuntimeError("Unavailable")
+    assert not run(core.on_action(mx, "5", "redo", did, 1))[0]
+    assert core.get(did)["candidates"] == before["candidates"] and core.get(did)["attempts"] == 1
+
+
+def test_disabled_comparison_regenerates_only_selected_model(mx, png, llm):
+    enable()
+    llm.reply = lambda system, text: "Пост " + comparison.MODEL.get()
+    did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
+    run(core.on_action(mx, "5", "choose_1", did, 1))
+    ops.set_setting("model_comparison", json.dumps({"enabled": False, "models": MODELS}))
+    run(core.on_action(mx, "5", "redo", did, 2))
+    assert len(llm.calls) == 4 and core.get(did)["post"] == "Пост " + MODELS[1]
 
 
 def test_failed_model_does_not_discard_other_candidates(mx, png, llm):

@@ -1178,7 +1178,7 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
             return False, "Не удалось отправить выбранный вариант. Повторите выбор."
         _set(did, status="pending")
         return True, ""
-    if options and action not in ("del", "delyes", "delno", "rejectphoto", "rejecttext", "rejectcustom"):
+    if options and action not in ("redo", "del", "delyes", "delno", "rejectphoto", "rejecttext", "rejectcustom"):
         return False, "Сначала выберите один из вариантов моделей."
 
     if action == "pubstatus":
@@ -1284,7 +1284,7 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
         return await reject_post(adapter, user_id, did, attempt, reason)
 
     if action == "redo":
-        return await _regenerate(adapter, user_id, did, attempt=attempt)
+        return await _regenerate(adapter, user_id, did, attempt=attempt, compare=True)
 
     if action == "redoc":
         WAITING_REJECT.pop((adapter.name, str(user_id)), None)
@@ -1478,12 +1478,12 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
 
 
 async def _regenerate(adapter: Adapter, user_id, did: int, comment: str | None = None,
-                      post_length: str | None = None, attempt: int | None = None) -> tuple[bool, str]:
-    return await _guard(_regenerate_inner(adapter, user_id, did, comment, post_length, attempt))
+                      post_length: str | None = None, attempt: int | None = None, compare=False) -> tuple[bool, str]:
+    return await _guard(_regenerate_inner(adapter, user_id, did, comment, post_length, attempt, compare))
 
 
 async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | None = None,
-                            post_length: str | None = None, attempt: int | None = None) -> tuple[bool, str]:
+                            post_length: str | None = None, attempt: int | None = None, compare=False) -> tuple[bool, str]:
     d = get(did)
     if not d:
         return True, "Черновик не найден."
@@ -1507,7 +1507,8 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
         length = (d.get("post_length") or "") if post_length is None else post_length
         model_token = comparison.MODEL.set(d.get("selected_model") or None)
         try:
-            post = await generate_post(d["photo"], d["source_text"], prev=d["post"], comment=comment,
+            generate = generate_options if compare else generate_post
+            post = await generate(d["photo"], d["source_text"], prev=d["post"], comment=comment,
                                        video=bool(d.get("video")), media=draft_media(d), post_length=length)
         finally:
             comparison.MODEL.reset(model_token)
@@ -1516,11 +1517,16 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
         _set(did, status="pending")
         return False, f"⚠️ Не удалось пересоздать: {err(e)}"
 
-    _set(did, post=post, footer=None, post_length=length, attempts=d["attempts"] + 1, status="pending")
+    options = post.options if isinstance(post, comparison.Options) else []
+    _set(did, post=post, candidates=json.dumps(options, ensure_ascii=False),
+         selected_model="" if options else d.get("selected_model", ""),
+         footer=None, post_length=length, attempts=d["attempts"] + 1)
     sent, last = await _send_draft(d, did, post, adapter, actor=str(user_id))
     if not sent:  # откат: иначе в базе attempts=N+1, а сообщения с такими кнопками нет
-        _set(did, post=d["post"], footer=d.get("footer"), post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
+        _set(did, post=d["post"], candidates=d.get("candidates") or "[]", selected_model=d.get("selected_model", ""),
+             footer=d.get("footer"), post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
         return False, f"⚠️ Новый вариант готов, но не отправился: {err(last)}"
+    _set(did, status="pending")
     # новый вариант уходит всем согласующим: у остальных кнопки не должны «протухать»
     if adapter.name == "max":
         return True, ""  # новый пост уже доставлен с кнопками; служебный ответ после него не нужен
