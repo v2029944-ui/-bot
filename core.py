@@ -1448,6 +1448,8 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
         _set(did, post=d["post"], post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
         return False, f"⚠️ Новый вариант готов, но не отправился: {err(last)}"
     # новый вариант уходит всем согласующим: у остальных кнопки не должны «протухать»
+    if adapter.name == "max":
+        return True, ""  # новый пост уже доставлен с кнопками; служебный ответ после него не нужен
     return True, ("🔁 Новый вариант ниже (отправлен всем согласующим)." if sent > 1
                   else "🔁 Новый вариант ниже.")
 
@@ -1463,7 +1465,8 @@ async def on_comment(adapter: Adapter, user_id, text: str) -> bool:
     await adapter.notify(str(user_id), "Переписываю с учётом комментария…")
     before = get(did)
     _, msg = await _regenerate(adapter, user_id, did, comment=text)
-    await adapter.notify(str(user_id), msg)
+    if msg:
+        await adapter.notify(str(user_id), msg)
     after = get(did)
     if before and after and after["attempts"] > before["attempts"]:
         rule = await _learn(text, before["post"]) if env("LEARN_RULES", "1") != "0" else None
