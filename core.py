@@ -227,6 +227,46 @@ def _ago(sec: float) -> str:
     return f"{sec // 86400} дн"
 
 
+async def aitunnel_balance() -> str | None:
+    """Баланс по документированному GET /v1/aitunnel/balance; ключ не выводится."""
+    from decimal import Decimal, InvalidOperation
+    from urllib.parse import urlsplit
+    try:
+        base = urlsplit(env("LLM_BASE_URL"))
+        if PROVIDER != "openai" or base.scheme != "https" or base.hostname != "api.aitunnel.ru":
+            return None
+    except ValueError:
+        return None
+    token = env("LLM_API_KEY")
+    if not token:
+        return "💰 Баланс AITunnel: не задан LLM_API_KEY."
+
+    def money(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError("invalid amount")
+        amount = Decimal(str(value))
+        if not amount.is_finite() or abs(amount) > Decimal("1e15"):
+            raise ValueError("invalid amount")
+        return f"{amount:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            response = await client.get("https://api.aitunnel.ru/v1/aitunnel/balance",
+                                        headers={"Authorization": f"Bearer {token}"})
+            response.raise_for_status()
+            data = response.json()
+        text = "💰 Баланс AITunnel: " + money(data["balance"])
+        if data.get("budget") is not None:
+            text += "\nБюджет ключа: " + money(data["budget"])
+        return text
+    except httpx.HTTPStatusError as exc:
+        return f"💰 Баланс AITunnel: недоступен (HTTP {exc.response.status_code})."
+    except httpx.RequestError:
+        return "💰 Баланс AITunnel: не удалось связаться с сервисом."
+    except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation):
+        return "💰 Баланс AITunnel: сервис вернул неожиданный ответ."
+
+
 async def status_text(adapter: Adapter) -> str:
     """Сводка для /status: жив ли бот, что в очереди, отвечает ли нейросеть (проверка стоит доли копейки)."""
     import shutil
@@ -258,6 +298,8 @@ async def status_text(adapter: Adapter) -> str:
              f"За сутки получено фото: {day}, опубликовано за неделю: {pub7}"]
     if stuck:
         lines.append(f"⚠️ Зависших черновиков: {stuck} (после перезапуска вернутся в работу)")
+    if balance := await aitunnel_balance():
+        lines.append(balance)
     lines.append(f"Свободно на диске: {free}")
     return "\n".join(lines)
 
