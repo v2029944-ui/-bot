@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 import post_footer
+import comparison
 from PIL import Image, ImageOps, ImageDraw, UnidentifiedImageError
 
 log = logging.getLogger("core")
@@ -89,7 +90,7 @@ except sqlite3.OperationalError:
     pass
 for _col in ("last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
              "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
-             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT"):
+             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''"):
     try:
         db.execute(f"ALTER TABLE drafts ADD COLUMN {_col}")
     except sqlite3.OperationalError:
@@ -500,7 +501,7 @@ def scrub_published(d):
     """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
     db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
                   photo='',video='',media='[]',published_to='',publish_errors='{}',
-                  post_length='',rejection_reason='',footer=NULL,attempts=1,last_sent=0,reminded=0,expiry_warned=0
+                  post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0
                   WHERE id=? AND status='published'""", (d["id"],))
     if d.get("source_key"):
         db.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))
@@ -782,7 +783,7 @@ async def _claude(system: str, text: str, b64: str | None) -> str:
     content = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
-    r = await _client.messages.create(model=MODEL, max_tokens=1000, system=system,
+    r = await _client.messages.create(model=comparison.MODEL.get() or MODEL, max_tokens=1000, system=system,
                                       messages=[{"role": "user", "content": content}])
     # первым блоком может прийти не текст: собираем все текстовые
     out = "".join(getattr(b, "text", "") for b in r.content if getattr(b, "type", "text") == "text").strip()
@@ -799,7 +800,7 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
     content = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    payload = {"model": MODEL, "messages": [{"role": "system", "content": system},
+    payload = {"model": comparison.MODEL.get() or MODEL, "messages": [{"role": "system", "content": system},
                                             {"role": "user", "content": content}]}
     headers = {"Authorization": f"Bearer {os.environ['LLM_API_KEY']}"}
     key = "max_tokens"
@@ -978,6 +979,28 @@ async def drain_inflight(timeout: float) -> int:
         await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
 
 
+async def generate_options(*args, **kwargs):
+    c = comparison.config()
+    if not c["enabled"]:
+        return await generate_post(*args, **kwargs)
+
+    async def one(model):
+        token = comparison.MODEL.set(model)
+        try:
+            post = await generate_post(*args, **kwargs)
+            if len(post.encode("utf-16-le")) // 2 > 3500:
+                raise ValueError("Слишком длинный вариант для сравнения")
+            return {"model": model, "post": post}
+        except Exception as e:
+            return {"model": model, "error": err(e)[:120]}
+        finally:
+            comparison.MODEL.reset(token)
+    options = await asyncio.gather(*(one(model) for model in c["models"]))
+    if not any(o.get("post") for o in options):
+        raise RuntimeError("Ни одна модель не подготовила пост. Проверьте баланс и доступность моделей.")
+    return comparison.Options(options)
+
+
 async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str, photo_bytes: bytes,
                   kind: str = "photo", filename: str = "", source_key: str | None = None):
     if (existing := await resume_submission(adapter, source_key)) is not None:
@@ -994,7 +1017,7 @@ async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str,
         rm()
         raise
     try:
-        post = await generate_post(path, text, video=bool(vpath))
+        post = await generate_options(path, text, video=bool(vpath))
     except BaseException:  # в том числе отмена при остановке: иначе файлы висят на диске навсегда
         rm()
         raise
@@ -1003,6 +1026,8 @@ async def _submit(adapter: Adapter, author_id: str, author_name: str, text: str,
         (adapter.name, author_id, author_name, text, path, vpath, post, time.time(), source_key))
     db.commit()
     did = cur.lastrowid
+    if isinstance(post, comparison.Options):
+        _set(did, candidates=json.dumps(post.options, ensure_ascii=False))
     d = get(did)
     sent, last = await _send_draft(d, did, post, adapter)
     if not sent:  # иначе черновик-сирота: в базе есть, никто не видел
@@ -1043,12 +1068,14 @@ async def _submit_album(adapter, author_id, author_name, text, items, source_key
         await _check_rate(adapter, author_id, author_name, source_key)  # один альбом — один пост
         preview = await asyncio.to_thread(album_preview, media)
         files.add(preview)
-        post = await generate_post(preview, text, media=media)
+        post = await generate_options(preview, text, media=media)
         cur = db.execute(
             "INSERT INTO drafts(platform,author_id,author_name,source_text,photo,media,post,created,source_key) VALUES(?,?,?,?,?,?,?,?,?)",
             (adapter.name, author_id, author_name, text, preview, json.dumps(media), post, time.time(), source_key))
         db.commit()
         did = cur.lastrowid
+        if isinstance(post, comparison.Options):
+            _set(did, candidates=json.dumps(post.options, ensure_ascii=False))
         sent, last = await _send_draft(get(did), did, post, adapter)
         if not sent:
             if source_key:
@@ -1136,6 +1163,23 @@ async def on_action(adapter: Adapter, user_id, action: str, did: int, attempt: i
         return False, ""
     if d["attempts"] != attempt:
         return True, "Это устаревший вариант. Используйте последнее сообщение с постом."
+    options = json.loads(d.get("candidates") or "[]")
+    if action.startswith("choose_"):
+        index = action.removeprefix("choose_")
+        if not index.isdigit() or int(index) >= len(options) or not options[int(index)].get("post"):
+            return False, "Этот вариант недоступен."
+        if not _claim(did, "pending", "regenerating"):
+            return False, BUSY
+        chosen = options[int(index)]
+        _set(did, post=chosen["post"], selected_model=chosen["model"], candidates="[]", attempts=attempt + 1)
+        sent, last = await _send_draft(get(did), did, chosen["post"], adapter, actor=str(user_id))
+        if not sent:
+            _set(did, post=d["post"], selected_model=d.get("selected_model", ""), candidates=d["candidates"], attempts=attempt, status="pending")
+            return False, "Не удалось отправить выбранный вариант. Повторите выбор."
+        _set(did, status="pending")
+        return True, ""
+    if options and action not in ("del", "delyes", "delno", "rejectphoto", "rejecttext", "rejectcustom"):
+        return False, "Сначала выберите один из вариантов моделей."
 
     if action == "pubstatus":
         text, rows = publication_view(d, adapter)
@@ -1461,8 +1505,12 @@ async def _regenerate_inner(adapter: Adapter, user_id, did: int, comment: str | 
     WAITING_RULE.discard(key)
     try:
         length = (d.get("post_length") or "") if post_length is None else post_length
-        post = await generate_post(d["photo"], d["source_text"], prev=d["post"], comment=comment,
-                                   video=bool(d.get("video")), media=draft_media(d), post_length=length)
+        model_token = comparison.MODEL.set(d.get("selected_model") or None)
+        try:
+            post = await generate_post(d["photo"], d["source_text"], prev=d["post"], comment=comment,
+                                       video=bool(d.get("video")), media=draft_media(d), post_length=length)
+        finally:
+            comparison.MODEL.reset(model_token)
     except Exception as e:
         log.exception("regenerate failed")
         _set(did, status="pending")
@@ -1710,6 +1758,7 @@ def menu_for(adapter: Adapter, uid) -> list:
         rows.append([("⏯ Пауза", "m:pause"), ("🔄 Обновить", "m:upd")])
         rows.append([("📥 Обработка материалов", "m:inbox")])
         rows.append([("🔗 Ссылка в постах", "m:footer")])
+        rows.append([("🧪 Сравнение моделей", "m:compare")])
     return rows
 
 
@@ -1909,6 +1958,10 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
     post_footer.WAITING.pop((adapter.name, uid), None)
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    if act in ("compare", "compare_toggle"):
+        if not is_admin(adapter, uid):
+            return "⛔ Настройка доступна только администратору.", None
+        return await comparison.menu(toggle=act == "compare_toggle")
     if act.startswith("footer"):
         if not is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None

@@ -16,6 +16,8 @@ import ops
 import max_queue
 import max_actions
 import post_footer
+import comparison
+import html
 
 log = logging.getLogger("max")
 API = "https://platform-api.max.ru"
@@ -327,6 +329,29 @@ class Max(core.Adapter):
         preview = dict(settings)
         if not preview.get("max"):
             preview["max"] = preview.get("tg", "")
+        options = json.loads(d.get("candidates") or "[]")
+        if options:
+            delivered = 0
+            for index, option in enumerate(options):
+                if not option.get("post"):
+                    await self.notify(approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
+                    continue
+                content = post_footer.render(option["post"], "max", preview)
+                header = f"Модель: {option['model']}\n\n"
+                if isinstance(content, post_footer.LinkedPost):
+                    content = post_footer.LinkedPost(html.escape(header) + content, header + content.plain)
+                else:
+                    content = header + content
+                if len(content.encode("utf-16-le")) // 2 > 4000:
+                    await self.notify(approver, f"Вариант {option['model']} слишком длинный для показа со ссылкой.")
+                    continue
+                rows = [[{"type": "callback", "text": "✅ Выбрать этот вариант", "payload": f"d:choose_{index}:{did}:{n}"}],
+                        [{"type": "callback", "text": "❌ Отклонить материал", "payload": f"d:del:{did}:{n}"}]]
+                await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media)
+                delivered += 1
+            if not delivered:
+                raise RuntimeError("Нет доступных вариантов для согласования")
+            return
         post = post_footer.render(post, "max", preview)
         buttons = [[{"type": "callback", "text": label, "payload": payload}
                     for label, payload in row] for row in core.approval_rows(did, n)]
