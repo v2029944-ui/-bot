@@ -179,3 +179,21 @@ def test_post_message_is_never_deleted_by_its_buttons():
         assert not api.of("DELETE")
         await adapter.http.aclose()
     run(scenario())
+
+
+def test_submenus_have_admin_button_but_main_admin_page_does_not():
+    async def scenario():
+        api = Api()
+        adapter = make(api)
+        cb = lambda payload, mid: {"callback_id": "c", "user": {"user_id": 1}, "payload": payload,
+                                   "message": {"body": {"mid": mid}}}
+        await adapter.on_callback(cb("m:admin", "x"))      # главная страница меню админа
+        assert "m:admin" not in [b["payload"] for b in buttons(api.of("POST")[-1][3])]
+        await adapter.on_callback(cb("m:people", "m1"))    # «Люди»: путь назад есть
+        assert buttons(api.of("POST")[-1][3])[-1]["payload"] == "m:admin"
+        await adapter.on_callback(cb("m:admin", "m2"))     # вернулись: снова главная, без кнопки
+        assert "m:admin" not in [b["payload"] for b in buttons(api.of("POST")[-1][3])]
+        assert [c[2]["message_id"] for c in api.of("DELETE")] == ["m1", "m2"]  # лишних меню не осталось
+        assert adapter._ui("1")["menu"] == "m3" and adapter._ui("1")["btn"] is None
+        await adapter.http.aclose()
+    run(scenario())
