@@ -86,40 +86,34 @@ def test_menu_lets_every_approver_choose_mode():
 
 
 def test_draft_goes_silent_outside_hours_and_waits_in_defer_mode(tg, llm, png, monkeypatch):
-    a = tg
-    a.admins = ["1"]
-    core.refresh_people(a)
-    monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))  # понедельник, 22:00 по Екатеринбургу
-    ops.set_mode(a, "1", "silent")
-    ops.set_mode(a, "2", "defer")
-    run(core.submit(a, "9", "Анна", "Заменили масло и фильтры", png))
-    did = draft_id()
-    assert [o[1] for o in a.sent("approval")] == ["1"] and a.sent("silent")  # "1" получил, но тихо
-    assert core.db.execute("SELECT uid FROM deferred WHERE did=?", (did,)).fetchone()["uid"] == "2"
-    assert core.get(did)["status"] == "pending"  # черновик не пропал, хотя «живых» доставок нет у второго
-
-    # утро: началось рабочее время — придержанное приходит со звуком, напоминание считается от доставки
+    monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
+    ops.set_mode(tg, "9", "silent")
+    did = run(core.submit(tg, "9", "Анна", "Заменили масло", png))
+    assert [o[1] for o in tg.sent("approval")] == ["9"] and tg.sent("silent")
+    ops.set_mode(tg, "9", "defer")
+    did2 = run(core.submit(tg, "9", "Анна", "Заменили фильтр", png))
+    assert core.db.execute("SELECT uid FROM deferred WHERE did=?", (did2,)).fetchone()["uid"] == "9"
+    assert core.get(did2)["status"] == "pending"
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 27, 10))
     assert run(ops.flush_deferred()) == 1
-    assert [o[1] for o in a.sent("approval")] == ["1", "2"] and len(a.sent("silent")) == 1
-    assert core.db.execute("SELECT COUNT(*) FROM deferred").fetchone()[0] == 0
-    assert core.get(did)["last_sent"] == ts(2026, 10, 27, 10)
+    assert [o[1] for o in tg.sent("approval")] == ["9", "9"]
+    assert core.get(did2)["last_sent"] == ts(2026, 10, 27, 10)
 
 
 def test_deferred_draft_is_dropped_if_resolved_and_sent_at_once_when_mode_changes(tg, llm, png, monkeypatch):
     a = tg
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
-    ops.set_mode(a, "2", "defer")
+    ops.set_mode(a, "9", "defer")
     run(core.submit(a, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
-    run(core.on_menu(a, "2", "m:nset:normal"))  # передумал: всё придержанное приходит сразу
-    assert [o[1] for o in a.sent("approval")] == ["1", "2"]
+    run(core.on_menu(a, "9", "m:nset:normal"))  # передумал: всё придержанное приходит сразу
+    assert [o[1] for o in a.sent("approval")] == ["9"]
 
     run(core.submit(a, "9", "Анна", "Ещё одно описание", png))
     did2 = draft_id()
-    ops.set_mode(a, "2", "defer")
+    ops.set_mode(a, "9", "defer")
     core.db.execute("DELETE FROM deferred")
-    ops.enqueue(a, "2", did2)
+    ops.enqueue(a, "9", did2)
     core._set(did2, status="deleted")
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 27, 11))
     assert run(ops.flush_deferred()) == 0
@@ -133,7 +127,7 @@ def test_actor_gets_new_variant_immediately_even_in_defer_mode(tg, llm, png, mon
     ops.set_mode(tg, "1", "defer")
     before = len(tg.sent("approval"))
     run(core.on_action(tg, "1", "redo", did, 1))
-    assert [o[1] for o in tg.sent("approval")[before:]] == ["1", "2"]  # он сам нажал — ждать нечего
+    assert [o[1] for o in tg.sent("approval")[before:]] == ["9", "1"]  # автор и действующий администратор: он сам нажал — ждать нечего
 
 
 def test_reminders_respect_mute_and_pause(tg, llm, png, monkeypatch):
@@ -147,9 +141,9 @@ def test_reminders_respect_mute_and_pause(tg, llm, png, monkeypatch):
     ops.set_paused(True)
     assert run(core.remind_once()) == 0  # на паузе не напоминаем
     ops.set_paused(False)
-    ops.set_mode(tg, "2", "muted")
+    ops.set_mode(tg, "9", "muted")
     assert run(core.remind_once()) == 1
-    assert [o[1] for o in tg.sent("silent")] == ["2"]  # «мут» — тихо, второму — со звуком
+    assert [o[1] for o in tg.sent("silent")] == ["9"]  # «мут» — тихо, второму — со звуком
 
 
 # ---------- пауза ----------
@@ -174,7 +168,7 @@ def test_admin_changes_roles_with_confirmation():
     a = admin_adapter()
     make_person(a, "77", "Иван", "emp")
     text, rows = run(core.on_menu(a, "1", "m:pset:77"))
-    assert "сейчас: сотрудник" in text and [b[1] for b in rows[0]] == ["m:prole:emp:77", "m:prole:apr:77", "m:prole:adm:77"]
+    assert "сейчас: участник" in text and [b[1] for b in rows[0]] == ["m:prole:member:77", "m:prole:adm:77"]
     text, rows = run(core.on_menu(a, "1", "m:prole:adm:77"))
     assert "администратор" in text and rows[0][0][1] == "m:proleok:adm:77" and "добавляет и убирает людей" in text
     assert "77" not in a.admins  # без подтверждения ничего не изменилось
@@ -183,7 +177,7 @@ def test_admin_changes_roles_with_confirmation():
     assert any(o[1] == "77" and "роль изменена" in o[2] for o in a.sent("notify"))
     assert is_admin_menu_visible(a, "77")
     run(core.on_menu(a, "77", "m:proleok:apr:77"))  # сам себя понизил: другой админ остался
-    assert "77" not in a.admins and "77" in a.approvers
+    assert "77" not in a.admins and "77" in a.allowed and "77" not in a.approvers
 
 
 def is_admin_menu_visible(a, uid):
@@ -467,3 +461,35 @@ def test_failed_update_names_the_failing_test_and_reason(repos, tmp_path):
     assert "FAILED tests/test_demo.py::test_settings_are_listed" in r["detail"]
     assert "HOUSEKEEPING_SEC" in r["detail"] and "PASSED" not in r["detail"]
     assert len(r["detail"].splitlines()) <= 8  # коротко: тест и причина, без полотна вывода
+
+
+def test_failed_dependency_install_forces_resync_after_rollback(sandbox):
+    import hashlib
+    import shlex
+    code = sandbox.app / 'code'
+    code.mkdir()
+    (code / 'main.py').write_text('')
+    (code / 'requirements.txt').write_text('new\n')
+    old = sandbox.tmp / 'old-requirements'
+    old.write_text('old\n')
+    old_hash = hashlib.sha256(old.read_bytes()).hexdigest()
+    (sandbox.tmp / 'stamp').write_text(old_hash + '\n')
+    data = sandbox.tmp / 'data'
+    data.mkdir()
+    (data / 'update_state.json').write_text(json.dumps({'status': 'probation', 'prev': 'abc'}))
+    python = sandbox.bin / 'python'
+    script = python.read_text()
+    script = script.replace('case "$1" in',
+        f'case "$*" in *--rollback*) cp {shlex.quote(str(old))} {shlex.quote(str(code / "requirements.txt"))} ;; esac\ncase "$1" in')
+    python.write_text(script)
+    pip_log = sandbox.tmp / 'pip-calls'
+    first = sandbox.tmp / 'first-install'
+    (sandbox.bin / 'pip').write_text('#!/bin/sh\n'
+        f'echo "$*" >> {shlex.quote(str(pip_log))}\n'
+        f'if [ ! -f {shlex.quote(str(first))} ]; then touch {shlex.quote(str(first))}; exit 1; fi\n'
+        'exit 0\n')
+    p, calls = run_entry(sandbox, [1, 0], {'GITHUB_REPO': 'file:///x', 'CODE_DIR': str(code)})
+    assert p.returncode == 0
+    assert any('--rollback' in call for call in calls)
+    assert len(pip_log.read_text().splitlines()) == 2
+    assert (sandbox.tmp / 'stamp').read_text().strip() == old_hash

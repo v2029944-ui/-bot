@@ -5,9 +5,9 @@ import core
 from conftest import run
 
 
-def test_submit_sends_draft_to_every_approver(tg, llm, png):
+def test_submit_sends_draft_only_to_author(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "форсунки", png))
-    assert [o[1] for o in tg.sent("approval")] == ["1", "2"]
+    assert [o[1] for o in tg.sent("approval")] == ["9"]
     assert core.get(did)["status"] == "pending"
     call = llm.calls[0]
     assert "форсунки" in call["text"] and call["b64"]  # описание и картинка ушли в нейросеть
@@ -23,7 +23,7 @@ def test_publish_and_author_notification_modes(tg, llm, png, monkeypatch):
     did = run(core.submit(tg, "9", "Вася", "x", png))
     assert run(core.on_action(tg, "1", "okyes", did, 1)) == (True, "✅ Опубликовано.")
     assert tg.sent("publish") and core.get(did)["status"] == "published"
-    assert not [o for o in tg.sent("notify") if o[1] == "9"]  # тихий режим: сотрудник ничего не получает
+    assert [o for o in tg.sent("notify") if o[1] == "9"]  # тихий режим: сотрудник ничего не получает
     monkeypatch.setenv("EMPLOYEE_NOTIFY", "1")
     did2 = run(core.submit(tg, "9", "Вася", "y", png))
     run(core.on_action(tg, "1", "okyes", did2, 1))
@@ -36,12 +36,12 @@ def test_only_approvers_can_press_buttons(tg, llm, png):
     assert not ok and "нет прав" in text and core.get(did)["status"] == "pending"
 
 
-def test_regenerate_sends_to_everyone_and_old_buttons_expire(tg, llm, png):
+def test_regenerate_sends_to_author_and_acting_admin_and_old_buttons_expire(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "x", png))
     llm.reply = "Новый вариант"
     run(core.on_action(tg, "1", "redo", did, 1))
     assert core.get(did)["attempts"] == 2 and core.get(did)["post"] == "Новый вариант"
-    assert len(tg.sent("approval")) == 4  # 2 первоначальных + 2 новых: кнопки у второго согласующего не протухают
+    assert len(tg.sent("approval")) == 3  # первоначальный автору, новый — автору и действующему администратору
     ok, text = run(core.on_action(tg, "1", "okyes", did, 1))  # кнопка под старым вариантом
     assert "устаревший" in text and core.get(did)["status"] == "pending"
 

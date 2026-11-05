@@ -4,7 +4,8 @@ from conftest import run
 
 
 def test_rules_menu_add_and_delete(tg):
-    assert run(core.on_text(tg, "7", "📝 Правила стиля")) is False  # не согласующий: игнор
+    assert run(core.on_text(tg, "7", "📝 Правила стиля")) is True
+    assert "администратор" in tg.sent("menu")[-1][2]  # не согласующий: игнор
     assert run(core.on_text(tg, "1", "📝 Правила стиля")) is True
     assert "Пока пусто" in tg.sent("menu")[-1][2]
     run(core.on_text(tg, "1", "➕ Новое правило"))
@@ -14,7 +15,7 @@ def test_rules_menu_add_and_delete(tg):
     rid = core.db.execute("SELECT id FROM rules").fetchone()[0]
     text, rows = run(core.on_menu(tg, "1", f"m:del:{rid}"))
     assert "Пока пусто" in text
-    assert "нет прав" in run(core.on_menu(tg, "7", "m:rules"))[0]
+    assert "администратор" in run(core.on_menu(tg, "7", "m:rules"))[0]
 
 
 def test_rule_waiting_can_be_cancelled(tg):

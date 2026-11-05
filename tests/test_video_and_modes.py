@@ -56,7 +56,7 @@ def test_video_goes_through_approval_and_publish_with_the_file(tg, llm, mp4):
     did = draft_id()
     d = core.get(did)
     assert d["video"] and os.path.exists(d["video"]) and os.path.exists(d["photo"])
-    assert [o[1] for o in tg.sent("approval_video")] == ["1", "2"]  # видео ушло обоим согласующим
+    assert [o[1] for o in tg.sent("approval_video")] == ["9"]  # видео ушло только автору
     call = llm.calls[-1]
     assert call["b64"] and "ВИДЕО" in call["text"] and "три кадра" in call["text"]  # нейросеть видит кадры
     assert "на видео" in call["system"]  # и ей запрещено писать «на видео»
@@ -231,7 +231,7 @@ def test_main_builds_publish_only_telegram_with_max(monkeypatch):
     monkeypatch.setattr(main, "serve", fake_serve)
     run(main.main())
     assert core.ADAPTERS["tg"].publish_only and core.ADAPTERS["tg"].approvers == []
-    assert not core.ADAPTERS["max"].publish_only and core.ADAPTERS["max"].approvers == ["5"]
+    assert not core.ADAPTERS["max"].publish_only and core.ADAPTERS["max"].allowed == {"5"}
 
 
 def test_main_defaults_to_max_workflow(monkeypatch):
@@ -250,8 +250,7 @@ def test_main_defaults_to_max_workflow(monkeypatch):
     (dict(TG_MODE="publish_only", TG_TOKEN="123456:ABCDEF", TG_CHANNEL="@c"), "нужен MAX_TOKEN"),
     (dict(TG_MODE="publish_only", TG_TOKEN="123456:ABCDEF", TG_CHANNEL="@c", MAX_TOKEN="m", MAX_CHANNEL="-5",
           MAX_APPROVERS="5", APPROVAL_PLATFORM="tg"), "только на публикацию"),
-    (dict(TG_MODE="publish_only", TG_TOKEN="123456:ABCDEF", TG_CHANNEL="@c", MAX_TOKEN="m", MAX_CHANNEL="-5"),
-     "Не заданы согласующие")])
+])
 def test_main_rejects_wrong_publish_only_setups(monkeypatch, env, text):
     import main
     _env(monkeypatch, **env)
@@ -330,7 +329,7 @@ def test_max_video_message_is_submitted_as_video(mx, monkeypatch):
     monkeypatch.setattr(core, "submit", fake_submit)
     run(mx.on_message(video_msg()))
     assert got == [("9", "Установили новый насос", b"VIDEO", {"kind": "video", "filename": "video.mp4"})]
-    assert ("notify", "9", "✅ Принято") in mx.out
+    assert ("notify", "9", "Пост готов к редактированию и публикации ✅") in mx.out
     assert FakeHttp.downloads == [("GET", "http://cdn/v.mp4")]
 
 

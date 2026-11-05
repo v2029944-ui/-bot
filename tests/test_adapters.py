@@ -52,10 +52,13 @@ def test_max_ignores_group_and_stays_quiet_for_employee(monkeypatch):
     async def notify(uid, text):
         sent.append((uid, text))
     monkeypatch.setattr(m, "notify", notify)
+    async def menu(uid, text, rows, **kw):
+        sent.append((uid, text))
+    monkeypatch.setattr(m, "send_menu", menu)
     core.ADAPTERS["max"] = m
     run(m.on_message({"recipient": {"chat_type": "chat"}, "sender": {"user_id": 9}, "body": {"text": "привет"}}))
     run(m.on_message({"recipient": {"chat_type": "dialog"}, "sender": {"user_id": 9}, "body": {"text": "привет"}}))
-    assert sent == []  # в группе — игнор, сотруднику в личке — тишина
+    assert sent == [(9, "Меню участника:")]  # в группе — игнор, сотруднику в личке — тишина
 
 
 # ---------- main ----------

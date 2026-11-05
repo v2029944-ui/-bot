@@ -11,7 +11,7 @@ def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
     """/rules, /rule_add, /rule_del — только для согласующих. None = это не наша команда."""
     cmd, _, arg = text.strip().partition(" ")
     cmd, arg = cmd.split("@")[0].lower(), arg.strip()
-    if cmd not in ("/rules", "/rule_add", "/rule_del") or str(user_id) not in adapter.approvers:
+    if cmd not in ("/rules", "/rule_add", "/rule_del") or not core.is_admin(adapter, user_id):
         return None
     if cmd == "/rules":
         return core.rules_view()[0] + "\n\nДобавить: /rule_add текст\nУдалить: /rule_del номер"
@@ -55,7 +55,7 @@ def rules_view() -> tuple[str, list]:
 async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, list | None]:
     """Нажатие кнопки меню (payload вида m:rules / m:add / m:del:5). Возвращает (текст, кнопки)."""
     uid = str(user_id)
-    if uid not in adapter.approvers:
+    if not core.is_member(adapter, uid):
         return "⛔ У вас нет прав.", None
     if payload == "m:admin" and not core.is_admin(adapter, uid):
         return "⛔ Меню доступно только администратору.", None
@@ -67,11 +67,13 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     spaces.WAITING_MEMBER.discard((spaces.active_id(), uid))
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    if act in ("rules", "del", "add") and not core.is_admin(adapter, uid):
+        return "⛔ Настройки меняет только администратор.", None
     if act in ("member", "space_member", "inv", "invn"):  # старые кнопки ведут в действующее добавление
         if not core.is_admin(adapter, uid):
             return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
-        return "Отправьте две строки:\nID человека в MAX\nсотрудник или проверяющий\n\nОтмена: /cancel", None
+        return "Отправьте ID человека в MAX. Он будет добавлен как участник.\n\nОтмена: /cancel", None
     if act in ("spaces", "space_add"):
         if spaces.active_id() != 0 or not spaces.global_admin(uid):
             return "⛔ Пространства создаёт главный администратор.", None
@@ -81,6 +83,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return spaces.view()
     if spaces.active_id() and act in ("upd", "updgo"):
         return "Эта операция доступна главному администратору в основном пространстве.", None
+    if act in ("upd", "updgo") and not core.is_global_admin(adapter, uid):
+        return "⛔ Обновление запускает только администратор из MAX_ADMINS (главный).", None
     if act in ("compare", "compare_toggle"):
         if not core.is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None
@@ -106,7 +110,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return "Меню администратора:", core.menu_for(adapter, uid)
     if act == "pending":
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() and len(parts[2]) < 8 else 0
-        return core.pending_view(adapter, page)
+        return core.pending_view(adapter, page, uid)
     if act in ("inbox", "inretry"):
         if not core.is_admin(adapter, uid):
             return "⛔ Очередь доступна только администратору.", None
@@ -149,10 +153,11 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     return "Выберите действие:", core.menu_for(adapter, uid)
 
 
-def pending_view(adapter, page=0):
+def pending_view(adapter, page=0, uid=None):
     from datetime import datetime
     drafts = [dict(r) for r in core.db.execute("SELECT * FROM drafts WHERE status='pending' ORDER BY created,id")
-              if core._approval_adapter(dict(r), adapter) is adapter]
+              if core._approval_adapter(dict(r), adapter) is adapter
+              and uid is not None and core.can_manage_draft(adapter, uid, dict(r))]
     total = len(drafts)
     page = min(max(0, page), max(0, (total - 1) // 8))
     lines = [f"📋 На проверке: {total}. Страница {page + 1}."]
@@ -185,7 +190,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         return True
     if await spaces.member_input(adapter, uid, t):
         return True
-    if uid not in adapter.approvers:
+    if not core.is_member(adapter, uid):
         return False
     if t in ("/menu", "/admin", "/myspace"):
         action = "m:admin" if core.is_admin(adapter, uid) else "m:menu"
@@ -249,6 +254,10 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         if not keep:
             core.WAITING_EDIT.pop(key, None)
         await adapter.notify(uid, msg)
+        return True
+    if key in core.WAITING_RULE and not core.is_admin(adapter, uid):
+        core.WAITING_RULE.discard(key)
+        await adapter.notify(uid, "⛔ Настройки меняет только администратор.")
         return True
     if key in core.WAITING_RULE and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
         core.WAITING_RULE.discard(key)

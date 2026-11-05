@@ -133,10 +133,12 @@ def config_problem() -> str | None:
 
 
 def in_window(now: float | None = None) -> bool:
-    dt = datetime.fromtimestamp(now or time.time(), _tz())
+    dt = datetime.fromtimestamp(time.time() if now is None else now, _tz())
     a, b = _hours()
     inside = (a <= dt.hour < b) if a < b else (dt.hour >= a or dt.hour < b)  # 20-6: вечер и ночь
-    return dt.isoweekday() in _days() and inside
+    # After midnight an overnight shift still belongs to its starting weekday.
+    day = dt - timedelta(days=1) if a > b and dt.hour < b else dt
+    return day.isoweekday() in _days() and inside
 
 
 def window_text() -> str:
@@ -203,11 +205,20 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
     sql, args = "SELECT * FROM deferred", ()
     if adapter is not None and uid is not None:
         sql, args = sql + " WHERE platform=? AND uid=?", (adapter.name, str(uid))
+    # Old deferred broadcasts may target former reviewers. Reassign those deliveries
+    # before reading the batch so the author can receive them in the same pass.
+    for r in core.db.execute(sql, args).fetchall():
+        ad, d = core.ADAPTERS.get(r["platform"]), core.get(r["did"])
+        if ad and d and d["status"] == "pending" and not core.can_manage_draft(ad, r["uid"], d):
+            core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?", (r["platform"], r["uid"], r["did"]))
+            for recipient in core.draft_recipients(d, ad):
+                enqueue(ad, recipient, d["id"])
+            core.db.commit()
     done = 0
     for r in core.db.execute(sql, args).fetchall():
         ad, d = core.ADAPTERS.get(r["platform"]), core.get(r["did"])
         key = (r["platform"], r["uid"], r["did"])
-        if ad is None or not d or d["status"] in ("published", "deleted", "expired") or r["uid"] not in ad.approvers:
+        if ad is None or not d or d["status"] in ("published", "deleted", "expired") or not core.can_manage_draft(ad, r["uid"], d):
             core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?", key)
             core.db.commit()
             continue
@@ -335,6 +346,8 @@ def _data_dir() -> Path:
 
 
 def upd_go(adapter, uid) -> tuple[str, None]:
+    if not core.is_global_admin(adapter, uid):
+        return "⛔ Обновление запускает только администратор из MAX_ADMINS (главный).", None
     if not updates_enabled():
         return "Автообновление не настроено.", None
     busy = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status IN ('publishing','regenerating')").fetchone()[0]

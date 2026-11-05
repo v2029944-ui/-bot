@@ -16,7 +16,7 @@ def test_first_click_and_cancel_do_not_publish(mx, llm, png):
 def test_confirmation_publishes_once_and_rechecks_permissions(mx, llm, png):
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     run(core.on_action(mx, "5", "ok", did, 1))
-    assert "нет прав" in run(core.on_action(mx, "9", "okyes", did, 1))[1]
+    assert "нет прав" in run(core.on_action(mx, "8", "okyes", did, 1))[1]
     assert not mx.sent("publish")
     assert run(core.on_action(mx, "5", "okyes", did, 1))[0]
     run(core.on_action(mx, "5", "okyes", did, 1))

@@ -49,6 +49,7 @@ def test_generated_text_rejected_before_unsendable_draft(answer, png, llm):
 
 def test_manual_emoji_text_obeys_telegram_utf16_limit(png, llm):
     mx = FakeAdapter("max", ["5"])
+    core.ADAPTERS["max"] = mx
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     assert "Слишком длинно" in run(core._apply_edit(mx, "5", did, 1, "😀" * 2001))[1]
     assert core.get(did)["attempts"] == 1

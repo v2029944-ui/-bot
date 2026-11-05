@@ -114,7 +114,7 @@ async def main():
                                 ids("MAX_ADMINS"))
     if ids("MAX_ADMINS"):
         log.info("MAX_ADMINS задан: новые люди добавляются кнопками (заявки)")
-    elif not ids("MAX_EMPLOYEES"):
+    elif core.ADAPTERS["max"].allowed is None:
         log.warning("MAX_EMPLOYEES пуст: материалы может прислать кто угодно")
     working = [core.ADAPTERS["max"]]
     ap = os.getenv("APPROVAL_PLATFORM")
@@ -122,9 +122,6 @@ async def main():
         raise SystemExit(f"APPROVAL_PLATFORM={ap}, но этот мессенджер не настроен")
     if ap and core.ADAPTERS[ap].publish_only:
         raise SystemExit(f"APPROVAL_PLATFORM={ap}: этот мессенджер работает только на публикацию")
-    for a in working:
-        if not (core.ADAPTERS[ap] if ap else a).approvers:
-            raise SystemExit("Не заданы согласующие (MAX_APPROVERS / MAX_ADMINS)")
     spaces.install()
     core.startup()
     await core.announce_start()

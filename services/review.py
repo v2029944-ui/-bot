@@ -12,12 +12,14 @@ def approval_rows(did: int, attempt: int):
 
 
 async def _apply_edit(adapter: core.Adapter, user_id, did: int, attempt: int, text: str) -> tuple[bool, str]:
-    """Согласующий прислал свой текст: подставляем его как новый вариант (нейросеть не трогает) и шлём
-    всем согласующим с кнопками. Возвращает (ждать ли текст дальше, сообщение)."""
+    """Автор или администратор прислал свой текст: подставляем его как новый вариант
+    и доставляем автору и действующему администратору с кнопками. Возвращает (ждать ли текст дальше, сообщение)."""
     text = text.strip()
     if not text:
         return True, "Пустой текст. Пришлите исправленный пост или /cancel."
     d = core.get(did)
+    if d and not core.can_manage_draft(adapter, user_id, d):
+        return False, "⛔ У вас нет прав на этот пост."
     if not d or d["status"] != "pending" or d["attempts"] != attempt:
         return False, "Этот вариант уже изменён или обработан, правка не применена."
     if core._parse_marks(d.get("published_to")):
@@ -42,12 +44,12 @@ async def _apply_edit(adapter: core.Adapter, user_id, did: int, attempt: int, te
 
 
 async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attempt: int) -> tuple[bool, str]:
-    """Нажатие кнопки согласующим. Возвращает (ок, текст ответа)."""
-    if str(user_id) not in adapter.approvers:
-        return False, "⛔ У вас нет прав согласования."
+    """Нажатие кнопки автором или администратором. Возвращает (ок, текст ответа)."""
     if core.SHUTTING_DOWN and action != "show":  # идёт остановка: новую работу не начинаем, чтобы не оборвать на середине
         return False, "🔄 Бот перезапускается. Повторите нажатие через минуту: черновик сохранён."
     d = core.get(did)
+    if d and not core.can_manage_draft(adapter, user_id, d):
+        return False, "⛔ У вас нет прав на этот пост."
     if not d:
         return True, "Черновик не найден."
     if d["status"] in ("publishing", "regenerating"):
@@ -172,7 +174,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         core.WAITING_EDIT.pop(key, None)
         core.WAITING_RULE.discard(key)
         core.WAITING_REJECT[key] = (did, attempt)
-        return False, "Напишите причину отклонения (до 1000 знаков). Она будет отправлена сотруднику. Отмена: /cancel"
+        return False, "Напишите причину отклонения (до 1000 знаков). Она будет отправлена автору. Отмена: /cancel"
 
     if action in ("delyes", "rejectphoto", "rejecttext"):
         reason = {"rejectphoto": "Нужны другие фотографии. Пожалуйста, отправьте материал заново.",
@@ -203,9 +205,9 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
 
 
 async def reject_post(adapter, user_id, did, attempt, reason):
-    if str(user_id) not in adapter.approvers:
-        return False, "⛔ У вас нет прав согласования."
     d = core.get(did)
+    if d and not core.can_manage_draft(adapter, user_id, d):
+        return False, "⛔ У вас нет прав на этот пост."
     if not d or d["status"] != "pending" or d["attempts"] != attempt:
         return False, "Этот вариант уже изменён или обработан."
     if core._parse_marks(d.get("published_to")):
@@ -225,7 +227,7 @@ async def reject_post(adapter, user_id, did, attempt, reason):
             await author.notify(d["author_id"], text)
     except Exception:
         core.log.warning("причина отклонения не доставлена", exc_info=True)
-        return True, "❌ Пост отклонён. ⚠️ Причину не удалось доставить сотруднику; сообщите ему отдельно."
+        return True, "❌ Пост отклонён. ⚠️ Причину не удалось доставить автору; сообщите ему отдельно."
     return True, "❌ Пост отклонён."
 
 
@@ -239,6 +241,8 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
                             post_length: str | None = None, attempt: int | None = None, compare=False,
                             keep_input=False) -> tuple[bool, str]:
     d = core.get(did)
+    if d and not core.can_manage_draft(adapter, user_id, d):
+        return False, "⛔ У вас нет прав на этот пост."
     if not d:
         return True, "Черновик не найден."
     if d["status"] in ("published", "deleted", "expired"):
@@ -282,15 +286,14 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
              footer=d.get("footer"), post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
         return False, f"⚠️ Новый вариант готов, но не отправился: {core.err(last)}"
     core._set(did, status="pending")
-    # новый вариант уходит всем согласующим: у остальных кнопки не должны «протухать»
+    # новый вариант получает автор и администратор, начавший правку
     if adapter.name == "max":
         return True, ""  # новый пост уже доставлен с кнопками; служебный ответ после него не нужен
-    return True, ("🔁 Новый вариант ниже (отправлен всем согласующим)." if sent > 1
-                  else "🔁 Новый вариант ниже.")
+    return True, "🔁 Новый вариант ниже."
 
 
 async def on_comment(adapter: core.Adapter, user_id, text: str) -> bool:
-    """Текстовое сообщение от согласующего. True, если это был комментарий к черновику (сообщение обработано)."""
+    """Текстовое сообщение от автора или администратора. True, если это был комментарий к черновику (сообщение обработано)."""
     key = (adapter.name, str(user_id))
     pending = core.WAITING.get(key)
     if pending is None:
@@ -307,7 +310,7 @@ async def on_comment(adapter: core.Adapter, user_id, text: str) -> bool:
     if msg:
         await adapter.notify(str(user_id), msg)
     after = core.get(did)
-    if before and after and after["attempts"] > before["attempts"]:
+    if core.is_admin(adapter, user_id) and before and after and after["attempts"] > before["attempts"]:
         rule = await core._learn(text, before["post"]) if core.env("LEARN_RULES", "1") != "0" else None
         if rule:
             await adapter.notify(str(user_id), f"🧠 Запомнил на будущее: «{rule}»\n(Посмотреть и удалить: /rules)")

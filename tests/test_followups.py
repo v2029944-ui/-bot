@@ -153,7 +153,7 @@ def test_max_photo_with_caption_goes_to_submit(mx_bot, monkeypatch):
            "body": {"text": "Заменили масло и фильтры", "attachments": [{"type": "image", "payload": {"url": "http://x"}}]}}
     run(mx_bot.handle({"update_type": "message_created", "message": msg}))
     assert got == [("9", "Вася", "Заменили масло и фильтры", b"IMG")]
-    assert ("notify", "9", "✅ Принято") in mx_bot.out  # подтверждение вместо реакции
+    assert ("notify", "9", "Пост готов к редактированию и публикации ✅") in mx_bot.out  # подтверждение вместо реакции
 
 
 def test_max_callbacks_route_menu_and_draft_actions(mx_bot, monkeypatch):

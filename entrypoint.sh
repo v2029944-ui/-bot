@@ -30,6 +30,9 @@ sync_requirements() {
     if pip install --no-cache-dir -q -r "$CODE/requirements.txt"; then
       echo "$new" > "$STAMP"
     else
+      # pip may already have changed part of the environment before failing.
+      # Invalidate the stamp so rollback reinstalls its own requirements.
+      rm -f "$STAMP"
       echo "Не удалось обновить библиотеки, продолжаю с имеющимися."
     fi
   fi

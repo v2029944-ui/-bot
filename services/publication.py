@@ -58,6 +58,8 @@ async def finish_publication(d, adapter=None, user_id=None):
 
 async def _publish_safe(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
     """Обёртка: непредвиденный сбой не должен оставить черновик навсегда в статусе «publishing»."""
+    if not core.can_manage_draft(adapter, user_id, core.get(did)):
+        return False, "⛔ У вас нет прав на этот пост."
     try:
         result = await core._publish_inner(adapter, user_id, did, attempt, force)
         d = core.get(did)
@@ -82,6 +84,8 @@ async def _publish_safe(adapter: core.Adapter, user_id, did: int, attempt: int, 
 async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
     """Публикация с защитой от дублей: перед отправкой в канал ставим пометку «могло уйти»,
     после успеха — «опубликовано». Если ответ потерялся, повтор спросит подтверждение."""
+    if not core.can_manage_draft(adapter, user_id, core.get(did)):
+        return False, "⛔ У вас нет прав на этот пост."
     if not core._claim(did, "pending", "publishing"):
         return False, core.BUSY
     d = core.get(did)

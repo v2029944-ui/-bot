@@ -10,9 +10,8 @@ import ops
 
 
 def quiet(adapter: core.Adapter, user_id) -> bool:
-    """Тихий режим: обычные сотрудники не получают от бота никаких ответов (EMPLOYEE_NOTIFY=1 — вернуть ответы).
-    Согласующие получают сообщения всегда. Исключения: просьба добавить подпись к фото и «доступ открыт»."""
-    return core.env("EMPLOYEE_NOTIFY", "0") != "1" and str(user_id) not in adapter.approvers
+    """Участники получают ответы; незнакомцам оставляем прежний тихий режим."""
+    return core.env("EMPLOYEE_NOTIFY", "0") != "1" and not core.is_member(adapter, user_id)
 
 
 def confirm_mode() -> str:
@@ -31,7 +30,7 @@ async def alert(adapter: core.Adapter, text: str):
         return
     core._ALERT_LAST[key] = now
     approval = core.ADAPTERS.get(os.getenv("APPROVAL_PLATFORM") or adapter.name, adapter)
-    for a in approval.approvers:
+    for a in getattr(approval, "admins", []):
         try:
             await approval.notify(a, text[:500])
         except Exception:
@@ -42,7 +41,7 @@ def staff(adapter: core.Adapter) -> list[str]:
     """Кому писать о состоянии бота: администраторам, а если их нет — согласующим."""
     if getattr(adapter, "publish_only", False):
         return []
-    return list(getattr(adapter, "admins", None) or getattr(adapter, "approvers", None) or [])
+    return list(getattr(adapter, "admins", None) or [])
 
 
 def can_status(adapter: core.Adapter, uid) -> bool:
@@ -185,33 +184,30 @@ async def remind_once(now: float | None = None) -> int:
         return 0
     rows = core.db.execute("SELECT * FROM drafts WHERE status='pending' AND reminded=0 "
                       "AND COALESCE(NULLIF(last_sent,0), created) < ? ORDER BY id", (now - after,)).fetchall()
-    groups: dict[int, tuple[core.Adapter, list[dict]]] = {}
+    groups = {}
     for r in rows:
         d = dict(r)
         ad = core._approval_adapter(d, None)
         if ad is not None:
-            groups.setdefault(id(ad), (ad, []))[1].append(d)
-    total = 0
-    for ad, ds in groups.values():
+            for uid in core.draft_recipients(d, ad):
+                groups.setdefault((id(ad), uid), (ad, []))[1].append(d)
+    delivered = set()
+    for (_, uid), (ad, ds) in groups.items():
         age = lambda d: now - (d["last_sent"] or d["created"])
-        waiting, oldest = len(ds), max(age(d) for d in ds)  # в заголовке — все ждущие, а не только показанные
-        ds = ds[:5]  # показываем (и помечаем как «напомнили») не больше 5; остальные дождутся следующего круга
-        text = (f"⏰ Ждут согласования: {waiting} (самый давний — {core._ago(oldest)}).\n"
+        waiting, oldest = len(ds), max(age(d) for d in ds)
+        ds = ds[:5]
+        text = (f"⏰ Ждут решения: {waiting} (самый давний — {core._ago(oldest)}).\n"
                 "Нажмите, чтобы показать пост ещё раз:")
-        rows_ = [[(f"📨 {(d['author_name'] or 'Пост')[:14]}, {core._ago(age(d))}", f"d:show:{d['id']}:{d['attempts']}")]
-                 for d in ds]
-        sent = 0
-        for uid in ad.approvers:
-            try:
-                kw = {"silent": True} if ops.delivery_for(ad, uid, now) == "silent" else {}  # «мут» — без звука
-                await ad.send_menu(uid, text, rows_, **kw)
-                sent += 1
-            except Exception:
-                core.log.warning("не удалось напомнить согласующему %s", uid, exc_info=True)
-        if sent:
-            core.db.executemany("UPDATE drafts SET reminded=1 WHERE id=?", [(d["id"],) for d in ds])
-            core.db.commit()
-            total += len(ds)
+        rows_ = [[(f"📨 {(d['author_name'] or 'Пост')[:14]}, {core._ago(age(d))}", f"d:show:{d['id']}:{d['attempts']}")] for d in ds]
+        try:
+            kw = {"silent": True} if ops.delivery_for(ad, uid, now) == "silent" else {}
+            await ad.send_menu(uid, text, rows_, **kw)
+            delivered.update(d["id"] for d in ds)
+        except Exception:
+            core.log.warning("не удалось напомнить участнику %s", uid, exc_info=True)
+    core.db.executemany("UPDATE drafts SET reminded=1 WHERE id=?", [(did,) for did in delivered])
+    core.db.commit()
+    total = len(delivered)
     return total
 
 
@@ -238,14 +234,17 @@ async def warn_expiring_once(now=None):
     count = 0
     for row in core.db.execute("SELECT * FROM drafts WHERE status='pending'").fetchall():
         d = dict(row)
+        if core._parse_marks(d.get("published_to")):
+            continue  # незавершённая публикация сохраняется до решения человека
         deadline = (d["last_sent"] or d["created"]) + ttl
         if not now < deadline <= now + 86400 or d["expiry_warned"] == deadline:
             continue
         ad = core._approval_adapter(d, None)
-        if not ad or not ad.approvers:
+        recipients = core.draft_recipients(d, ad) if ad else []
+        if not recipients:
             continue
         sent = 0
-        for uid in ad.approvers:
+        for uid in recipients:
             try:
                 await ad.send_menu(uid, f"⏳ Пост №{d['id']} от {d['author_name'] or 'сотрудника'} "
                                    f"будет удалён примерно через {core._ago(deadline - now)}.\n"
@@ -255,7 +254,7 @@ async def warn_expiring_once(now=None):
                 sent += 1
             except Exception:
                 core.log.warning("не удалось предупредить об удалении %s", d["id"], exc_info=True)
-        if sent == len(ad.approvers):
+        if sent == len(recipients):
             core._set(d["id"], expiry_warned=deadline)
             count += 1
     return count

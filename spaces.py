@@ -106,7 +106,7 @@ def queue_db():
 
 
 def global_admin(uid):
-    return INSTALLED and str(uid) in ROOT.adapters["max"].admins
+    return INSTALLED and str(uid) in ROOT.adapters["max"].base_admins
 
 
 def get(sid):
@@ -174,7 +174,7 @@ def for_user(uid, continue_input=False):
             import core
             if sid == 0:
                 memory, rules = ROOT.memories, core.WAITING_RULE.root
-                allowed = uid in ROOT.adapters["max"].approvers
+                allowed = (ROOT.adapters["max"].allowed is None or uid in ROOT.adapters["max"].allowed)
             elif sid in OPEN:
                 memory, rules = OPEN[sid].memory, OPEN[sid].waiting_rule
                 allowed = uid in memory["ADAPTERS"]["max"].allowed
@@ -185,7 +185,7 @@ def for_user(uid, continue_input=False):
             if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or sid == 0 and uid in WAITING_CREATE):
                 return sid
         return owner["id"]
-    if selected and selected["sid"] == 0 and str(uid) in ROOT.adapters["max"].approvers:
+    if selected and selected["sid"] == 0 and (ROOT.adapters["max"].allowed is None or str(uid) in ROOT.adapters["max"].allowed):
         return 0
     if selected and selected["sid"] in OPEN and str(uid) in OPEN[selected["sid"]].memory["ADAPTERS"]["max"].allowed:
         return selected["sid"]
@@ -269,7 +269,7 @@ async def route_update(adapter, update):
             if ROOT.db.execute("SELECT 1 FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone() and not global_admin(cb["user"]["user_id"]):
                 await adapter.notify(cb["user"]["user_id"], "Эта кнопка относится к основному пространству. Откройте /myspace.")
                 return True
-            if str(cb["user"]["user_id"]) in ROOT.adapters["max"].approvers:
+            if (ROOT.adapters["max"].allowed is None or str(cb["user"]["user_id"]) in ROOT.adapters["max"].allowed):
                 ROOT.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str(cb["user"]["user_id"]),))
                 ROOT.db.commit()
             # Разворачиваем namespace основного пространства, не перенаправляя по владельцу.
@@ -368,15 +368,15 @@ async def member_input(adapter, uid, text):
         await adapter.send_menu(uid, "Добавление отменено.", core.menu_for(adapter, uid))
         return True
     parts = [line.strip() for line in text.strip().splitlines()]
-    roles = {"сотрудник": "emp", "проверяющий": "apr"}
+    roles = {"участник", "сотрудник", "проверяющий"}
     import re
-    if len(parts) != 2 or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[0]) or parts[1].lower() not in roles:
-        await adapter.notify(uid, "Отправьте две строки: ID человека в MAX и роль — сотрудник или проверяющий. Отмена: /cancel")
+    if len(parts) not in (1, 2) or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[0]) or (len(parts) == 2 and parts[1].lower() not in roles):
+        await adapter.notify(uid, "Отправьте ID человека в MAX. Он будет добавлен как участник. Отмена: /cancel")
         return True
     if core.role_of(adapter, parts[0]) is not None:
         await adapter.notify(uid, "Этот человек уже добавлен. Изменить его роль можно в разделе «Люди».")
         return True
-    core._add_person(adapter, parts[0], parts[0], roles[parts[1].lower()])
+    core._add_person(adapter, parts[0], parts[0], "member")
     WAITING_MEMBER.discard(key)
     await adapter.send_menu(uid, "Человек добавлен в это пространство.", core.menu_for(adapter, uid))
     try:

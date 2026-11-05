@@ -36,6 +36,7 @@ class FakeAdapter(core.Adapter):
 
     def __init__(self, name="tg", approvers=("1",), fail=None, sure=()):
         self.name, self.approvers, self.out = name, list(approvers), []
+        self.admins = list(approvers)  # fixture reviewers exercise administrative recovery of others' drafts
         self.fail = list(fail or [])  # исключения для публикаций по очереди
         self.sure = tuple(sure)       # какие исключения считать «точно не ушло»
 

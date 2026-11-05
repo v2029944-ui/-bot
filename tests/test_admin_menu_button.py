@@ -17,6 +17,7 @@ def buttons(body):
 def test_every_admin_reply_keeps_menu_button(kind, png, llm, monkeypatch):
     async def scenario():
         adapter = max_.Max("token", "-1", ["5"], ["9"], admins=["1"])
+        core.ADAPTERS["max"] = adapter
         requests = []
 
         async def handler(request):

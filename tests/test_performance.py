@@ -30,7 +30,7 @@ def test_status_runs_balance_and_model_check_concurrently(monkeypatch):
 
 def test_reviewers_and_publication_share_upload_then_clear_cache(monkeypatch, png, llm):
     async def scenario():
-        adapter = max_.Max("token", "-1", ["1", "2"], [])
+        adapter = max_.Max("token", "-1", ["1", "2"], ["9"], ["1", "2"])
         core.ADAPTERS["max"] = adapter
         uploads = []
 

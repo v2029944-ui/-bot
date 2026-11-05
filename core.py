@@ -248,11 +248,11 @@ POST_LENGTHS = {
 # ---------- Люди: добавление кнопками ----------
 REQ_TTL = 7 * 86400          # отклонённому молчим неделю, потом он может подать заявку снова
 MAX_PENDING_REQUESTS = 20    # защита от спама заявками
-ROLE_NAME = {"emp": "сотрудник", "apr": "согласующий", "adm": "администратор"}
-ROLE_ICON = {"emp": "👷", "apr": "✅", "adm": "👑"}
+ROLE_NAME = {"member": "участник", "adm": "администратор"}
+ROLE_ICON = {"member": "👤", "adm": "👑"}
 ACCESS_WELCOME = {
-    "emp": "Готово ✅ Теперь присылайте фото работ с кратким описанием в подписи.",
-    "apr": "Вы добавлены как согласующий ✅ Черновики постов будут приходить сюда. Меню: /menu",
+    "member": "Вы добавлены как участник ✅ Присылайте материалы: редактировать и публиковать свои посты можно здесь. Меню: /menu",
+    "adm": "Вы добавлены как администратор ✅ Управление пространством и его постами: /menu",
 }
 
 
@@ -282,7 +282,7 @@ _SERVICE_EXPORTS = {
     'services.lifecycle': ('_guard', 'drain_inflight', '_safe_notify'),
     'services.review': ('approval_rows', '_apply_edit', 'on_action', 'reject_post', '_regenerate', '_regenerate_inner', 'on_comment'),
     'services.publication': ('_publish', 'publication_targets', 'publication_view', 'finish_publication', '_publish_safe', '_publish_inner'),
-    'services.people': ('is_admin', 'requests_enabled', '_base', '_db_people', '_base_admins', 'refresh_people', 'role_of', '_add_person', '_remove_person', '_tell_admins', '_who', '_request_rows', 'unknown_user', 'menu_for', 'people_view', '_person', 'reqs_view', 'people_menu'),
+    'services.people': ('is_global_admin', 'is_member', 'can_manage_draft', 'draft_recipients', 'is_admin', 'requests_enabled', '_base', '_db_people', '_base_admins', 'refresh_people', 'role_of', '_add_person', '_remove_person', '_tell_admins', '_who', '_request_rows', 'unknown_user', 'menu_for', 'people_view', '_person', 'reqs_view', 'people_menu'),
     'services.menus': ('rules_command', 'rules_view', 'on_menu', 'pending_view', 'on_text'),
     'services.monitoring': ('quiet', 'confirm_mode', 'alert', 'staff', 'can_status', 'alert_staff', 'announce_start', '_ago', 'aitunnel_balance', 'status_text', 'remind_once', 'reminder_loop', 'warn_expiring_once'),
 }

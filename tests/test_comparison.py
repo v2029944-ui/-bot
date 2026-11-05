@@ -36,7 +36,7 @@ def test_admin_enable_validates_public_catalog_without_key(mx, monkeypatch):
         return httpx.Response(200, json=CATALOG)
 
     monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
-    assert "нет прав" in run(core.on_menu(mx, "9", "m:compare_toggle"))[0]
+    assert "только администратору" in run(core.on_menu(mx, "9", "m:compare_toggle"))[0]
     assert not calls
     text, _ = run(core.on_menu(mx, "5", "m:compare_toggle"))
     assert all(m in text for m in MODELS) and comparison.config()["enabled"]
@@ -119,7 +119,7 @@ def test_real_max_shows_labels_and_selection_buttons(monkeypatch, png, llm):
         monkeypatch.setattr(ad, "_upload_image", upload)
         await core.submit(ad, "9", "Анна", "Описание работы", png)
         cards = [c[3] for c in api.of("POST") if c[3]["text"].startswith("Модель:")]
-        assert len(cards) == 6  # два проверяющих, три варианта каждому
+        assert len(cards) == 3  # три варианта только автору
         assert all(any("choose_" in b["payload"] for b in buttons(card)) for card in cards)
         assert all(any(m in card["text"] for m in MODELS) for card in cards)
         await ad.http.aclose()

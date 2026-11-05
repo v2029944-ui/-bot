@@ -64,6 +64,7 @@ def test_status_from_non_admin_never_becomes_a_comment(tg, llm, png):
 # ---------- 4. последний админ ----------
 def test_last_admin_cannot_be_removed_but_one_of_two_can():
     a = FakeAdapter("tg", ["1"])
+    a.admins = []
     core.ADAPTERS["tg"] = a
     core.refresh_people(a)
     core._add_person(a, "7", "Админ", "adm")
@@ -179,7 +180,7 @@ def test_defer_draft_is_not_lost_when_window_never_opens_with_valid_config(tg, l
     monkeypatch.setenv("NOTIFY_HOURS", "20-6")
     monkeypatch.setenv("NOTIFY_DAYS", "1-7")
     monkeypatch.setenv("NOTIFY_TZ", "UTC")
-    ops.set_mode(tg, "2", "defer")
+    ops.set_mode(tg, "9", "defer")
     now = __import__("datetime").datetime(2026, 11, 3, 12, 0, tzinfo=__import__("datetime").timezone.utc).timestamp()
     monkeypatch.setattr(time, "time", lambda: now)
     run(core.submit(tg, "9", "Анна", "Заменили масло и фильтры", png))

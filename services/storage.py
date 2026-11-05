@@ -50,7 +50,7 @@ def housekeeping() -> int:
     ttl = int(core.env("DRAFT_TTL_DAYS", "7"))  # 0 — не закрывать
     if ttl > 0:
         for r in core.db.execute("SELECT * FROM drafts WHERE status='pending' AND "
-                            "COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
+                            "COALESCE(published_to,'')='' AND COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
             for path in core.draft_files(dict(r)):
                 core._unlink(path)
             core.clear_source_cache(dict(r))

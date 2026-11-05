@@ -136,7 +136,7 @@ def test_reminder_once_with_show_button(tg, llm, png, window):
     age_draft(did, 4)
     assert run(core.remind_once()) == 1
     menus = tg.sent("menu")
-    assert {m[1] for m in menus} == {"1", "2"} and "Ждут согласования: 1" in menus[0][2]
+    assert {m[1] for m in menus} == {"9"} and "Ждут решения: 1" in menus[0][2]
     assert menus[0][3][0][0][1] == f"d:show:{did}:1"
     assert run(core.remind_once()) == 0  # второй раз не напоминаем
 

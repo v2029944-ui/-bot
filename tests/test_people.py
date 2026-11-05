@@ -26,7 +26,7 @@ def test_stranger_creates_one_request_and_gets_no_reply():
     menus = a.sent("menu")
     assert len(menus) == 1 and menus[0][1] == "1" and "Иван" in menus[0][2] and "@ivan" in menus[0][2]
     payloads = [p for row in menus[0][3] for _, p in row]
-    assert payloads == ["m:acc:emp:77", "m:acc:apr:77", "m:acc:no:77"]
+    assert payloads == ["m:acc:member:77", "m:acc:no:77"]
     assert a.sent("notify") == []  # незнакомцу ничего не пишем
 
 
@@ -44,9 +44,9 @@ def test_admin_approves_as_approver_and_draft_reaches_him(llm, png):
     a = make()
     run(core.unknown_user(a, "77", "Пётр"))
     menu(a, "1", "m:acc:apr:77")
-    assert "77" in a.approvers
+    assert "77" in a.allowed and "77" not in a.approvers
     run(core.submit(a, "2", "Анна", "заменили масло", png))
-    assert {o[1] for o in a.sent("approval")} == {"1", "2", "77"}
+    assert {o[1] for o in a.sent("approval")} == {"2"}
 
 
 def test_reject_is_silent_for_a_week_then_allowed_again():
@@ -104,15 +104,16 @@ def test_pending_requests_are_capped(monkeypatch):
 
 def test_without_admins_nothing_changes():
     a = FakeAdapter("tg", ["1"])
+    a.admins = []
     core.refresh_people(a)
-    assert a.allowed is None  # как раньше: список сотрудников пуст = пишет кто угодно
+    assert a.allowed == {"1"}  # известные участники из старых настроек
     assert run(core.unknown_user(a, "77", "Иван")) is False and a.out == []
 
 
 @pytest.mark.parametrize("button", ["m:member", "m:inv", "m:invn:emp"])
 def test_add_by_id_replaces_unsupported_invites(button):
     a = make()
-    assert "две строки" in menu(a, "1", button)[0]
+    assert "ID человека" in menu(a, "1", button)[0]
     assert run(core.on_text(a, "1", "77\nсотрудник"))
     assert "77" in a.allowed and "77" not in a.approvers
     assert any("Основное" in o[2] for o in a.sent("notify") if o[1] == "77")
@@ -132,7 +133,7 @@ def test_add_existing_user_does_not_silently_demote_or_change_admin():
     for uid in ("1", "2"):
         menu(a, "1", "m:member")
         run(core.on_text(a, "1", uid + "\nсотрудник"))
-    assert a.admins == ["1"] and "2" in a.approvers
+    assert a.admins == ["1"] and "2" in a.allowed and "2" not in a.approvers
     assert "уже добавлен" in a.sent("notify")[-1][2]
 
 

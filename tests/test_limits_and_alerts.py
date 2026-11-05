@@ -28,7 +28,7 @@ def test_alert_is_throttled(tg, monkeypatch):
 
 
 def test_quiet_mode(tg, monkeypatch):
-    assert core.quiet(tg, "9") and not core.quiet(tg, "1")
+    assert not core.quiet(tg, "9") and not core.quiet(tg, "1")
     monkeypatch.setenv("EMPLOYEE_NOTIFY", "1")
     assert not core.quiet(tg, "9")
 
@@ -54,7 +54,7 @@ def test_no_deliverable_approver_removes_draft(llm, png):
     assert core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
 
 
-def test_one_broken_approver_does_not_block_others(llm, png):
+def test_other_reviewers_never_receive_authors_draft(llm, png):
     class Half(core.Adapter):
         name, approvers = "tg", ["1", "2"]
 
@@ -68,4 +68,4 @@ def test_one_broken_approver_does_not_block_others(llm, png):
     a = Half()
     core.ADAPTERS["tg"] = a
     run(core.submit(a, "9", "Вася", "x", png))
-    assert a.got == ["2"]
+    assert a.got == ["9"]

@@ -71,7 +71,7 @@ class Max(core.Adapter):
         self._processing = asyncio.Semaphore(2)
         self._send_locks = weakref.WeakValueDictionary()
         self._upload_cache = {}
-        self._upload_locks = {}
+        self._upload_locks = weakref.WeakValueDictionary()
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
@@ -236,9 +236,6 @@ class Max(core.Adapter):
         for path, entry in list(self._upload_cache.items()):
             if time.monotonic() >= entry[2] or not Path(path).exists():
                 self._upload_cache.pop(path, None)
-        for path, lock in list(self._upload_locks.items()):
-            if path not in self._upload_cache and not lock.locked():
-                self._upload_locks.pop(path, None)
         for row in core.db.execute("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
                                    "WHERE d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt LIMIT 20").fetchall():
             if await self._strip_admin_button({"mid": row["mid"]}, draft_buttons=True):
@@ -406,6 +403,7 @@ class Max(core.Adapter):
         types = "message_created,message_callback,bot_started"
         while True:
             try:
+                started = time.monotonic()
                 params = {"timeout": 30, "limit": 100, "types": types}
                 if marker is not None:
                     params["marker"] = marker
@@ -423,6 +421,11 @@ class Max(core.Adapter):
                 marker = data.get("marker", marker)
                 if core.SHUTTING_DOWN:
                     return
+                # MAX specifies at least 300 ms between polling requests. A fast
+                # empty response must not turn long polling into a busy loop.
+                delay = 0.3 - (time.monotonic() - started)
+                if delay > 0:
+                    await asyncio.sleep(delay)
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 if code in (401, 403):  # неверный/просроченный токен: не долбим API каждые 3 секунды
@@ -473,8 +476,8 @@ class Max(core.Adapter):
                     return
                 if not core.quiet(self, uid):
                     await self.notify(uid, self.HELLO)
-                if str(uid) in self.approvers:
-                    await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
+                if core.is_member(self, uid):
+                    await self.send_menu(uid, "Меню участника:", core.menu_for(self, uid))
             elif kind == "message_created":
                 await self.on_message(u["message"])
             elif kind == "message_callback":
@@ -484,7 +487,7 @@ class Max(core.Adapter):
             raise  # постоянная очередь должна увидеть ошибку, а не пометить команду выполненной
 
     HELLO = ("Привет! Пришлите фото или короткое видео вашей работы с кратким описанием в подписи — "
-             "я подготовлю пост и отправлю его на согласование.")
+             "я подготовлю пост, который вы сможете отредактировать и опубликовать.")
 
     async def _stranger(self, uid, name, username=None) -> bool:
         """Человека нет в списках: тихо передаём заявку администраторам. True = обработано."""
@@ -518,8 +521,8 @@ class Max(core.Adapter):
                 try:
                     if await core.on_text(self, uid, body["text"]):
                         return
-                    if str(uid) in self.approvers:
-                        return await self.send_menu(uid, "Меню согласующего:", core.menu_for(self, uid))
+                    if core.is_member(self, uid):
+                        return await self.send_menu(uid, "Меню участника:", core.menu_for(self, uid))
                 finally:
                     _NAV.reset(token)
             return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото или видео с описанием в подписи 📷")
@@ -554,7 +557,7 @@ class Max(core.Adapter):
                 data = await max_queue.download(self, images[0], core.MAX_PHOTO_BYTES, "image", source_key, 0)
                 await core.submit(self, str(uid), name, body.get("text") or "", data, **source_opts)
             if not quiet:
-                await self.notify(uid, "Пост отправлен на согласование ✅")
+                await self.notify(uid, "Пост готов к редактированию и публикации ✅")
             elif core.confirm_mode() != "off":  # в MAX вместо реакции короткое сообщение
                 await self.notify(uid, "✅ Принято")
         except core.RateLimited:

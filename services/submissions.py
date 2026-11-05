@@ -10,6 +10,11 @@ import resources
 import ops
 
 
+def _discard_media(result):
+    for path in result if isinstance(result, tuple) else (result,):
+        core._unlink(path)
+
+
 async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, source_key=None):
     """Защита бюджета: не больше RATE_LIMIT_PER_HOUR фото в час от сотрудника (согласующие без лимита)."""
     if str(author_id) in adapter.approvers:
@@ -45,12 +50,15 @@ def _approval_adapter(d: dict, fallback: core.Adapter) -> core.Adapter:
 
 async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
                       actor: str | None = None) -> tuple[int, Exception | None]:
-    """Рассылаем черновик всем согласующим: сбой у одного не должен лишать черновика остальных.
+    """Доставляем черновик автору; администратор может восстановить недоступный материал.
     Режим уведомлений у каждого свой: без звука или придержать до рабочего времени. Тому, кто сам
     только что нажал кнопку (actor), новый вариант приходит сразу и обычным образом."""
     approval = core._approval_adapter(d, fallback)
     sent, last = 0, None
-    for a in approval.approvers:
+    recipients = core.draft_recipients(d, approval)
+    if actor and core.can_manage_draft(approval, actor, d) and actor not in recipients:
+        recipients.append(actor)
+    for a in recipients:
         mode = "normal" if a == actor else ops.delivery_for(approval, a)
         try:
             if mode == "defer":
@@ -62,6 +70,10 @@ async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
             sent += 1
         except Exception as e:
             last = e
+            # Keep a recoverable draft when the author blocked the bot or cannot be reached.
+            for admin in getattr(approval, "admins", []):
+                if admin not in recipients and core.can_manage_draft(approval, admin, d):
+                    recipients.append(admin)
             core.log.warning("не удалось отправить черновик %s согласующему %s: %s", did, a, e)
     if sent:  # от этого момента считаем, сколько черновик ждёт согласования
         core._set(did, last_sent=time.time(), reminded=0)
@@ -95,9 +107,9 @@ async def _submit(adapter: core.Adapter, author_id: str, author_name: str, text:
     if (existing := await core.resume_submission(adapter, source_key)) is not None:
         return existing
     if kind == "video":  # path — картинка из кадров (для нейросети и превью), vpath — само видео
-        vpath, path = await resources.media(core.save_video, photo_bytes, filename)
+        vpath, path = await resources.media(core.save_video, photo_bytes, filename, discard=_discard_media)
     else:
-        vpath, path = "", await resources.media(core.save_photo, photo_bytes)  # BadImage — файл не картинка
+        vpath, path = "", await resources.media(core.save_photo, photo_bytes, discard=_discard_media)  # BadImage — файл не картинка
     files = [path, vpath] if vpath else [path]
     rm = lambda: [Path(f).unlink(missing_ok=True) for f in files]
     try:
@@ -145,9 +157,9 @@ async def _submit_album(adapter, author_id, author_name, text, items, source_key
     try:
         for item in items:
             if item["type"] == "video":
-                path, preview = await resources.media(core.save_video, item["data"], "video.mp4")
+                path, preview = await resources.media(core.save_video, item["data"], "video.mp4", discard=_discard_media)
             elif item["type"] == "image":
-                path = preview = await resources.media(core.save_photo, item["data"])
+                path = preview = await resources.media(core.save_photo, item["data"], discard=_discard_media)
             else:
                 raise core.BadImage("Альбом может содержать только фото и видео")
             files.update((path, preview))
@@ -155,7 +167,7 @@ async def _submit_album(adapter, author_id, author_name, text, items, source_key
         if sum(Path(i["path"]).stat().st_size for i in media) > core.MAX_ALBUM_BYTES:
             raise core.BadImage("После обработки общий размер альбома больше 100 МиБ")
         await core._check_rate(adapter, author_id, author_name, source_key)  # один альбом — один пост
-        preview = await resources.media(core.album_preview, media)
+        preview = await resources.media(core.album_preview, media, discard=_discard_media)
         files.add(preview)
         post = await core.generate_options(preview, text, media=media)
         cur = core.db.execute(

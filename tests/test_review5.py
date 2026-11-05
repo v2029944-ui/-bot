@@ -30,7 +30,7 @@ def test_reminder_header_counts_all_waiting_drafts(tg, llm, png, monkeypatch):
         before = len(tg.sent("menu"))
         assert run(core.remind_once()) == expected_marked
         headers.append(tg.sent("menu")[before][2].split("\n")[0])
-    assert [re.search(r"ждут согласования: (\d+)", h, re.I).group(1) for h in headers] == ["12", "7", "2"]
+    assert [re.search(r"ждут решения: (\d+)", h, re.I).group(1) for h in headers] == ["12", "7", "2"]
 
 
 # ---------- B. дни недели через воскресенье ----------

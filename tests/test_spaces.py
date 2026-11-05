@@ -167,7 +167,11 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 ad = core.ADAPTERS["max"]
                 await core.on_menu(ad, "22", "m:space_member")
                 await core.on_text(ad, "22", "33\nпроверяющий")
-                assert "33" in ad.approvers
+                assert "33" in ad.allowed and "33" not in ad.approvers
+                # A migrated reviewer cannot edit someone else's post, even with matching draft IDs.
+                assert "нет прав" in (await core.on_action(ad, "33", "edit", 2, 1))[1]
+                assert not core.can_manage_draft(root_max, "1", core.get(2))
+                core._add_person(ad, "33", "Администратор команды Б", "adm")
             with spaces.enter(a):
                 assert "33" not in core.ADAPTERS["max"].approvers
             await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "edit", "user": {"user_id": 33},
@@ -179,7 +183,7 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             with spaces.enter(a):
                 assert core.get(2)["post"] != "Исправленный текст {bot}"
             with spaces.enter(b):
-                core._add_person(core.ADAPTERS["max"], "11", "Проверяющий другой команды", "apr")
+                core._add_person(core.ADAPTERS["max"], "11", "Администратор другой команды", "adm")
             await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "edit-owner", "user": {"user_id": 11},
                                   "payload": f"w:{bid}:d:edit:2:2"}})
             assert spaces.for_user("11") == aid  # последнее нажатие не меняет пространство по умолчанию
