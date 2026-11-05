@@ -12,12 +12,14 @@ import httpx
 import core
 import ops
 import max_queue
+import max_actions
 
 log = logging.getLogger("max")
 API = "https://platform-api.max.ru"
 
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
+core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
 for _row in core.db.execute("SELECT uid,btn FROM max_ui WHERE btn IS NOT NULL").fetchall():
     try:
         _old = json.loads(_row["btn"])
@@ -124,7 +126,7 @@ class Max(core.Adapter):
             if btn and btn.get("mid") == mid:
                 self._ui_set(uid, btn=None)
 
-    async def _strip_admin_button(self, prev: dict):
+    async def _strip_admin_button(self, prev: dict, draft_buttons=False):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
         По документации MAX вложения при правке заменяются целиком, поэтому передаём их заново (те же токены)."""
         try:
@@ -134,7 +136,8 @@ class Max(core.Adapter):
             for att in body.get("attachments") or []:
                 kind, payload = att["type"], att["payload"]
                 if kind == "inline_keyboard":
-                    rows = [[b for b in row if b.get("payload") != "m:admin"] for row in payload["buttons"]]
+                    rows = [[b for b in row if (not str(b.get("payload", "")).startswith("d:") if draft_buttons
+                                               else b.get("payload") != "m:admin")] for row in payload["buttons"]]
                     rows = [row for row in rows if row]
                     if rows:
                         atts.append({"type": kind, "payload": {"buttons": rows}})
@@ -144,8 +147,16 @@ class Max(core.Adapter):
                     return  # неизвестное вложение не удаляем при замене клавиатуры
             await self.call("PUT", "/messages", params={"message_id": prev["mid"]},
                             json={"text": body.get("text") or "", "attachments": atts})
+            return True
         except Exception:
             log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
+
+    async def cleanup_stale_buttons(self):
+        for row in core.db.execute("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
+                                   "WHERE d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt LIMIT 20").fetchall():
+            if await self._strip_admin_button({"mid": row["mid"]}, draft_buttons=True):
+                core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (row["mid"],))
+                core.db.commit()
 
     async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None,
                     admin_menu=True):
@@ -188,6 +199,13 @@ class Max(core.Adapter):
                     await asyncio.sleep(pause)
                     continue
                 raise
+        mid = _mid(resp)
+        for row in base_buttons:
+            for button in row:
+                parts = str(button.get("payload", "")).split(":")
+                if mid and len(parts) == 4 and parts[0] == "d" and parts[2].isdigit() and parts[3].isdigit():
+                    core.db.execute("INSERT OR REPLACE INTO max_draft_ui VALUES(?,?,?)", (mid, int(parts[2]), int(parts[3])))
+                    core.db.commit()
         if with_admin:
             uid = target["user_id"]
             prev, mid = self._ui(uid)["btn"], _mid(resp)
@@ -277,6 +295,8 @@ class Max(core.Adapter):
                 log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
             if max_queue.is_material(update) and not ops.is_paused():
                 max_queue.enqueue(update)
+            elif update.get("update_type") == "message_callback" or (update.get("message") or {}).get("body", {}).get("text"):
+                max_actions.enqueue(update)
             else:
                 await self.handle(update)
 
@@ -435,6 +455,10 @@ class Max(core.Adapter):
         pressed = ((cb.get("message") or {}).get("body") or {}).get("mid")  # сообщение, под которым нажали
         ctx = {"uid": str(uid), "sent_menu": False}
         token = _NAV.set(ctx)
+        if pressed and pressed == self._ui(uid)["menu"] and payload.startswith("d:"):
+            await self._delete(pressed, uid)
+            self._ui_set(uid, menu=None)
+            ctx["deleted"] = pressed
         ok = True
         try:
             if payload.startswith("m:"):  # кнопки меню
