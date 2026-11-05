@@ -483,6 +483,9 @@ def _unlink(path):
 
 
 def clear_source_cache(d):
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_button_cache'").fetchone():
+        db.execute("DELETE FROM max_button_cache WHERE mid IN (SELECT mid FROM max_draft_ui WHERE did=?)", (d["id"],))
+        db.commit()
     if d.get("source_key"):
         import max_queue
         max_queue.clear_cache(d["source_key"])

@@ -22,6 +22,10 @@ API = "https://platform-api.max.ru"
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_notices (mid TEXT PRIMARY KEY, uid TEXT, remaining INTEGER)")
+core.db.execute("CREATE TABLE IF NOT EXISTS max_button_cache (mid TEXT PRIMARY KEY, attachments TEXT)")
+core.db.execute("""DELETE FROM max_button_cache WHERE mid NOT IN (
+    SELECT u.mid FROM max_draft_ui u JOIN drafts d ON d.id=u.did
+    WHERE d.status='pending' AND d.attempts=u.attempt)""")
 for _row in core.db.execute("SELECT uid,btn FROM max_ui WHERE btn IS NOT NULL").fetchall():
     try:
         _old = json.loads(_row["btn"])
@@ -128,6 +132,8 @@ class Max(core.Adapter):
             btn = self._ui(uid)["btn"]
             if btn and btn.get("mid") == mid:
                 self._ui_set(uid, btn=None)
+        core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (mid,))
+        core.db.commit()
         return True
 
     async def _strip_admin_button(self, prev: dict, draft_buttons=False, replacement=None):
@@ -135,12 +141,16 @@ class Max(core.Adapter):
         async with lock:
             return await self._edit_buttons(prev, draft_buttons, replacement)
 
-    async def _edit_buttons(self, prev, draft_buttons=False, replacement=None):
+    async def _edit_buttons(self, prev, draft_buttons=False, replacement=None, use_cache=True):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
         По документации MAX вложения при правке заменяются целиком, поэтому передаём их заново (те же токены)."""
+        cached = core.db.execute("SELECT attachments FROM max_button_cache WHERE mid=?", (prev["mid"],)).fetchone() if use_cache else None
         try:
-            message = await self.call("GET", "/messages/" + quote(str(prev["mid"]), safe=""))
-            body = message["body"]
+            if cached:
+                body = {"attachments": json.loads(cached[0]), "markup": True}
+            else:
+                message = await self.call("GET", "/messages/" + quote(str(prev["mid"]), safe=""))
+                body = message["body"]
             atts = []
             admin_rows = []
             for att in body.get("attachments") or []:
@@ -170,14 +180,24 @@ class Max(core.Adapter):
             # У форматированного сообщения меняем только вложения: текст и ссылки
             # остаются в MAX без повторного преобразования разметки.
             await self.call("PUT", "/messages", params={"message_id": prev["mid"]}, json=edit)
+            # Не кешируем текст или разметку, только запросные токены и клавиатуру.
+            if not draft_buttons:
+                core.db.execute("UPDATE max_button_cache SET attachments=? WHERE mid=?",
+                                (json.dumps(atts, ensure_ascii=False), prev["mid"]))
+                core.db.commit()
             return True
         except Exception:
+            if cached:
+                core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (prev["mid"],))
+                core.db.commit()
+                return await self._edit_buttons(prev, draft_buttons, replacement, use_cache=False)
             log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
 
     async def cleanup_stale_buttons(self):
         for row in core.db.execute("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
                                    "WHERE d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt LIMIT 20").fetchall():
             if await self._strip_admin_button({"mid": row["mid"]}, draft_buttons=True):
+                core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (row["mid"],))
                 core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (row["mid"],))
                 core.db.commit()
 
@@ -230,6 +250,9 @@ class Max(core.Adapter):
                 parts = str(button.get("payload", "")).split(":")
                 if mid and len(parts) == 4 and parts[0] == "d" and parts[2].isdigit() and parts[3].isdigit():
                     core.db.execute("INSERT OR REPLACE INTO max_draft_ui VALUES(?,?,?)", (mid, int(parts[2]), int(parts[3])))
+                    current = core.get(int(parts[2]))
+                    if current and current["status"] == "pending" and current["attempts"] == int(parts[3]):
+                        core.db.execute("INSERT OR REPLACE INTO max_button_cache VALUES(?,?)", (mid, json.dumps(attachments, ensure_ascii=False)))
                     core.db.commit()
         if with_admin:
             uid = target["user_id"]

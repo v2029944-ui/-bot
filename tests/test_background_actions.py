@@ -66,7 +66,7 @@ def test_old_post_keyboard_removed_but_post_preserved():
         core._set(123, attempts=2)
         await adapter.cleanup_stale_buttons()
         edit = api.of("PUT")[-1][3]
-        assert edit["text"] == "Изменить"
+        assert api.messages["m1"]["text"] == "Изменить" and "text" not in edit
         assert all(not b["payload"].startswith("d:") for a in edit["attachments"] if a["type"] == "inline_keyboard" for row in a["payload"]["buttons"] for b in row)
         assert not api.of("DELETE")
         await adapter.http.aclose()

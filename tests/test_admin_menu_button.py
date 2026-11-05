@@ -112,6 +112,10 @@ class Api:
             return httpx.Response(200, json={"message": {"body": {"mid": f"m{self.n}"}}})
         if request.method == "GET" and request.url.path.startswith("/messages/"):
             return httpx.Response(200, json={"body": self.messages[request.url.path.rsplit("/", 1)[-1]]})
+        if request.method == "PUT" and request.url.path == "/messages":
+            mid = request.url.params["message_id"]
+            if mid in self.messages:
+                self.messages[mid].update(body)
         return httpx.Response(200, json={})
 
     def of(self, method):

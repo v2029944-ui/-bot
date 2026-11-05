@@ -99,6 +99,8 @@ def clean_state(monkeypatch):
     core.WAITING_RULE.clear()
     core.WAITING_EDIT.clear()
     core.WAITING_REJECT.clear()
+    core.db.execute("DELETE FROM max_button_cache")
+    core.db.commit()
     core.post_footer.WAITING.clear()
     core.shutil.rmtree(core.DATA / "inbox", ignore_errors=True)
     core.ops.RESTART_CODE = None

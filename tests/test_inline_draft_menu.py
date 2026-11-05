@@ -23,7 +23,8 @@ def test_change_length_and_back_replace_buttons_under_post(monkeypatch, png, llm
                                        "payload": f"d:{action}:{did}:1", "message": {"body": {"mid": mid}}})
             edit = api.of("PUT")[-1]
             assert edit[2]["message_id"] == mid
-            assert edit[3]["text"] == original["text"]
+            assert api.messages[mid]["text"] == original["text"]
+            assert "text" not in edit[3]
             assert any(b["payload"] == f"d:{expected}:{did}:1" for b in buttons(edit[3]))
             assert edit[3]["attachments"][0] == original["attachments"][0]
         assert len(api.of("POST")) == count and not api.of("DELETE")
