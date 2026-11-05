@@ -839,6 +839,10 @@ def save_photo(data: bytes) -> str:
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise BadImage("Не получилось открыть файл — это не изображение") from e
     img.thumbnail((1600, 1600))
+    # sendPhoto Telegram: отношение сторон не должно превышать 20.
+    w, h = img.size
+    if max(w, h) > 20 * min(w, h):
+        img = ImageOps.pad(img, (max(w, (h + 19) // 20), max(h, (w + 19) // 20)), color="white")
     PHOTOS.mkdir(parents=True, exist_ok=True)
     path = PHOTOS / f"{uuid.uuid4().hex}.jpg"  # уникальное имя: альбомы приходят одновременно
     img.save(path, "JPEG", quality=88)

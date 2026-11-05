@@ -101,13 +101,17 @@ class Api:
 
     def __init__(self):
         self.calls, self.n = [], 0
+        self.messages = {}
 
     async def handler(self, request):
         body = json.loads(request.content) if request.content else None
         self.calls.append((request.method, request.url.path, dict(request.url.params), body))
         if request.method == "POST" and request.url.path == "/messages":
             self.n += 1
+            self.messages[f"m{self.n}"] = body
             return httpx.Response(200, json={"message": {"body": {"mid": f"m{self.n}"}}})
+        if request.method == "GET" and request.url.path.startswith("/messages/"):
+            return httpx.Response(200, json={"body": self.messages[request.url.path.rsplit("/", 1)[-1]]})
         return httpx.Response(200, json={})
 
     def of(self, method):

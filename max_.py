@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import quote
 
 import httpx
 
@@ -17,6 +18,13 @@ API = "https://platform-api.max.ru"
 
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
+for _row in core.db.execute("SELECT uid,btn FROM max_ui WHERE btn IS NOT NULL").fetchall():
+    try:
+        _old = json.loads(_row["btn"])
+        core.db.execute("UPDATE max_ui SET btn=? WHERE uid=?",
+                        (json.dumps({"mid": _old.get("mid")}), _row["uid"]))
+    except (ValueError, AttributeError):
+        core.db.execute("UPDATE max_ui SET btn=NULL WHERE uid=?", (_row["uid"],))
 core.db.commit()
 
 # Кто сейчас нажал кнопку или написал команду: сообщения-меню для этого человека считаются «шагами меню».
@@ -48,6 +56,7 @@ class Max(core.Adapter):
         core.refresh_people(self)  # + люди, добавленные кнопками (хранятся в базе)
         self._tasks: set[asyncio.Task] = set()
         self._processing = asyncio.Semaphore(2)
+        self._send_locks = {}
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
@@ -118,17 +127,35 @@ class Max(core.Adapter):
     async def _strip_admin_button(self, prev: dict):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
         По документации MAX вложения при правке заменяются целиком, поэтому передаём их заново (те же токены)."""
-        atts = list(prev.get("attachments") or [])
-        if prev.get("buttons"):
-            atts.append({"type": "inline_keyboard", "payload": {"buttons": prev["buttons"]}})
         try:
+            message = await self.call("GET", "/messages/" + quote(str(prev["mid"]), safe=""))
+            body = message["body"]
+            atts = []
+            for att in body.get("attachments") or []:
+                kind, payload = att["type"], att["payload"]
+                if kind == "inline_keyboard":
+                    rows = [[b for b in row if b.get("payload") != "m:admin"] for row in payload["buttons"]]
+                    rows = [row for row in rows if row]
+                    if rows:
+                        atts.append({"type": kind, "payload": {"buttons": rows}})
+                elif kind in ("image", "video"):
+                    atts.append({"type": kind, "payload": {"token": payload["token"]}})
+                else:
+                    return  # неизвестное вложение не удаляем при замене клавиатуры
             await self.call("PUT", "/messages", params={"message_id": prev["mid"]},
-                            json={"text": prev.get("text") or "", "attachments": atts})
+                            json={"text": body.get("text") or "", "attachments": atts})
         except Exception:
             log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
 
     async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None,
                     admin_menu=True):
+        if admin_menu and "user_id" in target:
+            lock = self._send_locks.setdefault(str(target["user_id"]), asyncio.Lock())
+            async with lock:
+                return await self._send_inner(target, post, photo, buttons, silent, video, media, admin_menu)
+        return await self._send_inner(target, post, photo, buttons, silent, video, media, admin_menu)
+
+    async def _send_inner(self, target, post, photo=None, buttons=None, silent=False, video=None, media=None, admin_menu=True):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
         with_admin = bool(admin_menu and "user_id" in target and core.is_admin(self, target["user_id"]))
         base_buttons = [list(row) for row in (buttons or [])]  # без кнопки админа: нужны, чтобы потом её убрать
@@ -146,7 +173,6 @@ class Max(core.Adapter):
             attachments.append({"type": "video", "payload": {"token": await self._upload_video(video)}})
         elif photo:
             attachments.append({"type": "image", "payload": {"token": await self._upload_image(photo)}})
-        media_atts = list(attachments)
         if buttons:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
         body = {"text": post, "attachments": attachments}
@@ -165,7 +191,7 @@ class Max(core.Adapter):
         if with_admin:
             uid = target["user_id"]
             prev, mid = self._ui(uid)["btn"], _mid(resp)
-            self._ui_set(uid, btn={"mid": mid, "text": post, "attachments": media_atts, "buttons": base_buttons} if mid else None)
+            self._ui_set(uid, btn={"mid": mid} if mid else prev)
             if prev and prev.get("mid") and prev["mid"] != mid:
                 await self._strip_admin_button(prev)
         return resp
@@ -269,7 +295,7 @@ class Max(core.Adapter):
             elif kind == "message_created":
                 await self.on_message(u["message"])
             elif kind == "message_callback":
-                await self.on_callback(u["callback"])
+                await self.on_callback({**u["callback"], "message": u.get("message")})
         except Exception:
             log.exception("handle failed")
 
