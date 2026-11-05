@@ -151,6 +151,17 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 assert core.get(2)["post"] == "Исправленный текст {bot}"
             with spaces.enter(a):
                 assert core.get(2)["post"] != "Исправленный текст {bot}"
+            with spaces.enter(b):
+                core._add_person(core.ADAPTERS["max"], "11", "Проверяющий другой команды", "apr")
+            await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "edit-owner", "user": {"user_id": 11},
+                                  "payload": f"w:{bid}:d:edit:2:2"}})
+            assert spaces.for_user("11") == aid  # последнее нажатие не меняет пространство по умолчанию
+            text_reply = {"update_type": "message_created", "message": {"sender": {"user_id": 11}, "body": {"text": "Ответ на открытую правку"}}}
+            assert spaces.stamp(text_reply)["message"]["_space"] == bid
+            assert spaces.stamp(material(11))["message"]["_space"] == aid
+            menu_reply = {"update_type": "message_created", "message": {"sender": {"user_id": 11}, "body": {"text": "/menu"}}}
+            assert spaces.stamp(menu_reply)["message"]["_space"] == aid
+            assert spaces.stamp(text_reply)["message"]["_space"] == aid
 
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-a','failed','ОШИБКА_А',?)", (aid,))
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-b','failed','ОШИБКА_Б',?)", (bid,))
@@ -169,6 +180,22 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             assert root.db.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 3
             spaces.WAITING_CREATE.clear()
             spaces.WAITING_MEMBER.clear()
+
+            # Даже главный администратор с собственным пространством возвращается
+            # в него по умолчанию после /admin, кроме ожидаемого ввода настроек.
+            root.db.execute("INSERT INTO workspaces(name,owner,max_channel,tg_channel) VALUES('Админская команда','1','-104','-204')")
+            own = root.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            root.db.commit()
+            spaces.get(own)
+            admin_event = {"update_type": "message_created", "message": {"sender": {"user_id": 1}, "body": {"text": "/admin"}}}
+            assert spaces.stamp(admin_event)["message"]["_space"] == 0
+            assert spaces.for_user("1") == own
+            assert spaces.stamp(material(1))["message"]["_space"] == own
+            await core.on_menu(root_max, "1", "m:footer_text")
+            admin_input = {"update_type": "message_created", "message": {"sender": {"user_id": 1}, "body": {"text": "Подпись для основного пространства"}}}
+            assert spaces.stamp(admin_input)["message"]["_space"] == 0
+            assert spaces.stamp(material(1))["message"]["_space"] == own
+            post_footer.WAITING.clear()
 
             # Повторное открытие использует сохранённые базы и настройки.
             await spaces.close()

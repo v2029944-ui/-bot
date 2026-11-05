@@ -159,15 +159,31 @@ def get(sid):
     return space
 
 
-def for_user(uid):
+def for_user(uid, continue_input=False):
+    uid = str(uid)
+    owner = ROOT.db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
     selected = ROOT.db.execute("SELECT sid FROM workspace_routes WHERE uid=?", (str(uid),)).fetchone()
+    if owner:
+        if continue_input and selected:
+            sid = selected["sid"]
+            import core
+            if sid == 0:
+                memory, rules = ROOT.memories, core.WAITING_RULE.root
+                allowed = uid in ROOT.adapters["max"].approvers
+            elif sid in OPEN:
+                memory, rules = OPEN[sid].memory, OPEN[sid].waiting_rule
+                allowed = uid in memory["ADAPTERS"]["max"].allowed
+            else:
+                memory, rules, allowed = {}, set(), False
+            key = ("max", uid)
+            pending = any(key in memory.get(name, {}) for name in ("WAITING", "WAITING_EDIT", "WAITING_REJECT", "footer_waiting"))
+            if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or sid == 0 and uid in WAITING_CREATE):
+                return sid
+        return owner["id"]
     if selected and selected["sid"] == 0 and str(uid) in ROOT.adapters["max"].approvers:
         return 0
     if selected and selected["sid"] in OPEN and str(uid) in OPEN[selected["sid"]].memory["ADAPTERS"]["max"].allowed:
         return selected["sid"]
-    row = ROOT.db.execute("SELECT id FROM workspaces WHERE owner=?", (str(uid),)).fetchone()
-    if row:
-        return row["id"]
     for sid, space in OPEN.items():
         if str(uid) in space.memory["ADAPTERS"]["max"].allowed:
             return sid
@@ -178,13 +194,28 @@ def stamp(update):
     if not INSTALLED or update.get("update_type") != "message_created":
         return update
     message = update.get("message") or {}
-    message = {**message, "_space": for_user((message.get("sender") or {}).get("user_id"))}
+    body = message.get("body") or {}
+    text = (body.get("text") or "").strip()
+    uid = str((message.get("sender") or {}).get("user_id"))
+    if text in ("/menu", "/myspace", "/admin") and (global_admin(uid) or ROOT.db.execute("SELECT 1 FROM workspaces WHERE owner=?", (uid,)).fetchone()):
+        import core
+        key = ("max", uid)
+        for memory in [ROOT.memories, *(s.memory for s in OPEN.values())]:
+            for name in ("WAITING", "WAITING_EDIT", "WAITING_REJECT", "footer_waiting"):
+                memory[name].pop(key, None)
+        core.WAITING_RULE.root.discard(key)
+        for space in OPEN.values():
+            space.waiting_rule.discard(key)
+        WAITING_MEMBER.difference_update({k for k in WAITING_MEMBER if k[1] == uid})
+        WAITING_CREATE.discard(uid)
+    continuing = bool(text) and not body.get("attachments") and (not text.startswith("/") or text == "/cancel")
+    message = {**message, "_space": for_user((message.get("sender") or {}).get("user_id"), continue_input=continuing)}
     if (message.get("body") or {}).get("text", "").strip() == "/admin" and global_admin((message.get("sender") or {}).get("user_id")):
         message["_space"] = 0
         ROOT.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str((message.get("sender") or {}).get("user_id")),))
         ROOT.db.commit()
     uid = str((message.get("sender") or {}).get("user_id"))
-    if uid in WAITING_CREATE and global_admin(uid):
+    if continuing and uid in WAITING_CREATE and global_admin(uid):
         message["_space"] = 0
     if (message.get("body") or {}).get("text", "").strip() == "/myspace":
         owner = ROOT.db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
@@ -311,7 +342,7 @@ async def create_input(adapter, uid, text):
     await adapter.send_menu(uid, "Пространство создано. Бот должен быть добавлен в обе группы с правом публикации.\n" + view()[0], view()[1])
     try:
         with enter(space):
-            await space.memory["ADAPTERS"]["max"].notify(parts[1], f"Для вас создано пространство «{parts[0]}». Отправьте /myspace, затем фото с подписью.")
+            await space.memory["ADAPTERS"]["max"].notify(parts[1], f"Для вас создано пространство «{parts[0]}». Отправьте фото с подписью или /menu. Пространство выбирается автоматически.")
     except Exception:
         await adapter.notify(uid, "Пространство создано, но приветствие не доставлено. Владелец должен открыть чат с ботом в MAX.")
     return True
