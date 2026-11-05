@@ -56,6 +56,13 @@ async def serve(workers):
                     for other in tasks:
                         other.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
+                    # Shield защищает операции от отмены внешних работников.
+                    # После истечения срока корректной остановки отменяем и
+                    # дожидаемся самих операций до закрытия HTTP и SQLite.
+                    while pending := {t for t in core.INFLIGHT if not t.done()}:
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
                     raise SystemExit(t.result())
                 if t.exception():
                     raise t.exception()

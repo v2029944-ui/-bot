@@ -126,12 +126,3 @@ def test_stale_pending_requests_do_not_block_new_people(monkeypatch):
     core.db.execute("UPDATE requests SET created=?", (time.time() - core.REQ_TTL - 5,))
     core.db.commit()
     assert run(core.unknown_user(a, "101", "Новая")) is True  # старая заявка очистилась
-
-
-def test_no_orphan_invite_token_when_links_unsupported():
-    a = FakeAdapter("max", ["5"])
-    a.admins = ["5"]
-    core.ADAPTERS["max"] = a
-    core.refresh_people(a)
-    run(core.on_menu(a, "5", "m:invn:emp"))
-    assert core.db.execute("SELECT COUNT(*) FROM invites").fetchone()[0] == 0

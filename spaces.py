@@ -364,17 +364,19 @@ async def member_input(adapter, uid, text):
         return True
     parts = [line.strip() for line in text.strip().splitlines()]
     roles = {"сотрудник": "emp", "проверяющий": "apr"}
-    if len(parts) != 2 or not parts[0].isdigit() or len(parts[0]) > 19 or parts[1].lower() not in roles:
+    import re
+    if len(parts) != 2 or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[0]) or parts[1].lower() not in roles:
         await adapter.notify(uid, "Отправьте две строки: ID человека в MAX и роль — сотрудник или проверяющий. Отмена: /cancel")
         return True
-    if parts[0] in adapter.admins:
-        await adapter.notify(uid, "Этот человек уже администратор пространства.")
+    if core.role_of(adapter, parts[0]) is not None:
+        await adapter.notify(uid, "Этот человек уже добавлен. Изменить его роль можно в разделе «Люди».")
         return True
     core._add_person(adapter, parts[0], parts[0], roles[parts[1].lower()])
     WAITING_MEMBER.discard(key)
     await adapter.send_menu(uid, "Человек добавлен в это пространство.", core.menu_for(adapter, uid))
     try:
-        await adapter.notify(parts[0], f"Вы добавлены в пространство «{CURRENT.get().name}». Отправьте /menu или материал с подписью.")
+        name = CURRENT.get().name if CURRENT.get() else "Основное"
+        await adapter.notify(parts[0], f"Вы добавлены в пространство «{name}». Отправьте /menu или материал с подписью.")
     except Exception:
         await adapter.notify(uid, "Приветствие не доставлено. Попросите человека открыть чат с ботом.")
     return True

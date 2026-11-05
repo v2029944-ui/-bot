@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -266,13 +267,26 @@ def updates_enabled() -> bool:
 
 
 async def _git(*args: str, timeout: int = 60) -> tuple[int, str]:
+    p = None
     try:
         p = await asyncio.create_subprocess_exec(
             "git", *args, cwd=REPO_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=os.name == "posix")
         out, _ = await asyncio.wait_for(p.communicate(), timeout)
         return p.returncode, scrub(out.decode("utf-8", "replace")).strip()
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        if p is not None:
+            if os.name == "posix" or p.returncode is None:
+                try:
+                    if os.name == "posix":
+                        os.killpg(p.pid, signal.SIGKILL)  # также git-remote-https/ssh с открытыми pipe
+                    else:
+                        p.kill()
+                except ProcessLookupError:
+                    pass
+            await p.communicate()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         return 1, "git не ответил вовремя"
     except OSError as e:
         return 1, f"git недоступен: {scrub(str(e))}"

@@ -1,20 +1,13 @@
-"""Добавление людей кнопками: заявки, приглашения, удаление, права. Без сети."""
+"""Добавление людей кнопками: заявки, добавление по ID, удаление, права. Без сети."""
 import time
-import types
 
 import core
+import pytest
 from conftest import FakeAdapter, run
 
-S = types.SimpleNamespace
 
-
-class LinkAdapter(FakeAdapter):
-    async def invite_link(self, token):
-        return f"https://t.me/bot?start=inv_{token}"
-
-
-def make(admins=("1",), approvers=("1", "2"), cls=FakeAdapter):
-    a = cls("tg", list(approvers))
+def make(admins=("1",), approvers=("1", "2")):
+    a = FakeAdapter("tg", list(approvers))
     a.admins = list(admins)
     core.ADAPTERS["tg"] = a
     core.refresh_people(a)
@@ -80,39 +73,6 @@ def test_people_menu_only_for_admin_buttons():
     assert ("👥 Люди", "m:people") not in [b for r in core.menu_for(a, "2") for b in r]
 
 
-def test_invite_is_single_use_and_checked():
-    a = make(cls=LinkAdapter)
-    text, _ = menu(a, "1", "m:invn:emp")
-    token = text.split("inv_")[1].split()[0]
-    assert run(core.redeem_invite(a, "50", "Олег", "bad")) is None
-    assert run(core.redeem_invite(a, "50", "Олег", token)) == "emp" and "50" in a.allowed
-    assert any("присоединился" in o[2] for o in a.sent("notify"))  # администратору сообщили
-    assert run(core.redeem_invite(a, "51", "Хитрый", token)) is None  # второй раз ссылка не работает
-    assert "51" not in a.allowed
-
-
-def test_invite_expires_and_is_platform_bound():
-    a = make(cls=LinkAdapter)
-    token = menu(a, "1", "m:invn:apr")[0].split("inv_")[1].split()[0]
-    other = FakeAdapter("max", ["5"])
-    assert run(core.redeem_invite(other, "50", "Олег", token)) is None  # токен от другого мессенджера
-    core.db.execute("UPDATE invites SET created=?", (time.time() - core.INVITE_TTL - 5,))
-    core.db.commit()
-    assert run(core.redeem_invite(a, "50", "Олег", token)) is None
-
-
-def test_invite_not_wasted_on_someone_who_already_has_access():
-    a = make(cls=LinkAdapter)
-    token = menu(a, "1", "m:invn:emp")[0].split("inv_")[1].split()[0]
-    assert run(core.redeem_invite(a, "2", "Согласующий", token)) == "emp"  # у него доступ уже выше
-    assert run(core.redeem_invite(a, "60", "Новый", token)) == "emp"  # ссылка осталась рабочей
-
-
-def test_invite_unsupported_messenger_explains():
-    a = make()  # FakeAdapter без invite_link (как MAX)
-    assert "не поддерживаются" in menu(a, "1", "m:invn:emp")[0]
-
-
 def test_remove_needs_confirm_and_blocks_reappearing_request():
     a = make()
     run(core.unknown_user(a, "77", "Иван"))
@@ -147,3 +107,38 @@ def test_without_admins_nothing_changes():
     core.refresh_people(a)
     assert a.allowed is None  # как раньше: список сотрудников пуст = пишет кто угодно
     assert run(core.unknown_user(a, "77", "Иван")) is False and a.out == []
+
+
+@pytest.mark.parametrize("button", ["m:member", "m:inv", "m:invn:emp"])
+def test_add_by_id_replaces_unsupported_invites(button):
+    a = make()
+    assert "две строки" in menu(a, "1", button)[0]
+    assert run(core.on_text(a, "1", "77\nсотрудник"))
+    assert "77" in a.allowed and "77" not in a.approvers
+    assert any("Основное" in o[2] for o in a.sent("notify") if o[1] == "77")
+
+
+@pytest.mark.parametrize("uid", ["0", "001", "１２３", "12345678901234567890", "-77"])
+def test_add_by_id_rejects_invalid_ids(uid):
+    a = make()
+    menu(a, "1", "m:member")
+    assert run(core.on_text(a, "1", uid + "\nпроверяющий"))
+    assert uid not in a.allowed
+    assert not core.db.execute("SELECT 1 FROM people").fetchone()
+
+
+def test_add_existing_user_does_not_silently_demote_or_change_admin():
+    a = make()
+    for uid in ("1", "2"):
+        menu(a, "1", "m:member")
+        run(core.on_text(a, "1", uid + "\nсотрудник"))
+    assert a.admins == ["1"] and "2" in a.approvers
+    assert "уже добавлен" in a.sent("notify")[-1][2]
+
+
+def test_revoked_admin_cannot_complete_pending_addition():
+    a = make()
+    menu(a, "1", "m:member")
+    a.admins = []
+    run(core.on_text(a, "1", "77\nпроверяющий"))
+    assert "77" not in a.approvers

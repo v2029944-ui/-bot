@@ -1,5 +1,5 @@
 """Ядро: хранилище черновиков, генерация поста нейросетью, логика согласования."""
-import asyncio, base64, io, json, logging, os, re, secrets, shutil, sqlite3, subprocess, time, uuid
+import asyncio, base64, io, json, logging, os, re, shutil, sqlite3, subprocess, time, uuid
 from pathlib import Path
 
 import httpx
@@ -83,8 +83,6 @@ db.execute("""CREATE TABLE IF NOT EXISTS people (
 # заявки на доступ: pending — ждёт решения, rejected — отклонена или человек удалён (молчим 7 дней)
 db.execute("""CREATE TABLE IF NOT EXISTS requests (
     platform TEXT, uid TEXT, name TEXT, username TEXT, status TEXT, created REAL, PRIMARY KEY (platform, uid))""")
-db.execute("""CREATE TABLE IF NOT EXISTS invites (
-    token TEXT PRIMARY KEY, platform TEXT, role TEXT, created REAL, used_by TEXT)""")
 try:  # миграция старых баз: в какие каналы пост уже опубликован (защита от дублей)
     db.execute("ALTER TABLE drafts ADD COLUMN published_to TEXT DEFAULT ''")
 except sqlite3.OperationalError:
@@ -128,10 +126,6 @@ class Adapter:
     async def send_menu(self, user_id: str, text: str, rows: list | None): ...  # rows: [[(подпись, payload), ...], ...]
     async def run(self): ...
 
-    async def invite_link(self, token: str) -> str | None:
-        """Ссылка-приглашение для этого мессенджера. None = не поддерживается."""
-        return None
-
     def not_sent(self, e: Exception) -> bool:
         """True, если по ошибке ТОЧНО видно, что пост в канал не вышел (сервис отклонил запрос).
         По умолчанию «не уверены»: тогда повторная публикация спросит подтверждение."""
@@ -148,8 +142,8 @@ def quiet(adapter: Adapter, user_id) -> bool:
 
 
 def confirm_mode() -> str:
-    """Как подтверждать сотруднику, что фото дошло: reaction (👍 под сообщением) | text («✅ Принято») | off."""
-    return env("EMPLOYEE_CONFIRM", "reaction").lower()
+    """Подтверждение в MAX: текст или off. Старое reaction принимается как text."""
+    return "off" if env("EMPLOYEE_CONFIRM", "text").lower() == "off" else "text"
 
 
 _ALERT_LAST: dict[str, float] = {}
@@ -1623,11 +1617,10 @@ async def _safe_notify(adapter, user_id, text):
 
 # ---------- Люди: добавление кнопками ----------
 REQ_TTL = 7 * 86400          # отклонённому молчим неделю, потом он может подать заявку снова
-INVITE_TTL = 7 * 86400       # ссылка-приглашение живёт неделю и работает один раз
 MAX_PENDING_REQUESTS = 20    # защита от спама заявками
 ROLE_NAME = {"emp": "сотрудник", "apr": "согласующий", "adm": "администратор"}
 ROLE_ICON = {"emp": "👷", "apr": "✅", "adm": "👑"}
-INVITE_WELCOME = {
+ACCESS_WELCOME = {
     "emp": "Готово ✅ Теперь присылайте фото работ с кратким описанием в подписи.",
     "apr": "Вы добавлены как согласующий ✅ Черновики постов будут приходить сюда. Меню: /menu",
 }
@@ -1638,7 +1631,7 @@ def is_admin(adapter: Adapter, uid) -> bool:
 
 
 def requests_enabled(adapter: Adapter) -> bool:
-    """Заявки и приглашения работают, только если у мессенджера есть администратор."""
+    """Заявки работают, только если у мессенджера есть администратор."""
     return bool(getattr(adapter, "admins", None)) and env("ACCESS_REQUESTS", "1") != "0"
 
 
@@ -1752,34 +1745,14 @@ async def unknown_user(adapter: Adapter, uid, name: str, username: str | None = 
     return True
 
 
-async def redeem_invite(adapter: Adapter, uid, name: str, token: str) -> str | None:
-    """Человек перешёл по ссылке-приглашению. Возвращает роль (emp/apr) или None, если ссылка недействительна."""
-    uid = str(uid)
-    row = db.execute("SELECT * FROM invites WHERE token=? AND platform=?", (token, adapter.name)).fetchone()
-    if not row or row["used_by"] or time.time() - row["created"] > INVITE_TTL:
-        return None
-    role = row["role"]
-    have = role_of(adapter, uid)
-    if have in ("apr", "adm") or have == role:  # уже есть такой доступ: ссылку не тратим
-        return role
-    cur = db.execute("UPDATE invites SET used_by=? WHERE token=? AND used_by IS NULL", (uid, token))
-    db.commit()
-    if cur.rowcount != 1:
-        return None
-    _add_person(adapter, uid, name, role)
-    await _tell_admins(adapter, f"✅ {name or uid} (id {uid}) присоединился по приглашению: {ROLE_NAME[role]}.")
-    return role
-
-
 def menu_for(adapter: Adapter, uid) -> list:
     rows = [list(r) for r in MENU]
     rows.append([("📋 На проверке", "m:pending")])
     if is_admin(adapter, uid):
-        if spaces.active_id():
-            rows.append([("➕ Добавить человека", "m:space_member")])
+        rows.append([("➕ Добавить человека", "m:member")])
         if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
             rows.append([("🏢 Рабочие пространства", "m:spaces")])
-        rows.append([("👥 Люди", "m:people"), ("🔗 Пригласить", "m:inv"), ("📊 Статус", "m:status")])
+        rows.append([("👥 Люди", "m:people"), ("📊 Статус", "m:status")])
         if spaces.active_id():
             rows.append([("⏯ Пауза пространства", "m:pause")])
         else:
@@ -1817,7 +1790,7 @@ def people_view(adapter: Adapter) -> tuple[str, list]:
     n = db.execute("SELECT COUNT(*) FROM requests WHERE platform=? AND status='pending'", (adapter.name,)).fetchone()[0]
     if n:
         rows.append([(f"📬 Заявки ({n})", "m:reqs")])
-    rows.append([("🔗 Пригласить", "m:inv")])
+    rows.append([("➕ Добавить человека", "m:member")])
     return text, rows
 
 
@@ -1839,7 +1812,7 @@ def reqs_view(adapter: Adapter) -> tuple[str, list]:
     return text + "\n\n👷 — сотрудник, ✅ — согласующий, 🚫 — отклонить.", rows
 
 
-PEOPLE_ACTS = {"people", "reqs", "acc", "pdel", "pdelok", "inv", "invn", "pset", "prole", "proleok",
+PEOPLE_ACTS = {"people", "reqs", "acc", "pdel", "pdelok", "pset", "prole", "proleok",
                "pause", "pauseset", "upd", "updgo"}
 
 
@@ -1865,7 +1838,7 @@ async def people_menu(adapter: Adapter, act: str, parts: list[str], uid: str = "
             return "Неизвестная роль.", None
         _add_person(adapter, uid, r["name"], role)
         try:  # единственное сообщение незнакомцу: доступ открыт
-            await adapter.notify(uid, INVITE_WELCOME[role])
+            await adapter.notify(uid, ACCESS_WELCOME[role])
         except Exception:
             log.warning("не удалось сообщить %s о доступе", uid, exc_info=True)
         return f"✅ {who} добавлен: {ROLE_NAME[role]}.", None
@@ -1925,25 +1898,6 @@ async def people_menu(adapter: Adapter, act: str, parts: list[str], uid: str = "
             _remove_person(adapter, p["uid"], p["name"])
         text, rows = people_view(adapter)
         return ("🗑 Убран.\n\n" if p else "") + text, rows
-    if act == "inv":
-        return ("Кого пригласить? Ссылка одноразовая и действует 7 дней.\n"
-                "Согласующий сможет публиковать посты и менять правила стиля.",
-                [[("👷 Сотрудника", "m:invn:emp"), ("✅ Согласующего", "m:invn:apr")]])
-    if act == "invn":
-        role = arg(2)
-        if role not in ROLE_NAME:
-            return "Неизвестная роль.", None
-        db.execute("DELETE FROM invites WHERE created < ?", (time.time() - 30 * 86400,))
-        token = secrets.token_urlsafe(16)  # 128 бит: для роли «согласующий» перебор должен быть невозможен
-        link = await adapter.invite_link(token)
-        if not link:
-            return ("В этом мессенджере ссылки-приглашения не поддерживаются. Попросите человека написать боту — "
-                    "вам придёт заявка с кнопками.", None)
-        db.execute("INSERT INTO invites(token,platform,role,created) VALUES(?,?,?,?)",
-                   (token, adapter.name, role, time.time()))  # токен сохраняем, только если ссылка получилась
-        db.commit()
-        return (f"🔗 Ссылка ({ROLE_NAME[role]}), действует 7 дней, один человек:\n{link}\n\n"
-                "Перешлите её человеку: после перехода и нажатия «Старт» он будет добавлен сам.", None)
     return "Выберите действие:", menu_for(adapter, "")
 
 
@@ -1988,9 +1942,9 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
     spaces.WAITING_MEMBER.discard((spaces.active_id(), uid))
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
-    if act == "space_member":
-        if not spaces.active_id() or not is_admin(adapter, uid):
-            return "⛔ Человека добавляет администратор своего пространства.", None
+    if act in ("member", "space_member", "inv", "invn"):  # старые кнопки ведут в действующее добавление
+        if not is_admin(adapter, uid):
+            return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
         return "Отправьте две строки:\nID человека в MAX\nсотрудник или проверяющий\n\nОтмена: /cancel", None
     if act in ("spaces", "space_add"):
@@ -2107,7 +2061,7 @@ async def on_text(adapter: Adapter, user_id, text: str) -> bool:
     uid, t = str(user_id), text.strip()
     if spaces.INSTALLED and await spaces.create_input(adapter, uid, t):
         return True
-    if spaces.INSTALLED and await spaces.member_input(adapter, uid, t):
+    if await spaces.member_input(adapter, uid, t):
         return True
     if uid not in adapter.approvers:
         return False

@@ -56,6 +56,17 @@ def test_poll_dispatch_saves_action_without_running_it(monkeypatch):
     run(scenario())
 
 
+def test_text_deduplication_uses_message_id_not_profile_or_route():
+    update = {"update_type": "message_created", "message": {
+        "sender": {"user_id": 1, "first_name": "Первое имя"}, "body": {"mid": "text-1", "text": "/menu"}}}
+    max_actions.enqueue(update)
+    max_actions.enqueue({**update, "_route_on_process": True, "message": {
+        **update["message"], "_space": 5, "sender": {"user_id": 1, "first_name": "Новое имя"}}})
+    assert core.db.execute("SELECT COUNT(*) FROM max_actions").fetchone()[0] == 1
+    max_actions.enqueue({**update, "message": {**update["message"], "body": {"mid": "text-2", "text": "/menu"}}})
+    assert core.db.execute("SELECT COUNT(*) FROM max_actions").fetchone()[0] == 2
+
+
 def test_adapter_error_is_recorded_as_failed_action(monkeypatch):
     async def scenario():
         api = Api()

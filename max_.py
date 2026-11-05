@@ -17,7 +17,6 @@ import ops
 import max_queue
 import max_actions
 import post_footer
-import comparison
 import spaces
 import html
 

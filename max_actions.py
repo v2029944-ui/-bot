@@ -25,7 +25,9 @@ def enqueue(update):
     callback = update.get("callback") or {}
     message = update.get("message") or {}
     uid = str((callback.get("user") or message.get("sender") or update.get("user") or {}).get("user_id", ""))
-    key = callback.get("callback_id") or hashlib.sha256(payload.encode()).hexdigest()
+    mid = (message.get("body") or {}).get("mid")
+    identity = f"message:{uid}:{mid}" if update.get("update_type") == "message_created" and mid else payload
+    key = callback.get("callback_id") or hashlib.sha256(identity.encode()).hexdigest()
     core.db.execute("INSERT OR IGNORE INTO max_actions(event_key,uid,payload) VALUES(?,?,?)", (key, uid, payload))
     core.db.commit()
 

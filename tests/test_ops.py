@@ -205,19 +205,6 @@ def test_cannot_demote_last_admin_and_env_people_are_fixed():
     assert run(core.on_menu(b, "5", "m:proleok:emp:5"))[0].startswith("👥")  # такого человека нет в базе
 
 
-def test_new_admin_is_not_blocked_by_invites():
-    a = admin_adapter()
-    make_person(a, "77", "Иван", "adm")
-
-    class L(FakeAdapter):
-        async def invite_link(self, token):
-            return f"https://t.me/b?start=inv_{token}"
-    a.invite_link = L.invite_link.__get__(a)
-    token = run(core.on_menu(a, "77", "m:invn:emp"))[0].split("inv_")[1].split()[0]
-    assert run(core.redeem_invite(a, "77", "Иван", token)) == "emp"  # у админа доступ выше: ссылка не тратится
-    assert core.db.execute("SELECT used_by FROM invites").fetchone()["used_by"] is None
-
-
 # ---------- обновление ----------
 def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,

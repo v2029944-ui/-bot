@@ -86,7 +86,7 @@ def test_admin_menu_callback_opens_controls_and_checks_current_role():
         await adapter.on_callback(callback)
         assert bodies[-1]["text"] == "Меню администратора:"
         payloads = [b["payload"] for b in buttons(bodies[-1])]
-        assert {"m:people", "m:inv", "m:status", "m:pause", "m:upd"} <= set(payloads)
+        assert {"m:people", "m:member", "m:status", "m:pause", "m:upd"} <= set(payloads)
         assert "m:admin" not in payloads  # в самом меню админа кнопка не нужна
         assert key not in core.WAITING and key not in core.WAITING_EDIT and key not in core.WAITING_RULE
         adapter.admins = []  # старая кнопка после снятия прав; согласующим человек остался

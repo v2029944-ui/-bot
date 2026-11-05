@@ -288,18 +288,3 @@ def test_comment_on_published_post_says_already_handled(tg, llm, png):
     run(core.on_action(tg, "1", "okyes", did, 1))
     ok, msg = run(core._regenerate(tg, "1", did, comment="короче"))
     assert "уже обработан" in msg
-
-
-def test_invite_token_is_long_and_url_safe():
-    a = FakeAdapter("tg", ["1"])
-    a.admins = ["1"]
-    core.ADAPTERS["tg"] = a
-    core.refresh_people(a)
-
-    async def link(token):
-        return f"https://t.me/b?start=inv_{token}"
-    a.invite_link = link
-    run(core.on_menu(a, "1", "m:invn:apr"))
-    token = core.db.execute("SELECT token FROM invites").fetchone()["token"]
-    import re
-    assert len(token) >= 20 and re.fullmatch(r"[A-Za-z0-9_-]+", token)  # подходит для ссылки Telegram
