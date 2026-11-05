@@ -1,0 +1,59 @@
+"""Управляемая администратором ссылка в опубликованных постах."""
+import html
+import json
+from urllib.parse import urlsplit
+
+WAITING = {}
+
+
+class LinkedPost(str):
+    def __new__(cls, markup, plain):
+        obj = super().__new__(cls, markup)
+        obj.plain = plain
+        return obj
+
+
+def config():
+    import ops
+    return json.loads(ops.get_setting("post_footer", '{"enabled":false,"text":"Подробнее","max":"","tg":""}'))
+
+
+def save(value):
+    import ops
+    ops.set_setting("post_footer", json.dumps(value, ensure_ascii=False))
+
+
+def view():
+    c = config()
+    return (f"🔗 Ссылка в постах: {'включена' if c['enabled'] else 'выключена'}.\n"
+            f"Текст: {c['text']}\nMAX: {c['max'] or 'не задан'}\nTelegram: {c['tg'] or 'не задан'}\n"
+            "Ссылка добавляется при публикации. Для одного адреса в обоих каналах укажите его в обоих полях.",
+            [[("✏️ Текст ссылки", "m:footer_text")], [("Адрес MAX", "m:footer_max"), ("Адрес Telegram", "m:footer_tg")],
+             [("Выключить" if c['enabled'] else "Включить", "m:footer_toggle")]])
+
+
+def validate(field, value):
+    value = value.strip()
+    if field == "text":
+        if not value or len(value.encode("utf-16-le")) // 2 > 80 or "\n" in value:
+            raise ValueError("Текст ссылки должен занимать одну строку от 1 до 80 знаков.")
+    elif value == "-":
+        value = ""
+    else:
+        try:
+            url = urlsplit(value)
+            if url.scheme != "https" or not url.hostname or url.username or url.password or len(value) > 300 or any(ch.isspace() for ch in value):
+                raise ValueError()
+        except ValueError:
+            raise ValueError("Пришлите HTTPS-ссылку до 300 знаков или «-», чтобы убрать её.")
+    return value
+
+
+def render(post, channel, settings):
+    if not settings.get("enabled") or not settings.get(channel):
+        return post
+    plain = post + "\n\n" + settings["text"]
+    markup = html.escape(post) + '\n\n<a href="' + html.escape(settings[channel], quote=True) + '">' + html.escape(settings["text"]) + '</a>'
+    if len(markup.encode("utf-16-le")) // 2 > 4000:
+        raise ValueError("Пост со ссылкой слишком длинный. Сократите текст и подтвердите публикацию заново.")
+    return LinkedPost(markup, plain)

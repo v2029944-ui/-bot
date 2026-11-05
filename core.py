@@ -3,6 +3,7 @@ import asyncio, base64, io, json, logging, os, re, secrets, shutil, sqlite3, sub
 from pathlib import Path
 
 import httpx
+import post_footer
 from PIL import Image, ImageOps, ImageDraw, UnidentifiedImageError
 
 log = logging.getLogger("core")
@@ -88,7 +89,7 @@ except sqlite3.OperationalError:
     pass
 for _col in ("last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
              "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
-             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'"):
+             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT"):
     try:
         db.execute(f"ALTER TABLE drafts ADD COLUMN {_col}")
     except sqlite3.OperationalError:
@@ -491,7 +492,7 @@ def scrub_published(d):
     """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
     db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
                   photo='',video='',media='[]',published_to='',publish_errors='{}',
-                  post_length='',rejection_reason='',attempts=1,last_sent=0,reminded=0,expiry_warned=0
+                  post_length='',rejection_reason='',footer=NULL,attempts=1,last_sent=0,reminded=0,expiry_warned=0
                   WHERE id=? AND status='published'""", (d["id"],))
     if d.get("source_key"):
         db.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))
@@ -1351,6 +1352,10 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         return False, "Это устаревший вариант. Используйте последнее сообщение с постом."
 
     targets = publication_targets(d, adapter)
+    footer = json.loads(d["footer"]) if d.get("footer") is not None else post_footer.config()
+    posts = {t.name: post_footer.render(d["post"], t.name, footer) for t in targets}
+    if d.get("footer") is None:
+        _set(did, footer=json.dumps(footer, ensure_ascii=False))
 
     marks = _parse_marks(d.get("published_to"))
     todo = [t for t in targets if marks.get(t.name) != "done"]
@@ -1371,7 +1376,7 @@ async def _publish_inner(adapter: Adapter, user_id, did: int, attempt: int, forc
         marks[t.name] = "unknown"  # сначала фиксируем намерение: сбой после отправки не даст дубль
         _set(did, published_to=_dump_marks(marks))
         try:
-            await t.publish(d["photo"], d["post"], **media_kw(d))
+            await t.publish(d["photo"], posts[t.name], **media_kw(d))
         except Exception as e:
             log.exception("publish failed")
             errors = json.loads(get(did).get("publish_errors") or "{}")
@@ -1677,6 +1682,7 @@ def menu_for(adapter: Adapter, uid) -> list:
         rows.append([("👥 Люди", "m:people"), ("🔗 Пригласить", "m:inv"), ("📊 Статус", "m:status")])
         rows.append([("⏯ Пауза", "m:pause"), ("🔄 Обновить", "m:upd")])
         rows.append([("📥 Обработка материалов", "m:inbox")])
+        rows.append([("🔗 Ссылка в постах", "m:footer")])
     return rows
 
 
@@ -1873,8 +1879,24 @@ async def on_menu(adapter: Adapter, user_id, payload: str) -> tuple[str, list | 
     for waiting in (WAITING, WAITING_EDIT, WAITING_REJECT):  # любой переход по меню отменяет ожидание текста
         waiting.pop((adapter.name, uid), None)
     WAITING_RULE.discard((adapter.name, uid))
+    post_footer.WAITING.pop((adapter.name, uid), None)
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    if act.startswith("footer"):
+        if not is_admin(adapter, uid):
+            return "⛔ Настройка доступна только администратору.", None
+        field = act.removeprefix("footer_")
+        if act == "footer_toggle":
+            c = post_footer.config()
+            if not c["enabled"] and not (c["max"] or c["tg"]):
+                return "Сначала задайте хотя бы один адрес.", post_footer.view()[1]
+            c["enabled"] = not c["enabled"]
+            post_footer.save(c)
+        elif field in ("text", "max", "tg"):
+            post_footer.WAITING[(adapter.name, uid)] = field
+            return ("Пришлите текст ссылки (до 80 знаков). Отмена: /cancel" if field == "text" else
+                    "Пришлите HTTPS-адрес бота или «-», чтобы убрать ссылку для этого канала. Отмена: /cancel"), None
+        return post_footer.view()
     if act == "admin":
         return "Меню администратора:", menu_for(adapter, uid)
     if act == "pending":
@@ -1957,6 +1979,27 @@ async def on_text(adapter: Adapter, user_id, text: str) -> bool:
     if uid not in adapter.approvers:
         return False
     key = (adapter.name, uid)
+    if key in post_footer.WAITING:
+        if not is_admin(adapter, uid):
+            post_footer.WAITING.pop(key, None)
+            await adapter.notify(uid, "⛔ Настройка доступна только администратору.")
+            return True
+        if t == "/cancel":
+            post_footer.WAITING.pop(key, None)
+            await adapter.send_menu(uid, *post_footer.view())
+            return True
+        field = post_footer.WAITING[key]
+        try:
+            value = post_footer.validate(field, t)
+        except ValueError as e:
+            await adapter.notify(uid, err(e))
+            return True
+        c = post_footer.config()
+        c[field] = value
+        post_footer.save(c)
+        post_footer.WAITING.pop(key, None)
+        await adapter.send_menu(uid, *post_footer.view())
+        return True
     if t in LABELS:
         msg, rows = await on_menu(adapter, uid, LABELS[t])
         await adapter.send_menu(uid, msg, rows)

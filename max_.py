@@ -13,6 +13,7 @@ import core
 import ops
 import max_queue
 import max_actions
+import post_footer
 
 log = logging.getLogger("max")
 API = "https://platform-api.max.ru"
@@ -190,6 +191,8 @@ class Max(core.Adapter):
         if buttons:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
         body = {"text": post, "attachments": attachments}
+        if isinstance(post, post_footer.LinkedPost):
+            body["format"] = "html"
         if silent:
             body["notify"] = False  # без звука (по документации MAX; с реальным токеном не проверено)
         tries, pause = (30, 2.0) if video or any(i["type"] == "video" for i in (media or [])) else (6, 1.5)  # видео MAX обрабатывает дольше картинки

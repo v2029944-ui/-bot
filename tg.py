@@ -5,11 +5,14 @@ from aiogram.exceptions import (TelegramBadRequest, TelegramEntityTooLarge, Tele
 from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 
 import core
+import post_footer
 
 CAPTION_LIMIT = 1000
 
 
 def _tg_len(s: str) -> int:
+    if isinstance(s, post_footer.LinkedPost):
+        s = s.plain
     return len(s.encode("utf-16-le")) // 2
 
 
@@ -26,12 +29,13 @@ class Telegram(core.Adapter):
         # видео уходит самим файлом (до 50 МБ), а не картинкой-превью
         send, media, extra = ((self.bot.send_video, FSInputFile(video), {"supports_streaming": True}) if video
                               else (self.bot.send_photo, FSInputFile(photo), {}))
+        formatting = {"parse_mode": "HTML"} if isinstance(post, post_footer.LinkedPost) else {}
         if _tg_len(post) <= CAPTION_LIMIT:
-            await send(chat, media, caption=post, reply_markup=kb, disable_notification=silent, **extra)
+            await send(chat, media, caption=post, reply_markup=kb, disable_notification=silent, **extra, **formatting)
             return
         await send(chat, media, disable_notification=silent, **extra)
         try:
-            await self.bot.send_message(chat, post, reply_markup=kb, disable_notification=silent)
+            await self.bot.send_message(chat, post, reply_markup=kb, disable_notification=silent, **formatting)
         except Exception as e:
             if track:
                 e.partial = True  # Медиа уже отправлено; повтор может создать дубль.
@@ -50,16 +54,17 @@ class Telegram(core.Adapter):
         elif ch.lstrip("-").isdigit():   # id пользователя, группы или канала
             ch = int(ch)
         if media:
+            formatting = {"parse_mode": "HTML"} if isinstance(post, post_footer.LinkedPost) else {}
             group = []
             short = _tg_len(post) <= CAPTION_LIMIT
             for i, item in enumerate(media):
                 cls = InputMediaVideo if item["type"] == "video" else InputMediaPhoto
                 kw = {"supports_streaming": True} if item["type"] == "video" else {}
-                group.append(cls(media=FSInputFile(item["path"]), caption=post if i == 0 and short else None, **kw))
+                group.append(cls(media=FSInputFile(item["path"]), caption=post if i == 0 and short else None, **kw, **formatting))
             await self.bot.send_media_group(chat_id=ch, media=group)
             if not short:
                 try:
-                    await self.bot.send_message(ch, post)
+                    await self.bot.send_message(ch, post, **formatting)
                 except Exception as e:
                     e.partial = True
                     raise
