@@ -10,6 +10,7 @@ import core
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, uid TEXT,
     payload TEXT, state TEXT DEFAULT 'pending')""")
+core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_pending ON max_actions(state,uid,id)")
 core.db.commit()
 
 
@@ -43,13 +44,26 @@ class Worker:
             core.db.execute("UPDATE max_actions SET state='pending' WHERE id=?", (row["id"],))
             core.db.commit()
             raise
+        except Exception:
+            # Не повторяем неизвестный побочный эффект команды автоматически.
+            core.db.execute("UPDATE max_actions SET state='failed',payload='' WHERE id=?", (row["id"],))
+            core.db.commit()
+            logging.getLogger("max_actions").exception("ошибка фоновой команды %s", row["id"])
+            try:
+                await self.adapter.notify(row["uid"], "⚠️ Не удалось выполнить действие. Проверьте результат и повторите его при необходимости.")
+            except Exception:
+                logging.getLogger("max_actions").warning("не удалось сообщить об ошибке команды")
         else:
             core.db.execute("UPDATE max_actions SET state='done',payload='' WHERE id=?", (row["id"],))
             core.db.commit()
 
     def schedule(self):
         self.active = {uid: task for uid, task in self.active.items() if not task.done()}
-        for row in core.db.execute("SELECT * FROM max_actions WHERE state='pending' ORDER BY id").fetchall():
+        # Только первая команда каждого пользователя; тела всей очереди не нужны.
+        rows = core.db.execute("""SELECT a.* FROM max_actions a JOIN (
+            SELECT MIN(id) AS id FROM max_actions WHERE state='pending' GROUP BY uid
+            ) first ON first.id=a.id ORDER BY a.id LIMIT 8""").fetchall()
+        for row in rows:
             if len(self.active) >= 4 or core.SHUTTING_DOWN:
                 break
             if row["uid"] in self.active:

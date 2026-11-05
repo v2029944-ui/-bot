@@ -1502,9 +1502,7 @@ def rules_command(adapter: Adapter, user_id, text: str) -> str | None:
     if cmd not in ("/rules", "/rule_add", "/rule_del") or str(user_id) not in adapter.approvers:
         return None
     if cmd == "/rules":
-        rows = db.execute("SELECT id, text FROM rules ORDER BY id").fetchall()
-        body = "\n".join(f"{n}. {r['text']}" for n, r in enumerate(rows, 1)) or "Пока пусто."
-        return f"📝 Правила стиля:\n{body}\n\nДобавить: /rule_add текст\nУдалить: /rule_del номер"
+        return rules_view()[0] + "\n\nДобавить: /rule_add текст\nУдалить: /rule_del номер"
     if cmd == "/rule_add":
         if not arg:
             return "Формат: /rule_add текст правила"
@@ -1859,8 +1857,8 @@ def rules_view() -> tuple[str, list]:
     total = db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
     numbered = list(enumerate(rows, total - len(rows) + 1))
     body = "\n".join(f"{n}. {r['text']}" for n, r in numbered) or "Пока пусто."
-    if len(body) > 3500:
-        body = body[:3500] + "\n…"
+    if len(body.encode("utf-16-le")) // 2 > 3500:
+        body = body.encode("utf-16-le")[:3500 * 2].decode("utf-16-le", errors="ignore") + "\n…"
     text = "📝 Правила стиля:\n" + body
     if total > len(rows):
         text += f"\n\nПоказаны последние {len(rows)} из {total}. Старые удаляются командой /rule_del номер."
