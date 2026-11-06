@@ -73,16 +73,11 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             for uid in (11, 22):
                 max_queue.enqueue(spaces.stamp(material(uid)))
             worker = max_queue.Worker(root_max)
-            ops.set_paused(True)  # основное пространство не должно останавливать остальные
+            ops.set_setting("paused", "1")  # stale pause flags must not block any workspace
             with spaces.enter(a):
-                ops.set_paused(True)
+                ops.set_setting("paused", "1")
             assert await worker.process_once()
             assert await worker.process_once()
-            with spaces.enter(a):
-                assert core.get(1) is None
-                ops.set_paused(False)
-            assert await worker.process_once(time.time() + 61)
-            ops.set_paused(False)
             assert root.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
             for space in (a, b):
                 with spaces.enter(space):

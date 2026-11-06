@@ -138,25 +138,23 @@ def test_reminders_respect_mute_and_pause(tg, llm, png, monkeypatch):
     t = time.time() - 4 * 3600
     core.db.execute("UPDATE drafts SET created=?, last_sent=?", (t, t))
     core.db.commit()
-    ops.set_paused(True)
-    assert run(core.remind_once()) == 0  # на паузе не напоминаем
-    ops.set_paused(False)
+    ops.set_setting("paused", "1")
+    assert run(core.remind_once()) == 1  # прежняя пауза больше не блокирует напоминания
+    core.db.execute("UPDATE drafts SET reminded=0,last_sent=0")
+    core.db.commit()
+    ops.set_setting("paused", "0")
     ops.set_mode(tg, "9", "muted")
     assert run(core.remind_once()) == 1
     assert [o[1] for o in tg.sent("silent")] == ["9"]  # «мут» — тихо, второму — со звуком
 
 
 # ---------- пауза ----------
-def test_pause_is_admin_only_and_persistent():
+def test_old_pause_buttons_do_not_change_state():
     a = admin_adapter()
-    assert "только администратор" in run(core.on_menu(a, "2", "m:pause"))[0]
-    text, rows = run(core.on_menu(a, "1", "m:pause"))
-    assert "работает" in text and rows[0][0][1] == "m:pauseset:1"
-    text, rows = run(core.on_menu(a, "1", "m:pauseset:1"))
-    assert ops.is_paused() and rows[0][0][1] == "m:pauseset:0"
-    assert ops.get_setting("paused") == "1"  # лежит в базе: переживёт перезапуск
-    run(core.on_menu(a, "1", "m:pauseset:0"))
-    assert not ops.is_paused()
+    for payload in ("m:pause", "m:pauseset:1", "m:pauseset:0"):
+        text, rows = run(core.on_menu(a, "1", payload))
+        assert "больше не поддерживается" in text and rows is None
+        assert ops.get_setting("paused", "0") == "0"
 
 
 # ---------- роли ----------
@@ -343,15 +341,15 @@ def test_restart_event_fires_with_code():
     assert asyncio.run(scenario()) == 42
 
 
-def test_status_shows_version_and_pause(monkeypatch):
+def test_status_ignores_legacy_pause_and_shows_version(monkeypatch):
     a = admin_adapter()
-    ops.set_paused(True)
+    ops.set_setting("paused", "1")
 
     async def ok(*args, **kw):
         return "ОК"
     monkeypatch.setattr(core, "_complete", ok)
     text = run(core.status_text(a))
-    assert "НА ПАУЗЕ" in text and "Версия:" in text
+    assert "Бот работает" in text and "НА ПАУЗЕ" not in text and "Версия:" in text
 
 
 # ---------- entrypoint.sh с подставным python ----------

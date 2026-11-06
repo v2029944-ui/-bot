@@ -162,8 +162,7 @@ async def status_text(adapter: core.Adapter) -> str:
         free = f"{shutil.disk_usage(core.DATA).free / 1e9:.1f} ГБ"
     except OSError:
         free = "неизвестно"
-    lines = [("⏸ Бот НА ПАУЗЕ: новые фото не принимаются." if ops.is_paused()
-              else f"🟢 Бот работает {core._ago(now - core.STARTED)}."),
+    lines = [f"🟢 Бот работает {core._ago(now - core.STARTED)}.",
              f"Версия: {await ops.version()}",
              f"Мессенджеры: {', '.join(core.ADAPTERS) or 'нет'}",
              f"Нейросеть ({core.MODEL}): {llm}", f"Генерация: {last}",
@@ -182,8 +181,8 @@ async def remind_once(now: float | None = None) -> int:
     Возвращает число черновиков, о которых напомнили."""
     now = now or time.time()
     after = float(core.env("REMIND_AFTER_MIN", "180")) * 60
-    # напоминаем только в рабочее время (NOTIFY_HOURS/NOTIFY_DAYS/NOTIFY_TZ) и не на паузе
-    if after <= 0 or ops.is_paused() or not ops.in_window(now):
+    # напоминаем только в рабочее время (NOTIFY_HOURS/NOTIFY_DAYS/NOTIFY_TZ)
+    if after <= 0 or not ops.in_window(now):
         return 0
     rows = core.db.execute("SELECT * FROM drafts WHERE status='pending' AND reminded=0 "
                       "AND COALESCE(NULLIF(last_sent,0), created) < ? ORDER BY id", (now - after,)).fetchall()

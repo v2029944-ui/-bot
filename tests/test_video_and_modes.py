@@ -444,15 +444,19 @@ def test_max_uploads_photo_through_real_file_handling(mx, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("stopping", [False, True])
-def test_max_paused_or_stopping_rejects_media_before_download(mx, monkeypatch, stopping):
+def test_max_legacy_pause_does_not_block_but_shutdown_rejects_media(mx, monkeypatch, stopping):
     import ops
     if stopping:
         monkeypatch.setattr(core, "SHUTTING_DOWN", True)
     else:
-        ops.set_paused(True)
+        ops.set_setting("paused", "1")
     run(mx.on_message(video_msg()))
-    assert not FakeHttp.downloads
-    assert any(("перезапускается" if stopping else "паузе") in o[2] for o in mx.out)
+    if stopping:
+        assert not FakeHttp.downloads
+        assert any("перезапускается" in o[2] for o in mx.out)
+    else:
+        assert FakeHttp.downloads
+        assert not any("паузе" in o[2] for o in mx.out)
 
 
 def test_sigterm_cancels_max_worker_and_exits_cleanly(monkeypatch):

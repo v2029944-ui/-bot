@@ -67,6 +67,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         waiting.pop((adapter.name, uid), None)
     core.WAITING_RULE.discard((adapter.name, uid))
     post_footer.WAITING.pop((adapter.name, uid), None)
+    if spaces.INSTALLED and not payload.startswith("m:space_save:"):
+        spaces.settings_state().pop((adapter.name, uid), None)
     spaces.WAITING_CREATE.discard(uid)
     spaces.WAITING_MEMBER.discard((spaces.active_id(), uid))
     confirmation = dialog_state.PendingMap(core.db, "people_confirmation")
@@ -93,20 +95,25 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
         return "Отправьте ID человека в MAX. Он будет добавлен как участник.\n\nОтмена: /cancel", None
+    if act in ("space", "space_edit", "space_save"):
+        return await spaces.settings_menu(adapter, uid, payload, parts)
     if act in ("spaces", "space_add"):
         if spaces.active_id() != 0 or not spaces.global_admin(uid):
             return "⛔ Пространства создаёт главный администратор.", None
         if act == "space_add":
             spaces.WAITING_CREATE.add(uid)
-            return "Отправьте четыре строки:\nНазвание пространства\nID владельца в MAX\nID группы MAX\nID группы Telegram\n\nОтмена: /cancel", None
-        return spaces.view()
+            return spaces.INPUT_HELP, None
+        page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
+        return spaces.view(page)
     if spaces.active_id() and act in ("upd", "updgo"):
         return "Эта операция доступна главному администратору в основном пространстве.", None
     if act in ("upd", "updgo") and not core.is_global_admin(adapter, uid):
         return "⛔ Обновление запускает только администратор из MAX_ADMINS (главный).", None
-    if act in ("compare", "compare_toggle", "compare_set"):
+    if act in ("compare", "compare_toggle", "compare_set", "compare_refresh"):
         if not core.is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None
+        if act == "compare_refresh":
+            return await comparison.menu(refresh=True)
         if act == "compare_toggle":
             text, rows = await comparison.menu()
             return "Эта кнопка устарела. Используйте новую кнопку ниже.\n\n" + text, rows
@@ -220,6 +227,8 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
     """Текст от согласующего: кнопки нижнего меню, текст нового правила, комментарий к посту, старые команды.
     True = сообщение обработано."""
     uid, t = str(user_id), text.strip()
+    if spaces.INSTALLED and await spaces.settings_input(adapter, uid, t):
+        return True
     if spaces.INSTALLED and await spaces.create_input(adapter, uid, t):
         return True
     if await spaces.member_input(adapter, uid, t):

@@ -8,7 +8,7 @@ import comparison
 import core
 import ops
 
-MODELS = ["gpt-4.1-mini", "claude-sonnet-4.6", "gemini-2.5-flash"]
+MODELS = ["gpt-4.1-mini", "claude-sonnet-4.6", "gemini-2.5-flash", "grok-4.1-fast"]
 CATALOG = {m: {"modalities": {"input": ["text", "image"], "output": ["text"]}, "prompt_cost": 10, "completion_cost": 20} for m in MODELS}
 
 
@@ -16,7 +16,7 @@ def enable():
     ops.set_setting("model_comparison", json.dumps({"enabled": True, "models": MODELS}))
 
 
-def test_catalog_selects_three_vision_models_and_rejects_text_only():
+def test_catalog_selects_four_vision_models_and_rejects_text_only():
     assert comparison.select(CATALOG) == MODELS
     bad = {**CATALOG, "gemini-2.5-flash": {"modalities": {"input": ["text"], "output": ["text"]}}}
     with pytest.raises(ValueError):
@@ -43,14 +43,14 @@ def test_admin_enable_validates_public_catalog_without_key(mx, monkeypatch):
 
 
 @pytest.mark.parametrize("album", [False, True])
-def test_three_generations_one_draft_selection_and_publication(mx, png, llm, album):
+def test_four_generations_one_draft_selection_and_publication(mx, png, llm, album):
     enable()
     llm.reply = lambda system, text: "Пост от " + comparison.MODEL.get()
     if album:
         did = run(core.submit_album(mx, "9", "Анна", "Описание работы", [{"type": "image", "data": png}] * 2))
     else:
         did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
-    assert len(llm.calls) == 3 and core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 1
+    assert len(llm.calls) == 4 and core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 1
     assert [o["model"] for o in json.loads(core.get(did)["candidates"])] == MODELS
     assert "выберите" in run(core.on_action(mx, "5", "okyes", did, 1))[1]
     assert not mx.sent("publish")
@@ -59,7 +59,7 @@ def test_three_generations_one_draft_selection_and_publication(mx, png, llm, alb
     assert "устаревший" in run(core.on_action(mx, "5", "choose_0", did, 1))[1]
     assert comparison.MODEL.get() is None
     run(core.on_action(mx, "5", "redo", did, 2))
-    assert len(llm.calls) == 6 and len(json.loads(core.get(did)["candidates"])) == 3
+    assert len(llm.calls) == 8 and len(json.loads(core.get(did)["candidates"])) == 4
     run(core.on_action(mx, "5", "choose_1", did, 3))
     run(core.on_action(mx, "5", "okyes", did, 4))
     assert mx.sent("publish")[0][1] == "Пост от " + MODELS[1]
@@ -71,7 +71,7 @@ def test_redo_before_selection_replaces_all_candidates(mx, png, llm):
     llm.reply = lambda system, text: "Вариант " + comparison.MODEL.get()
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     assert run(core.on_action(mx, "5", "redo", did, 1))[0]
-    assert len(llm.calls) == 6 and core.get(did)["attempts"] == 2
+    assert len(llm.calls) == 8 and core.get(did)["attempts"] == 2
     assert "устаревший" in run(core.on_action(mx, "5", "choose_0", did, 1))[1]
     assert "выберите" in run(core.on_action(mx, "5", "okyes", did, 2))[1]
 
@@ -92,7 +92,7 @@ def test_disabled_comparison_regenerates_only_selected_model(mx, png, llm):
     run(core.on_action(mx, "5", "choose_1", did, 1))
     ops.set_setting("model_comparison", json.dumps({"enabled": False, "models": MODELS}))
     run(core.on_action(mx, "5", "redo", did, 2))
-    assert len(llm.calls) == 4 and core.get(did)["post"] == "Пост " + MODELS[1]
+    assert len(llm.calls) == 5 and core.get(did)["post"] == "Пост " + MODELS[1]
 
 
 def test_failed_model_does_not_discard_other_candidates(mx, png, llm):
@@ -119,8 +119,34 @@ def test_real_max_shows_labels_and_selection_buttons(monkeypatch, png, llm):
         monkeypatch.setattr(ad, "_upload_image", upload)
         await core.submit(ad, "9", "Анна", "Описание работы", png)
         cards = [c[3] for c in api.of("POST") if c[3]["text"].startswith("Модель:")]
-        assert len(cards) == 3  # три варианта только автору
+        assert len(cards) == 4  # четыре варианта только автору
         assert all(any("choose_" in b["payload"] for b in buttons(card)) for card in cards)
         assert all(any(m in card["text"] for m in MODELS) for card in cards)
         await ad.http.aclose()
     run(scenario())
+
+
+def test_refresh_adds_grok_to_existing_three_model_configuration(mx, monkeypatch):
+    mx.admins = ["5"]
+    monkeypatch.setattr(core, "PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.aitunnel.ru/v1")
+    ops.set_setting("model_comparison", json.dumps({"enabled": True, "models": MODELS[:3]}))
+    original = httpx.AsyncClient
+    monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=CATALOG)), **kw))
+    text, _ = run(core.on_menu(mx, "5", "m:compare_refresh"))
+    assert comparison.config()["models"] == MODELS and "grok-" in text
+
+
+def test_failed_refresh_keeps_existing_models_and_allows_retry(mx, monkeypatch):
+    mx.admins = ["5"]
+    monkeypatch.setattr(core, "PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.aitunnel.ru/v1")
+    previous = {"enabled": True, "models": MODELS[:3]}
+    ops.set_setting("model_comparison", json.dumps(previous))
+    original = httpx.AsyncClient
+    monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={m: CATALOG[m] for m in MODELS[:3]})), **kw))
+    text, rows = run(core.on_menu(mx, "5", "m:compare_refresh"))
+    assert "Grok" in text and comparison.config() == previous
+    assert rows[0][0][1] == "m:compare_refresh"

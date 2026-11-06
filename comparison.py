@@ -1,4 +1,4 @@
-"""Выбор трёх vision-моделей по публичному каталогу AITunnel."""
+"""Выбор четырёх vision-моделей по публичному каталогу AITunnel."""
 import contextvars
 import json
 
@@ -30,7 +30,8 @@ def select(catalog):
     result = []
     for prefix, preferred in [("gpt-", ["gpt-4.1-mini", "gpt-4o-mini"]),
                               ("claude-sonnet", ["claude-sonnet-4.6", "claude-sonnet-4.5"]),
-                              ("gemini-", ["gemini-2.5-flash", "gemini-2.0-flash"])]:
+                              ("gemini-", ["gemini-2.5-flash", "gemini-2.0-flash"]),
+                              ("grok-", ["grok-4.1-fast", "grok-4-fast", "grok-4"])]:
         choices = [n for n in usable if n.startswith(prefix) and (prefix != "gemini-" or "flash" in n)]
         choices.sort(key=lambda n: (preferred.index(n) if n in preferred else len(preferred),
                      float(usable[n].get("prompt_cost", 1e9)) + float(usable[n].get("completion_cost", 1e9)), n))
@@ -40,19 +41,19 @@ def select(catalog):
     return result
 
 
-async def menu(toggle=False, enabled=None):
+async def menu(toggle=False, enabled=None, refresh=False):
     async with resources.slot(f"comparison:{spaces.active_id()}", 1):
-        return await _menu(toggle, enabled)
+        return await _menu(toggle, enabled, refresh)
 
 
-async def _menu(toggle=False, enabled=None):
+async def _menu(toggle=False, enabled=None, refresh=False):
     import core
     import ops
     c = config()
     if enabled is not None:
         toggle = bool(c["enabled"]) != enabled
-    if toggle:
-        if c["enabled"]:
+    if toggle or refresh:
+        if c["enabled"] and not refresh:
             c["enabled"] = False
         else:
             if core.PROVIDER != "openai" or core.env("LLM_BASE_URL").rstrip("/") != "https://api.aitunnel.ru/v1":
@@ -63,9 +64,10 @@ async def _menu(toggle=False, enabled=None):
                     response.raise_for_status()
                     models = select(response.json())
             except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                return "Не удалось выбрать три vision-модели из каталога. Режим не включён; попробуйте позже.", [[("Повторить", "m:compare_set:1")]]
+                return "Не удалось выбрать четыре vision-модели, включая Grok. Настройки сохранены без изменений; попробуйте позже.", [[("Повторить", "m:compare_refresh" if c["enabled"] else "m:compare_set:1")]]
             c = {"enabled": True, "models": models}
         ops.set_setting("model_comparison", json.dumps(c))
     return ("🧪 Сравнение моделей: " + ("включено" if c["enabled"] else "выключено") + "\n" +
-            "\n".join(c["models"]) + "\nОдин материал — три генерации и три списания. Выберите один вариант перед публикацией.",
-            [[("Выключить" if c["enabled"] else "Включить и выбрать модели", f"m:compare_set:{0 if c['enabled'] else 1}")]])
+            "\n".join(c["models"]) + f"\nОдин материал — {len(c['models'])} генерации и столько же запросов к провайдеру. Выберите один вариант перед публикацией.",
+            [[("Выключить" if c["enabled"] else "Включить и выбрать модели", f"m:compare_set:{0 if c['enabled'] else 1}")]] +
+            ([[("🔄 Обновить список моделей", "m:compare_refresh")]] if c["enabled"] else []))

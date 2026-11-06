@@ -156,16 +156,11 @@ def menu_for(adapter: core.Adapter, uid) -> list:
     rows = [list(r) for r in core.MENU] if core.is_admin(adapter, uid) else [[("🔔 Уведомления", "m:notif")]]
     rows.append([("📋 На проверке", "m:pending")])
     if core.is_admin(adapter, uid):
-        rows.append([("➕ Добавить человека", "m:member")])
         if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
             rows.append([("🏢 Рабочие пространства", "m:spaces")])
         rows.append([("👥 Люди", "m:people"), ("📊 Статус", "m:status")])
-        if spaces.active_id():
-            rows.append([("⏯ Пауза пространства", "m:pause")])
-        else:
-            rows.append([("⏯ Пауза", "m:pause")])
-            if core.is_global_admin(adapter, uid):
-                rows.append([("🔄 Обновить", "m:upd")])
+        if not spaces.active_id() and core.is_global_admin(adapter, uid):
+            rows.append([("🔄 Обновить", "m:upd")])
         rows.append([("📥 Обработка материалов", "m:inbox")])
         rows.append([("🔗 Ссылка в постах", "m:footer")])
         rows.append([("🧪 Сравнение моделей", "m:compare")])
@@ -261,12 +256,8 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
         except Exception:
             core.log.warning("не удалось сообщить %s о доступе", uid, exc_info=True)
         return f"✅ {who} добавлен: {core.ROLE_NAME[role]}.", None
-    if act == "pause":
-        return ops.pause_view()
-    if act == "pauseset":
-        ops.set_paused(arg(2) == "1")
-        text, rows = ops.pause_view()
-        return ("⏸ Поставлено на паузу.\n\n" if arg(2) == "1" else "▶️ Бот снова принимает фото.\n\n") + text, rows
+    if act in ("pause", "pauseset"):
+        return "Пауза больше не поддерживается. Бот принимает материалы.", None
     if act == "upd":
         return await ops.upd_view()
     if act == "updgo":

@@ -1,4 +1,4 @@
-"""Управление ботом: пауза, уведомления по расписанию (у каждого свой режим), обновление с GitHub."""
+"""Управление ботом: уведомления по расписанию (у каждого свой режим), обновление с GitHub."""
 import asyncio
 import json
 import os
@@ -26,7 +26,7 @@ schema.add_columns(core.db, "deferred", ("lease_until REAL DEFAULT 0",))
 core.db.commit()
 
 
-# ---------- Настройки в базе и пауза ----------
+# ---------- Настройки в базе ----------
 def get_setting(key: str, default: str = "") -> str:
     r = core.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return r["value"] if r else default
@@ -35,26 +35,6 @@ def get_setting(key: str, default: str = "") -> str:
 def set_setting(key: str, value: str):
     core.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
     core.db.commit()
-
-
-def set_paused(value: bool):
-    set_setting("paused", "1" if value else "0")
-
-
-PAUSED_MSG = "⏸ Бот сейчас на паузе: новые фото не принимаются. Пришлите фото позже."
-
-
-def is_paused() -> bool:
-    return get_setting("paused", "0") == "1"
-
-
-def pause_view() -> tuple[str, list]:
-    if is_paused():
-        return ("⏸ Бот на паузе: новые фото не принимаются (сотрудники получают об этом сообщение). "
-                "Кнопки под уже созданными черновиками работают.",
-                [[("▶️ Включить", "m:pauseset:0")]])
-    return ("▶️ Бот работает. Пауза остановит приём новых фото; черновики можно будет согласовывать как обычно.",
-            [[("⏸ Поставить на паузу", "m:pauseset:1")]])
 
 
 # ---------- Уведомления: окно рабочего времени и режим каждого человека ----------

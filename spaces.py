@@ -187,7 +187,7 @@ def _get(sid):
             ad.workspace_id = sid
             memory["ADAPTERS"]["max"] = ad
             import os
-            if "tg" in root().adapters:
+            if "tg" in root().adapters and row["tg_channel"]:
                 memory["ADAPTERS"]["tg"] = Telegram(os.environ["TG_TOKEN"], row["tg_channel"])
             core.startup()
     except BaseException:
@@ -279,6 +279,7 @@ def stamp(update):
             space.waiting_rule.discard(key)
         WAITING_MEMBER.difference_update({k for k in WAITING_MEMBER if k[1] == uid})
         WAITING_CREATE.discard(uid)
+        settings_state().pop(("max", uid), None)
     continuing = bool(text) and not body.get("attachments") and (not text.startswith("/") or text == "/cancel")
     message = {**message, "_space": for_user((message.get("sender") or {}).get("user_id"), continue_input=continuing)}
     if (message.get("body") or {}).get("text", "").strip() == "/admin" and global_admin((message.get("sender") or {}).get("user_id")):
@@ -286,7 +287,7 @@ def stamp(update):
         root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str((message.get("sender") or {}).get("user_id")),))
         root().db.commit()
     uid = str((message.get("sender") or {}).get("user_id"))
-    if continuing and uid in WAITING_CREATE and global_admin(uid):
+    if continuing and global_admin(uid) and (uid in WAITING_CREATE or settings_state().get(("max", uid), {}).get("waiting")):
         message["_space"] = 0
     if (message.get("body") or {}).get("text", "").strip() == "/myspace":
         owner = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
@@ -364,12 +365,204 @@ def payload(button):
     return value.split(":", 2)[2] if value.startswith("w:") else value
 
 
-def view():
-    lines = ["Рабочие пространства:", "0 · Основное (существующий бот)"]
-    for row in root().db.execute("SELECT * FROM workspaces ORDER BY id"):
-        lines.append(f"{row['id']} · {row['name']} [{row['state']}] · владелец {row['owner']}\nMAX: {row['max_channel']} · Telegram: {row['tg_channel']}")
-    text = "\n".join(lines).encode("utf-16-le")[:7000].decode("utf-16-le", errors="ignore")
-    return text, [[("➕ Создать пространство", "m:space_add")]]
+FIELDS = ("name", "owner", "max_channel", "tg_channel")
+INPUT_HELP = ("Отправьте строки:\nНазвание пространства\nID владельца в MAX\nID группы MAX\n"
+              "ID группы Telegram (или «-», если Telegram не нужен).\n"
+              "Четвёртую строку можно пропустить. Отмена: /cancel")
+
+
+def settings_state():
+    return dialog_state.PendingMap(root().db, "space_settings")
+
+
+def parse_settings(text):
+    import re
+    parts = [line.strip() for line in text.strip().splitlines()]
+    if len(parts) == 3:
+        parts.append("")
+    if len(parts) != 4:
+        raise ValueError(INPUT_HELP)
+    if parts[3] == "-":
+        parts[3] = ""
+    if (not 1 <= len(parts[0]) <= 80 or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[1])
+            or not re.fullmatch(r"-?[1-9][0-9]{0,18}", parts[2])
+            or parts[3] and not re.fullmatch(r"-?[1-9][0-9]{0,18}", parts[3])):
+        raise ValueError(INPUT_HELP)
+    # Canonical IDs prevent alternate spellings from bypassing uniqueness checks.
+    parts[1:3] = [str(int(value)) for value in parts[1:3]]
+    parts[3] = str(int(parts[3])) if parts[3] else ""
+    if parts[3] and "tg" not in root().adapters:
+        raise ValueError("Для группы Telegram сначала подключите TG_TOKEN и TG_CHANNEL в .env. Без Telegram укажите «-».")
+    if (parts[2] == str(root().adapters["max"].channel)
+            or parts[3] and parts[3] == str(root().adapters["tg"].channel)):
+        raise ValueError("Эта группа уже используется основным пространством. Укажите отдельные группы.")
+    return [*parts[:3], parts[3] or None]
+
+
+def settings_values(row):
+    return [row[field] for field in FIELDS]
+
+
+def settings_card(sid):
+    row = root().db.execute("SELECT * FROM workspaces WHERE id=?", (sid,)).fetchone()
+    if not row:
+        return "Пространство не найдено.", None
+    return (f"Пространство №{sid}: {row['name']}\nВладелец MAX: {row['owner']}\n"
+            f"Группа MAX: {row['max_channel']}\nГруппа Telegram: {row['tg_channel'] or 'не подключена'}",
+            [[("✏️ Изменить настройки", f"m:space_edit:{sid}")], [("← Пространства", "m:spaces")]])
+
+
+def update_in_progress():
+    try:
+        return json.loads((root().folder / "update_state.json").read_text()).get("status") == "probation"
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+async def settings_input(adapter, uid, text):
+    import secrets
+
+    import core
+    key = (adapter.name, str(uid))
+    saved = settings_state().get(key)
+    if not saved or not saved.get("waiting"):
+        return False
+    if active_id() or not global_admin(uid):
+        settings_state().pop(key, None)
+        return False
+    if text.strip() in ("/cancel", "/menu", "/admin"):
+        settings_state().pop(key, None)
+        await adapter.send_menu(uid, *settings_card(saved["sid"]))
+        return True
+    try:
+        values = parse_settings(text)
+    except ValueError as exc:
+        await adapter.notify(uid, core.err(exc))
+        return True
+    payload = f"m:space_save:{saved['sid']}:{secrets.token_urlsafe(12)}"
+    settings_state()[key] = {**saved, "waiting": False, "values": values, "payload": payload}
+    name, owner, maximum, telegram = values
+    await adapter.send_menu(uid, f"Сохранить настройки?\nНазвание: {name}\nВладелец MAX: {owner}\n"
+                            f"Группа MAX: {maximum}\nГруппа Telegram: {telegram or 'не подключена'}\n\n"
+                            "При смене владельца прежний владелец потеряет доступ к пространству. Остальные участники сохранят права.",
+                            [[("✅ Сохранить", payload)], [("Отмена", f"m:space:{saved['sid']}")]])
+    return True
+
+
+def settings_busy(space):
+    import core
+    if any(not task.done() for task in core.INFLIGHT):
+        return True
+    if root().db.execute("SELECT 1 FROM max_inbox WHERE space_id=? AND state IN ('pending','processing') LIMIT 1", (space.id,)).fetchone():
+        return True
+    return bool(space.db.execute("SELECT 1 FROM drafts WHERE status IN ('publishing','regenerating') OR "
+                                 "(status='pending' AND (COALESCE(published_to,'')!='' OR COALESCE(publication_channels,'{}')!='{}')) LIMIT 1").fetchone())
+
+
+async def settings_save(adapter, uid, payload):
+    import core
+    from tg import Telegram
+    key = (adapter.name, str(uid))
+    saved = settings_state().pop(key, None)  # consume before any network operation
+    if not saved or saved.get("payload") != payload:
+        return "Подтверждение устарело. Откройте настройки пространства заново.", None
+    sid, values = saved["sid"], saved["values"]
+    row = root().db.execute("SELECT * FROM workspaces WHERE id=?", (sid,)).fetchone()
+    if not row or settings_values(row) != saved["before"]:
+        return "Настройки уже изменились. Откройте пространство заново.", None
+    if update_in_progress():
+        return "Обновление ещё проверяется. Повторите изменение через пару минут.", None
+    space = get(sid)
+    if values != settings_values(row) and settings_busy(space):
+        return "Есть обработка или незавершённая публикация. Дождитесь обработки, проверьте частичные и неизвестные результаты в каналах и повторите изменение.", None
+    # Validate again: another workspace or the root settings may have changed since the prompt.
+    try:
+        values = parse_settings("\n".join(value or "-" for value in values))
+    except ValueError as exc:
+        return core.err(exc), None
+    old_tg = space.memory["ADAPTERS"].get("tg")
+    new_tg = old_tg
+    if values[3] and old_tg is None:
+        import os
+        new_tg = Telegram(os.environ["TG_TOKEN"], values[3])
+    try:
+        root().db.execute("UPDATE workspaces SET name=?,owner=?,max_channel=?,tg_channel=? WHERE id=?", (*values, sid))
+        if row["owner"] != values[1]:
+            space.db.execute("DELETE FROM people WHERE platform='max' AND uid=?", (row["owner"],))
+            space.db.commit()
+            root().db.execute("DELETE FROM workspace_routes WHERE uid IN (?,?)", (row["owner"], values[1]))
+        root().db.commit()
+    except sqlite3.IntegrityError:
+        root().db.rollback()
+        if new_tg is not None and new_tg is not old_tg:
+            await new_tg.bot.session.close()
+        return "Владелец или одна из групп уже привязаны к другому пространству.", None
+    except BaseException:
+        root().db.rollback()
+        space.db.rollback()
+        if new_tg is not None and new_tg is not old_tg:
+            await new_tg.bot.session.close()
+        raise
+    space.name = values[0]
+    ad = space.memory["ADAPTERS"]["max"]
+    ad.channel = values[2]
+    ad.base_admins, ad.base_approvers, ad.base_employees = [values[1]], [values[1]], [values[1]]
+    if values[3]:
+        new_tg.channel = values[3]
+        space.memory["ADAPTERS"]["tg"] = new_tg
+    else:
+        space.memory["ADAPTERS"].pop("tg", None)
+    with enter(space):
+        core.refresh_people(ad)
+        for kind in ("max_confirmation", "confirmation_channels", "people_confirmation"):
+            dialog_state.PendingMap(space.db, kind).clear()
+        if row["owner"] != values[1]:
+            for kind in ("WAITING", "WAITING_EDIT", "WAITING_REJECT", "footer_waiting"):
+                space.memory[kind].pop(("max", row["owner"]), None)
+            space.waiting_rule.discard(("max", row["owner"]))
+    core.refresh_people(root().adapters["max"])
+    if old_tg is not None and not values[3]:
+        await old_tg.bot.session.close()
+    text, rows = settings_card(sid)
+    return "Настройки сохранены.\n\n" + text, rows
+
+
+async def settings_menu(adapter, uid, payload, parts):
+    if active_id() or not global_admin(uid):
+        return "⛔ Настройки пространств меняет только главный администратор в основном пространстве.", None
+    if parts[1] == "space_save":
+        return await settings_save(adapter, uid, payload)
+    if len(parts) != 3 or not parts[2].isdigit() or len(parts[2]) > 9:
+        return "Пространство не найдено.", None
+    sid = int(parts[2])
+    if parts[1] == "space":
+        return settings_card(sid)
+    row = root().db.execute("SELECT * FROM workspaces WHERE id=?", (sid,)).fetchone()
+    if not row:
+        return "Пространство не найдено.", None
+    settings_state()[(adapter.name, str(uid))] = {"sid": sid, "before": settings_values(row), "waiting": True}
+    text, _ = settings_card(sid)
+    return text + "\n\n" + INPUT_HELP, None
+
+
+def view(page=0):
+    total = root().db.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0]
+    page = min(max(0, page), max(0, (total - 1) // 12))
+    rows = root().db.execute("SELECT * FROM workspaces ORDER BY id LIMIT 12 OFFSET ?", (page * 12,)).fetchall()
+    lines = ["Рабочие пространства:", "0 · Основное (настройки в .env)"]
+    buttons = []
+    for row in rows:
+        lines.append(f"{row['id']} · {row['name']} [{row['state']}] · владелец {row['owner']}\n"
+                     f"MAX: {row['max_channel']} · Telegram: {row['tg_channel'] or 'не подключена'}")
+        buttons.append([(f"⚙ {row['name'][:40]}", f"m:space:{row['id']}")])
+    nav = []
+    if page:
+        nav.append(("← Назад", f"m:spaces:{page - 1}"))
+    if (page + 1) * 12 < total:
+        nav.append(("Далее →", f"m:spaces:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    return "\n".join(lines), buttons + [[("➕ Создать пространство", "m:space_add")]]
 
 
 async def create_input(adapter, uid, text):
@@ -383,23 +576,13 @@ async def create_input(adapter, uid, text):
         WAITING_CREATE.discard(str(uid))
         await adapter.send_menu(uid, *view())
         return True
-    parts = [line.strip() for line in text.strip().splitlines()]
-    import re
-    if len(parts) != 4 or not 1 <= len(parts[0]) <= 80 or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[1]) or not all(re.fullmatch(r"-?[1-9][0-9]{0,18}", p) for p in parts[2:]):
-        await adapter.notify(uid, "Нужны четыре строки: название, ID владельца MAX, ID группы MAX, ID группы Telegram. Отмена: /cancel")
-        return True
-    if "tg" not in root().adapters:
-        await adapter.notify(uid, "Сначала подключите Telegram в .env основного бота.")
-        return True
     try:
-        updating = json.loads((root().folder / "update_state.json").read_text()).get("status") == "probation"
-    except (OSError, ValueError, AttributeError):
-        updating = False
-    if updating:
-        await adapter.notify(uid, "Обновление ещё проверяется. Повторите создание пространства через пару минут.")
+        parts = parse_settings(text)
+    except ValueError as exc:
+        await adapter.notify(uid, core.err(exc))
         return True
-    if parts[2] == str(root().adapters["max"].channel) or parts[3] == str(root().adapters["tg"].channel):
-        await adapter.notify(uid, "Эта группа уже используется основным пространством. Укажите отдельные группы.")
+    if update_in_progress():
+        await adapter.notify(uid, "Обновление ещё проверяется. Повторите создание пространства через пару минут.")
         return True
     existing = root().db.execute("SELECT * FROM workspaces WHERE owner=?", (parts[1],)).fetchone()
     if existing and existing["state"] == "failed" and list(existing[k] for k in ("name", "owner", "max_channel", "tg_channel")) == parts:
@@ -422,7 +605,7 @@ async def create_input(adapter, uid, text):
         return True
     WAITING_CREATE.discard(str(uid))
     core.refresh_people(root().adapters["max"])
-    await adapter.send_menu(uid, "Пространство создано. Бот должен быть добавлен в обе группы с правом публикации.\n" + view()[0], view()[1])
+    await adapter.send_menu(uid, "Пространство создано. Бот должен иметь право публикации в каждой указанной группе.\n" + view()[0], view()[1])
     try:
         with enter(space):
             await space.memory["ADAPTERS"]["max"].notify(parts[1], f"Для вас создано пространство «{parts[0]}». Отправьте фото с подписью или /menu. Пространство выбирается автоматически.")

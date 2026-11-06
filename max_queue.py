@@ -7,7 +7,6 @@ import time
 from collections import Counter
 
 import core
-import ops
 import spaces
 
 log = logging.getLogger("max_queue")
@@ -103,7 +102,7 @@ class Worker:
                 with spaces.enter(spaces.get(sid) if spaces.INSTALLED else None):
                     adapter = core.ADAPTERS["max"] if spaces.INSTALLED else self.adapter
                     await core.alert_staff(adapter, f"⚠️ Истёк срок обработки {count} материалов в очереди. Попросите сотрудников отправить их заново.")
-        if core.SHUTTING_DOWN or (not spaces.INSTALLED and ops.is_paused()):
+        if core.SHUTTING_DOWN:
             return False
         row = core.db.execute("SELECT a.* FROM max_inbox a WHERE a.state='pending' AND a.next_try<=? "
                               "AND NOT EXISTS (SELECT 1 FROM max_inbox busy WHERE busy.space_id=a.space_id AND busy.state='processing') "
@@ -111,13 +110,6 @@ class Worker:
                               (now,)).fetchone()
         if not row:
             return False
-        if spaces.INSTALLED:
-            with spaces.enter(spaces.get(row["space_id"])):
-                paused = ops.is_paused()
-            if paused:
-                core.db.execute("UPDATE max_inbox SET next_try=? WHERE event_key=?", (now + 60, row["event_key"]))
-                core.db.commit()
-                return True
         key, attempt = row["event_key"], row["attempts"] + 1
         changed = core.db.execute("UPDATE max_inbox SET state='processing',attempts=? WHERE event_key=? AND state='pending'",
                                   (attempt, key)).rowcount

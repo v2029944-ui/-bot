@@ -20,7 +20,6 @@ import dialog_state
 import max_actions
 import max_queue
 import max_tls
-import ops
 import post_footer
 import spaces
 from services import publication
@@ -488,16 +487,7 @@ class Max(core.Adapter):
                 log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
             if max_queue.is_material(update):
                 update = spaces.stamp(update)
-                sid = (update.get("message") or {}).get("_space", 0)
-                if spaces.INSTALLED and sid:
-                    with spaces.enter(spaces.get(sid)):
-                        paused = ops.is_paused()
-                else:
-                    paused = ops.is_paused()
-                if paused:
-                    await self.handle(update)
-                else:
-                    max_queue.enqueue(update)
+                max_queue.enqueue(update)
             elif update.get("update_type") == "message_callback" or (update.get("message") or {}).get("body", {}).get("text"):
                 # Текст маршрутизируем после предыдущих команд этого человека:
                 # нажатие «Править» могло ещё не успеть открыть ожидание ввода.
@@ -576,8 +566,6 @@ class Max(core.Adapter):
             if source_key:
                 raise RuntimeError("Бот перезапускается; материал сохранён в очереди")
             return await self.notify(uid, "🔄 Бот перезапускается. Пришлите материал через минуту.")
-        if ops.is_paused():
-            return await self.notify(uid, ops.PAUSED_MSG)
         if not core.caption_ok(body.get("text")):  # единственное, что отвечаем сотруднику в тихом режиме
             return await self.notify(uid, core.CAPTION_ASK)
         if not quiet:
