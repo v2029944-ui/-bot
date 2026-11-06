@@ -155,6 +155,8 @@ async def unknown_user(adapter: core.Adapter, uid, name: str, username: str | No
 def menu_for(adapter: core.Adapter, uid) -> list:
     rows = [list(r) for r in core.MENU] if core.is_admin(adapter, uid) else [[("🔔 Уведомления", "m:notif")]]
     rows.append([("📋 На проверке", "m:pending")])
+    if spaces.INSTALLED and spaces.active_id() and spaces.global_admin(uid):
+        rows.append([("🏠 Главное управление", "w:0:m:admin")])
     if core.is_admin(adapter, uid):
         if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
             rows.append([("🏢 Рабочие пространства", "m:spaces")])
@@ -252,7 +254,7 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
             return "Неизвестная роль.", None
         core._add_person(adapter, uid, r["name"], role)
         try:  # единственное сообщение незнакомцу: доступ открыт
-            await adapter.notify(uid, core.ACCESS_WELCOME[role])
+            await adapter.send_menu(uid, core.ACCESS_WELCOME[role], [[("Открыть меню", "m:menu")]])
         except Exception:
             core.log.warning("не удалось сообщить %s о доступе", uid, exc_info=True)
         return f"✅ {who} добавлен: {core.ROLE_NAME[role]}.", None
@@ -289,7 +291,7 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
                     [[("Да, сменить", _people_confirmation(adapter, actor, f"m:proleok:{role}:{uid}", p)), ("Отмена", f"m:pset:{uid}")]])
         core._add_person(adapter, uid, p["name"], role)
         try:
-            await adapter.notify(uid, f"Ваша роль изменена: {core.ROLE_NAME[role]}. Нажмите /menu, чтобы обновить кнопки.")
+            await adapter.send_menu(uid, f"Ваша роль изменена: {core.ROLE_NAME[role]}.", [[("Открыть меню", "m:menu")]])
         except Exception:
             core.log.warning("не удалось сообщить %s о новой роли", uid, exc_info=True)
         return f"✅ {who}: теперь {core.ROLE_NAME[role]}.", [[("← К списку", "m:people")]]

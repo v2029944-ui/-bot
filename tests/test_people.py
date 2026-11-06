@@ -36,7 +36,7 @@ def test_admin_approves_as_employee():
     run(core.unknown_user(a, "77", "Иван"))
     text, _ = menu(a, "1", "m:acc:emp:77")
     assert "добавлен" in text and "77" in a.allowed and "77" not in a.approvers
-    assert a.sent("notify") and a.sent("notify")[-1][1] == "77"  # единственное сообщение: доступ открыт
+    assert a.sent("menu") and a.sent("menu")[-1][1] == "77"  # единственное сообщение: доступ открыт
     assert "уже обработана" in menu(a, "1", "m:acc:emp:77")[0]  # повторное нажатие безвредно
     assert core.db.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0
 
@@ -117,7 +117,7 @@ def test_add_by_id_replaces_unsupported_invites(button):
     assert "ID человека" in menu(a, "1", button)[0]
     assert run(core.on_text(a, "1", "77\nсотрудник"))
     assert "77" in a.allowed and "77" not in a.approvers
-    assert any("Основное" in o[2] for o in a.sent("notify") if o[1] == "77")
+    assert any("Основное" in o[2] for o in a.sent("menu") if o[1] == "77")
 
 
 @pytest.mark.parametrize("uid", ["0", "001", "１２３", "12345678901234567890", "-77"])

@@ -25,8 +25,9 @@ def test_long_rules_list_fits_in_one_message():
         core.db.execute("INSERT INTO rules(text,created) VALUES(?,0)", (f"Правило {i} " + "очень длинное " * 20,))
     core.db.commit()
     text, rows = core.rules_view()
-    assert len(text) < 4096 and "Показаны последние" in text
-    assert sum(len(r) for r in rows[:-1]) <= 40  # кнопок удаления не больше 40 (лимит Telegram — 100)
+    assert len(text) < 4096 and "Показаны 40 из 120" in text
+    assert sum(p.startswith("m:del:") for row in rows for _, p in row) <= 40
+    assert sum(len(row) for row in rows) <= 100  # вместе с навигацией
 
 
 def test_claude_reply_collects_text_blocks(monkeypatch):

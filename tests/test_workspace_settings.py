@@ -207,3 +207,40 @@ def test_max_only_space_publishes_without_using_root_telegram(runtime, monkeypat
         assert run(core.on_action(target, "11", "okyes", did, 1))[0]
         assert core.get(did)["status"] == "published"
     assert destinations == [(row["id"], "max", "-101")]
+
+
+def test_create_and_settings_inputs_have_working_cancel_buttons(runtime):
+    ad, _ = runtime
+    _, rows = run(core.on_menu(ad, "1", "m:space_add"))
+    assert rows and rows[0][0][1].startswith("m:cancel:")
+    run(core.on_menu(ad, "1", rows[0][0][1]))
+    assert "1" not in spaces.WAITING_CREATE
+    row = create(ad)
+    _, rows = run(core.on_menu(ad, "1", f"m:space_edit:{row['id']}"))
+    assert spaces.settings_state()[("max", "1")]["waiting"]
+    run(core.on_menu(ad, "1", rows[0][0][1]))
+    assert not spaces.settings_state()
+    assert spaces.settings_values(spaces.root().db.execute("SELECT * FROM workspaces WHERE id=?", (row["id"],)).fetchone()) == spaces.settings_values(row)
+
+
+def test_cancel_is_scoped_to_workspace_and_does_not_clear_other_input(runtime):
+    ad, _ = runtime
+    first, second = create(ad), create(ad, 22, -102)
+    a, b = spaces.get(first["id"]), spaces.get(second["id"])
+    for space in (a, b):
+        with spaces.enter(space):
+            core._add_person(core.ADAPTERS["max"], "33", "Админ", "adm")
+    with spaces.enter(a):
+        _, rows = run(core.on_menu(core.ADAPTERS["max"], "33", "m:add"))
+        cancel_a = rows[0][0][1]
+    with spaces.enter(b):
+        _, rows = run(core.on_menu(core.ADAPTERS["max"], "33", "m:add"))
+        cancel_b = rows[0][0][1]
+        assert "устарела" in run(core.on_menu(core.ADAPTERS["max"], "33", cancel_a))[0]
+        assert ("max", "33") in core.WAITING_RULE
+        run(core.on_menu(core.ADAPTERS["max"], "33", cancel_b))
+        assert ("max", "33") not in core.WAITING_RULE
+    with spaces.enter(a):
+        assert ("max", "33") in core.WAITING_RULE
+        run(core.on_menu(core.ADAPTERS["max"], "33", cancel_a))
+        assert ("max", "33") not in core.WAITING_RULE

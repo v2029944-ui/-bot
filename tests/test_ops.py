@@ -172,7 +172,7 @@ def test_admin_changes_roles_with_confirmation():
     assert "77" not in a.admins  # без подтверждения ничего не изменилось
     run(core.on_menu(a, "1", rows[0][0][1]))
     assert "77" in a.admins and "77" in a.approvers and core.role_of(a, "77") == "adm"
-    assert any(o[1] == "77" and "роль изменена" in o[2] for o in a.sent("notify"))
+    assert any(o[1] == "77" and "роль изменена" in o[2] and o[3] == [[("Открыть меню", "m:menu")]] for o in a.sent("menu"))
     assert is_admin_menu_visible(a, "77")
     _, rows = run(core.on_menu(a, "77", "m:prole:member:77"))
     run(core.on_menu(a, "77", rows[0][0][1]))  # сам себя понизил: другой админ остался

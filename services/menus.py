@@ -10,6 +10,81 @@ import post_footer
 import spaces
 
 
+def input_snapshot(adapter, uid):
+    key = (adapter.name, str(uid))
+    state = {}
+    for name in ("WAITING", "WAITING_EDIT", "WAITING_REJECT"):
+        value = getattr(core, name).get(key)
+        if value is not None:
+            state[name] = value
+    if key in core.WAITING_RULE:
+        state["rule"] = True
+    if key in post_footer.WAITING:
+        state["footer"] = post_footer.WAITING[key]
+    if (spaces.active_id(), str(uid)) in spaces.WAITING_MEMBER:
+        state["member"] = True
+    if spaces.INSTALLED and not spaces.active_id():
+        if str(uid) in spaces.WAITING_CREATE:
+            state["create"] = True
+        settings = spaces.settings_state().get(key)
+        if settings and settings.get("waiting"):
+            state["settings"] = settings
+    return state
+
+
+def input_rows(adapter, uid, renew=True):
+    import json
+    import secrets
+    snapshot = input_snapshot(adapter, uid)
+    if not snapshot:
+        return None
+    pending = dialog_state.PendingMap(core.db, "input_cancel")
+    key = (adapter.name, str(uid))
+    serialized = json.dumps(snapshot, sort_keys=True)
+    saved = pending.get(key)
+    if not renew and saved and saved["snapshot"] == serialized:
+        nonce = saved["nonce"]
+    else:
+        nonce = secrets.token_urlsafe(12)
+        pending[key] = {"nonce": nonce, "snapshot": serialized}
+    return [[("↩️ Отмена", f"m:cancel:{nonce}")]]
+
+
+def cancel_input(adapter, uid, payload):
+    import json
+    key = (adapter.name, str(uid))
+    saved = dialog_state.PendingMap(core.db, "input_cancel").get(key)
+    state = input_snapshot(adapter, uid)
+    if (not saved or payload != "m:cancel:" + saved["nonce"] or not state
+            or saved["snapshot"] != json.dumps(state, sort_keys=True)):
+        return "Эта кнопка отмены устарела. Используйте кнопку под текущим запросом.", input_rows(adapter, uid, renew=False)
+    dialog_state.PendingMap(core.db, "input_cancel").pop(key, None)
+    for name in ("WAITING", "WAITING_EDIT", "WAITING_REJECT"):
+        getattr(core, name).pop(key, None)
+    core.WAITING_RULE.discard(key)
+    post_footer.WAITING.pop(key, None)
+    spaces.WAITING_MEMBER.discard((spaces.active_id(), str(uid)))
+    if spaces.INSTALLED and not spaces.active_id():
+        spaces.WAITING_CREATE.discard(str(uid))
+        spaces.settings_state().pop(key, None)
+    for name in ("WAITING_EDIT", "WAITING_REJECT", "WAITING"):
+        pending = state.get(name)
+        if pending is not None:
+            did, attempt = pending if isinstance(pending, (tuple, list)) else (pending, 1)
+            return "Ввод отменён. Пост остался на проверке.", [[("📨 Открыть пост", f"d:show:{did}:{attempt}")]]
+    if "footer" in state:
+        return post_footer.view()
+    if "rule" in state:
+        return core.rules_view()
+    if "member" in state:
+        return core.people_view(adapter)
+    if "settings" in state:
+        return spaces.settings_card(state["settings"]["sid"])
+    if "create" in state:
+        return spaces.view()
+    return "Ввод отменён.", core.menu_for(adapter, uid)
+
+
 def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
     """/rules, /rule_add, /rule_del — только для согласующих. None = это не наша команда."""
     cmd, _, arg = text.strip().partition(" ")
@@ -17,13 +92,13 @@ def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
     if cmd not in ("/rules", "/rule_add", "/rule_del") or not core.is_admin(adapter, user_id):
         return None
     if cmd == "/rules":
-        return core.rules_view()[0] + "\n\nДобавить: /rule_add текст\nУдалить: /rule_del номер"
+        return core.rules_view()[0]
     if cmd == "/rule_add":
         if not arg:
-            return "Формат: /rule_add текст правила"
+            return "Нажмите «Добавить правило» и отправьте текст."
         return editor_rules.add(arg)
     if not arg.isdigit():
-        return "Формат: /rule_del номер (номера смотрите в /rules)"
+        return "Удалите правило кнопкой 🗑 с его номером в списке."
     if len(arg) > 9 or int(arg) < 1:
         return "Правила с таким номером нет."
     def remove():
@@ -36,22 +111,30 @@ def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
 
 
 
-def rules_view() -> tuple[str, list]:
-    # показываем последние 40: иначе длинный список не влезет в сообщение (4096 знаков) и в 100 кнопок
-    rows = core.db.execute("SELECT id, text FROM (SELECT id, text FROM rules ORDER BY id DESC LIMIT 40) ORDER BY id").fetchall()
+def rules_view(page=0) -> tuple[str, list]:
     total = core.db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
-    numbered = list(enumerate(rows, total - len(rows) + 1))
+    page = min(max(0, page), max(0, (total - 1) // 40))
+    offset = page * 40
+    rows = list(reversed(core.db.execute("SELECT id,text FROM rules ORDER BY id DESC LIMIT 40 OFFSET ?", (offset,)).fetchall()))
+    numbered = list(enumerate(rows, total - offset - len(rows) + 1))
     body = "\n".join(f"{n}. {r['text']}" for n, r in numbered) or "Пока пусто."
     if len(body.encode("utf-16-le")) // 2 > 3500:
         body = body.encode("utf-16-le")[:3500 * 2].decode("utf-16-le", errors="ignore") + "\n…"
     text = "📝 Правила стиля:\n" + body
     text += "\n\nВ генерации активны последние 30 правил в пределах 12 000 знаков (до 1000 на правило)."
     if total > len(rows):
-        text += f"\n\nПоказаны последние {len(rows)} из {total}. Старые удаляются командой /rule_del номер."
+        text += f"\n\nСтраница {page + 1}. Показаны {len(rows)} из {total}."
     if rows:
         text += "\n\nНажмите 🗑 с номером, чтобы удалить правило."
-    dels = [(f"🗑 {n}", f"m:del:{r['id']}") for n, r in numbered]
+    dels = [(f"🗑 {n}", f"m:del:{r['id']}" + (f":{page}" if page else "")) for n, r in numbered]
     buttons = [dels[i:i + 4] for i in range(0, len(dels), 4)]
+    nav = []
+    if page:
+        nav.append(("Новые →", f"m:rules:{page - 1}"))
+    if offset + 40 < total:
+        nav.append(("← Более ранние", f"m:rules:{page + 1}"))
+    if nav:
+        buttons.append(nav)
     buttons.append([("➕ Добавить правило", "m:add")])
     return text, buttons
 
@@ -63,6 +146,9 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return "⛔ У вас нет прав.", None
     if payload == "m:admin" and not core.is_admin(adapter, uid):
         return "⛔ Меню доступно только администратору.", None
+    if payload == "m:cancel" or payload.startswith("m:cancel:"):
+        return cancel_input(adapter, uid, payload)
+    dialog_state.PendingMap(core.db, "input_cancel").pop((adapter.name, uid), None)
     for waiting in (core.WAITING, core.WAITING_EDIT, core.WAITING_REJECT):  # любой переход по меню отменяет ожидание текста
         waiting.pop((adapter.name, uid), None)
     core.WAITING_RULE.discard((adapter.name, uid))
@@ -94,7 +180,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         if not core.is_admin(adapter, uid):
             return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
-        return "Отправьте ID человека в MAX. Он будет добавлен как участник.\n\nОтмена: /cancel", None
+        return "Отправьте ID человека в MAX. Он будет добавлен как участник.", input_rows(adapter, uid)
     if act in ("space", "space_edit", "space_save"):
         return await spaces.settings_menu(adapter, uid, payload, parts)
     if act in ("spaces", "space_add"):
@@ -102,7 +188,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Пространства создаёт главный администратор.", None
         if act == "space_add":
             spaces.WAITING_CREATE.add(uid)
-            return spaces.INPUT_HELP, None
+            return spaces.INPUT_HELP, input_rows(adapter, uid)
         page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
         return spaces.view(page)
     if spaces.active_id() and act in ("upd", "updgo"):
@@ -141,9 +227,9 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         elif field in ("text", "max", "tg", "marker"):
             post_footer.WAITING[(adapter.name, uid)] = field
             if field == "marker":
-                return "Пришлите маркер без пробелов (до 32 знаков), например {bot}. Отмена: /cancel", None
-            return ("Пришлите текст ссылки (до 80 знаков). Отмена: /cancel" if field == "text" else
-                    "Пришлите HTTPS-адрес бота или «-», чтобы убрать ссылку для этого канала. Отмена: /cancel"), None
+                return "Пришлите маркер без пробелов (до 32 знаков), например {bot}.", input_rows(adapter, uid)
+            return ("Пришлите текст ссылки (до 80 знаков). " if field == "text" else
+                    "Пришлите HTTPS-адрес бота или «-», чтобы убрать ссылку для этого канала."), input_rows(adapter, uid)
         return post_footer.view()
     if act == "admin":
         return "Меню администратора:", core.menu_for(adapter, uid)
@@ -163,13 +249,15 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             queue.commit()
         return max_queue.view()
     if act == "rules":
-        return core.rules_view()
+        page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
+        return core.rules_view(page)
     if act == "del" and len(parts) > 2 and parts[2].isdigit():
         def remove():
             core.db.execute("DELETE FROM rules WHERE id=?", (int(parts[2]),))
             return "removed"
         command_context.mutate("rule_delete_button", remove)
-        return core.rules_view()
+        page = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() and len(parts[3]) < 8 else 0
+        return core.rules_view(page)
     if act == "notif":
         return ops.notif_view(adapter, uid)
     if act == "nset":
@@ -190,7 +278,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         core.WAITING.pop((adapter.name, uid), None)
         core.WAITING_EDIT.pop((adapter.name, uid), None)
         core.WAITING_RULE.add((adapter.name, uid))
-        return "✏️ Напишите текст нового правила одним сообщением. Отмена: /cancel", None
+        return "✏️ Напишите текст нового правила одним сообщением.", input_rows(adapter, uid)
     return "Выберите действие:", core.menu_for(adapter, uid)
 
 
@@ -275,7 +363,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
             await adapter.notify(uid, "Отклонение отменено. Пост остался на проверке.")
             return True
         if cmd or not t or len(t.encode("utf-16-le")) // 2 > 1000:
-            await adapter.notify(uid, "Пришлите причину текстом до 1000 знаков или /cancel.")
+            await adapter.notify(uid, "Пришлите причину текстом до 1000 знаков или нажмите «Отмена».")
             return True
         did, attempt = core.WAITING_REJECT.pop(key)
         _, message = await core.reject_post(adapter, uid, did, attempt, t)
@@ -287,7 +375,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         return True
     if cmd and cmd not in core.SAFE_CMDS and (key in core.WAITING_EDIT or key in core.WAITING_RULE or key in core.WAITING):
         # неизвестная команда не должна стать ни текстом поста, ни правилом, ни комментарием для нейросети
-        await adapter.notify(uid, "Неизвестная команда. Пришлите текст или /cancel для отмены.")
+        await adapter.notify(uid, "Неизвестная команда. Пришлите текст или нажмите «Отмена».")
         return True
     if key in core.WAITING_EDIT and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
         did, attempt = core.WAITING_EDIT[key]
@@ -319,9 +407,9 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         return True
     reply = core.rules_command(adapter, uid, t)  # команды важнее ожидания комментария: не улетают в LLM
     if reply:
-        await adapter.notify(uid, reply)
+        await adapter.send_menu(uid, reply, core.rules_view()[1])
         if key in core.WAITING:
-            await adapter.notify(uid, "✏️ Жду комментарий к посту. Отмена: /cancel")
+            await adapter.notify(uid, "✏️ Жду комментарий к посту.")
         return True
     if await core.on_comment(adapter, uid, t):
         return True

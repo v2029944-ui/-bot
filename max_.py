@@ -408,6 +408,8 @@ class Max(core.Adapter):
         await self._send(target, post, photo, video=video, media=media, admin_menu=False)
 
     async def notify(self, user_id, text):
+        if rows := core.input_rows(self, user_id):
+            return await self.send_menu(user_id, text, rows)
         await self._send({"user_id": user_id}, text)
 
     async def send_menu(self, user_id, text, rows, silent=False):
@@ -697,6 +699,9 @@ class Max(core.Adapter):
             else:
                 _, action, did, attempt = payload.split(":")
                 _, text = await core.on_action(self, uid, action, int(did), int(attempt))
+                if text and (rows := core.input_rows(self, uid)):
+                    await self.send_menu(uid, text, rows)
+                    text = None
         except Exception as e:
             ok = False
             log.exception("callback failed")

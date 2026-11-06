@@ -332,7 +332,8 @@ async def route_update(adapter, update):
             update = {**update, "callback": {**cb, "payload": payload}}
         if sid == 0:
             if root().db.execute("SELECT 1 FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone() and not global_admin(cb["user"]["user_id"]):
-                await adapter.notify(cb["user"]["user_id"], "Эта кнопка относится к основному пространству. Откройте /myspace.")
+                own = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone()
+                await adapter.send_menu(cb["user"]["user_id"], "Эта кнопка относится к основному пространству.", [[("Моё пространство", f"w:{own['id']}:m:menu")]])
                 return True
             if _root_allows(cb["user"]["user_id"]):
                 root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str(cb["user"]["user_id"]),))
@@ -368,7 +369,7 @@ def payload(button):
 FIELDS = ("name", "owner", "max_channel", "tg_channel")
 INPUT_HELP = ("Отправьте строки:\nНазвание пространства\nID владельца в MAX\nID группы MAX\n"
               "ID группы Telegram (или «-», если Telegram не нужен).\n"
-              "Четвёртую строку можно пропустить. Отмена: /cancel")
+              "Четвёртую строку можно пропустить.")
 
 
 def settings_state():
@@ -528,6 +529,7 @@ async def settings_save(adapter, uid, payload):
 
 
 async def settings_menu(adapter, uid, payload, parts):
+    import core
     if active_id() or not global_admin(uid):
         return "⛔ Настройки пространств меняет только главный администратор в основном пространстве.", None
     if parts[1] == "space_save":
@@ -542,7 +544,7 @@ async def settings_menu(adapter, uid, payload, parts):
         return "Пространство не найдено.", None
     settings_state()[(adapter.name, str(uid))] = {"sid": sid, "before": settings_values(row), "waiting": True}
     text, _ = settings_card(sid)
-    return text + "\n\n" + INPUT_HELP, None
+    return text + "\n\n" + INPUT_HELP, core.input_rows(adapter, uid)
 
 
 def view(page=0):
@@ -608,7 +610,7 @@ async def create_input(adapter, uid, text):
     await adapter.send_menu(uid, "Пространство создано. Бот должен иметь право публикации в каждой указанной группе.\n" + view()[0], view()[1])
     try:
         with enter(space):
-            await space.memory["ADAPTERS"]["max"].notify(parts[1], f"Для вас создано пространство «{parts[0]}». Отправьте фото с подписью или /menu. Пространство выбирается автоматически.")
+            await space.memory["ADAPTERS"]["max"].send_menu(parts[1], f"Для вас создано пространство «{parts[0]}». Отправьте фото с подписью. Пространство выбирается автоматически.", [[("Открыть меню", "m:menu")]])
     except Exception:
         await adapter.notify(uid, "Пространство создано, но приветствие не доставлено. Владелец должен открыть чат с ботом в MAX.")
     return True
@@ -630,7 +632,7 @@ async def member_input(adapter, uid, text):
     roles = {"участник", "сотрудник", "проверяющий"}
     import re
     if len(parts) not in (1, 2) or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[0]) or (len(parts) == 2 and parts[1].lower() not in roles):
-        await adapter.notify(uid, "Отправьте ID человека в MAX. Он будет добавлен как участник. Отмена: /cancel")
+        await adapter.notify(uid, "Отправьте ID человека в MAX. Он будет добавлен как участник.")
         return True
     if core.role_of(adapter, parts[0]) is not None:
         await adapter.notify(uid, "Этот человек уже добавлен. Изменить его роль можно в разделе «Люди».")
@@ -640,7 +642,7 @@ async def member_input(adapter, uid, text):
     await adapter.send_menu(uid, "Человек добавлен в это пространство.", core.menu_for(adapter, uid))
     try:
         name = CURRENT.get().name if CURRENT.get() else "Основное"
-        await adapter.notify(parts[0], f"Вы добавлены в пространство «{name}». Отправьте /menu или материал с подписью.")
+        await adapter.send_menu(parts[0], f"Вы добавлены в пространство «{name}». Отправьте материал с подписью.", [[("Открыть меню", "m:menu")]])
     except Exception:
         await adapter.notify(uid, "Приветствие не доставлено. Попросите человека открыть чат с ботом.")
     return True

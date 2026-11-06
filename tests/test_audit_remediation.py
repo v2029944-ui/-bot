@@ -117,13 +117,13 @@ def test_rule_mutation_is_not_repeated_after_command_cancellation(tg, monkeypatc
         core.rules_command(tg, "1", "/rule_add First")
         core.rules_command(tg, "1", "/rule_add Second")
         entered = asyncio.Event()
-        original = tg.notify
+        original = tg.send_menu
         async def blocked(*args, **kwargs):
             entered.set()
             await asyncio.Event().wait()
         async def handle(update):
             await core.on_text(tg, "1", update["message"]["body"]["text"])
-        monkeypatch.setattr(tg, "notify", blocked)
+        monkeypatch.setattr(tg, "send_menu", blocked)
         monkeypatch.setattr(tg, "handle", handle, raising=False)
         max_actions.enqueue({"update_type": "message_created", "message": {"sender": {"user_id": 1},
                              "body": {"mid": "one-command", "text": command}}})
@@ -134,7 +134,7 @@ def test_rule_mutation_is_not_repeated_after_command_cancellation(tg, monkeypatc
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        monkeypatch.setattr(tg, "notify", original)
+        monkeypatch.setattr(tg, "send_menu", original)
         await worker.process(dict(core.db.execute("SELECT * FROM max_actions").fetchone()))
         assert [r[0] for r in core.db.execute("SELECT text FROM rules ORDER BY id")] == expected
         assert command_context.EVENT.get() is None

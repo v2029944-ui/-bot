@@ -103,4 +103,4 @@ def restore_copied_marker(text, original, settings):
     elif text == label or text.endswith("\n" + label):
         return text[:-len(label)] + marker
     raise ValueError(f"Чтобы сохранить ссылку в предложении, замените её слово на {marker} и пришлите текст снова. "
-                     "Бот сам сделает его кликабельным. Отмена: /cancel")
+                     "Бот сам сделает его кликабельным. Для отмены нажмите кнопку ниже.")

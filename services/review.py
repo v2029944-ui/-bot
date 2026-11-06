@@ -18,7 +18,7 @@ async def _apply_edit(adapter: core.Adapter, user_id, did: int, attempt: int, te
     и доставляем автору и действующему администратору с кнопками. Возвращает (ждать ли текст дальше, сообщение)."""
     text = text.strip()
     if not text:
-        return True, "Пустой текст. Пришлите исправленный пост или /cancel."
+        return True, "Пустой текст. Пришлите исправленный пост или нажмите «Отмена»."
     d = core.get(did)
     if d and not core.can_manage_draft(adapter, user_id, d):
         return False, "⛔ У вас нет прав на этот пост."
@@ -185,7 +185,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         core.WAITING_EDIT.pop(key, None)
         core.WAITING_RULE.discard(key)
         core.WAITING_REJECT[key] = (did, attempt)
-        return False, "Напишите причину отклонения (до 1000 знаков). Она будет отправлена автору. Отмена: /cancel"
+        return False, "Напишите причину отклонения (до 1000 знаков). Она будет отправлена автору."
 
     if action in ("delyes", "rejectphoto", "rejecttext"):
         reason = {"rejectphoto": "Нужны другие фотографии. Пожалуйста, отправьте материал заново.",
@@ -200,7 +200,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         core.WAITING[(adapter.name, str(user_id))] = (did, attempt)
         core.WAITING_RULE.discard((adapter.name, str(user_id)))
         core.WAITING_EDIT.pop((adapter.name, str(user_id)), None)
-        return False, "✏️ Напишите одним сообщением, что изменить в посте. Для отмены — /cancel"
+        return False, "✏️ Напишите одним сообщением, что изменить в посте."
 
     if action == "edit":  # «Править самому»: следующее сообщение согласующего станет текстом поста
         key = (adapter.name, str(user_id))
@@ -209,7 +209,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         core.WAITING_RULE.discard(key)
         core.WAITING_EDIT[key] = (did, attempt)
         return False, ("✍️ Пришлите исправленный текст поста одним сообщением. Я заменю им черновик, "
-                       "а вы проверите и опубликуете. Отмена: /cancel")
+                       "а вы проверите и опубликуете.")
 
 
     return False, "Неизвестное действие."
@@ -324,5 +324,5 @@ async def on_comment(adapter: core.Adapter, user_id, text: str) -> bool:
     if core.is_admin(adapter, user_id) and before and after and after["attempts"] > before["attempts"]:
         rule = await core._learn(text, before["post"]) if core.env("LEARN_RULES", "1") != "0" else None
         if rule:
-            await adapter.notify(str(user_id), f"🧠 Запомнил на будущее: «{rule}»\n(Посмотреть и удалить: /rules)")
+            await adapter.send_menu(str(user_id), f"🧠 Запомнил на будущее: «{rule}»", [[("📝 Правила стиля", "m:rules")]])
     return True
