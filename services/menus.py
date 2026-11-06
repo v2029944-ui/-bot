@@ -85,19 +85,32 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return "Эта операция доступна главному администратору в основном пространстве.", None
     if act in ("upd", "updgo") and not core.is_global_admin(adapter, uid):
         return "⛔ Обновление запускает только администратор из MAX_ADMINS (главный).", None
-    if act in ("compare", "compare_toggle"):
+    if act in ("compare", "compare_toggle", "compare_set"):
         if not core.is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None
-        return await comparison.menu(toggle=act == "compare_toggle")
+        if act == "compare_toggle":
+            text, rows = await comparison.menu()
+            return "Эта кнопка устарела. Используйте новую кнопку ниже.\n\n" + text, rows
+        if act == "compare_set":
+            if len(parts) != 3 or parts[2] not in ("0", "1"):
+                return "Неизвестное состояние сравнения.", None
+            return await comparison.menu(enabled=parts[2] == "1")
+        return await comparison.menu()
     if act.startswith("footer"):
         if not core.is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None
         field = act.removeprefix("footer_")
         if act == "footer_toggle":
+            text, rows = post_footer.view()
+            return "Эта кнопка устарела. Используйте новую кнопку ниже.\n\n" + text, rows
+        if act == "footer_set":
+            if len(parts) != 3 or parts[2] not in ("0", "1"):
+                return "Неизвестное состояние ссылки.", None
             c = post_footer.config()
-            if not c["enabled"] and not (c["max"] or c["tg"]):
+            enabled = parts[2] == "1"
+            if enabled and not (c["max"] or c["tg"]):
                 return "Сначала задайте хотя бы один адрес.", post_footer.view()[1]
-            c["enabled"] = not c["enabled"]
+            c["enabled"] = enabled
             post_footer.save(c)
         elif field in ("text", "max", "tg", "marker"):
             post_footer.WAITING[(adapter.name, uid)] = field

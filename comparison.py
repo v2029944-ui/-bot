@@ -2,6 +2,8 @@
 import contextvars
 import json
 import httpx
+import resources
+import spaces
 
 MODEL = contextvars.ContextVar("generation_model", default=None)
 
@@ -35,10 +37,17 @@ def select(catalog):
     return result
 
 
-async def menu(toggle=False):
+async def menu(toggle=False, enabled=None):
+    async with resources.slot(f"comparison:{spaces.active_id()}", 1):
+        return await _menu(toggle, enabled)
+
+
+async def _menu(toggle=False, enabled=None):
     import core
     import ops
     c = config()
+    if enabled is not None:
+        toggle = bool(c["enabled"]) != enabled
     if toggle:
         if c["enabled"]:
             c["enabled"] = False
@@ -51,9 +60,9 @@ async def menu(toggle=False):
                     response.raise_for_status()
                     models = select(response.json())
             except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                return "Не удалось выбрать три vision-модели из каталога. Режим не включён; попробуйте позже.", [[("Повторить", "m:compare_toggle")]]
+                return "Не удалось выбрать три vision-модели из каталога. Режим не включён; попробуйте позже.", [[("Повторить", "m:compare_set:1")]]
             c = {"enabled": True, "models": models}
         ops.set_setting("model_comparison", json.dumps(c))
     return ("🧪 Сравнение моделей: " + ("включено" if c["enabled"] else "выключено") + "\n" +
             "\n".join(c["models"]) + "\nОдин материал — три генерации и три списания. Выберите один вариант перед публикацией.",
-            [[("Выключить" if c["enabled"] else "Включить и выбрать модели", "m:compare_toggle")]])
+            [[("Выключить" if c["enabled"] else "Включить и выбрать модели", f"m:compare_set:{0 if c['enabled'] else 1}")]])

@@ -90,7 +90,7 @@ try:  # миграция старых баз: в какие каналы пос�
 except sqlite3.OperationalError:
     pass
 for _col in ("last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
-             "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
+             "publication_channels TEXT DEFAULT '{}'", "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
              "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''"):
     try:
         db.execute(f"ALTER TABLE drafts ADD COLUMN {_col}")
@@ -281,7 +281,7 @@ _SERVICE_EXPORTS = {
     'services.submissions': ('_check_rate', '_approval_adapter', '_send_draft', 'submit', 'resume_submission', '_submit', 'submit_album', '_submit_album'),
     'services.lifecycle': ('_guard', 'drain_inflight', '_safe_notify'),
     'services.review': ('approval_rows', '_apply_edit', 'on_action', 'reject_post', '_regenerate', '_regenerate_inner', 'on_comment'),
-    'services.publication': ('_publish', 'publication_targets', 'publication_view', 'finish_publication', '_publish_safe', '_publish_inner'),
+    'services.publication': ('publication_channels', '_publish', 'publication_targets', 'publication_view', 'finish_publication', '_publish_safe', '_publish_inner'),
     'services.people': ('is_global_admin', 'is_member', 'can_manage_draft', 'draft_recipients', 'is_admin', 'requests_enabled', '_base', '_db_people', '_base_admins', 'refresh_people', 'role_of', '_add_person', '_remove_person', '_tell_admins', '_who', '_request_rows', 'unknown_user', 'menu_for', 'people_view', '_person', 'reqs_view', 'people_menu'),
     'services.menus': ('rules_command', 'rules_view', 'on_menu', 'pending_view', 'on_text'),
     'services.monitoring': ('quiet', 'confirm_mode', 'alert', 'staff', 'can_status', 'alert_staff', 'announce_start', '_ago', 'aitunnel_balance', 'status_text', 'remind_once', 'reminder_loop', 'warn_expiring_once'),

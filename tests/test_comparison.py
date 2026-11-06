@@ -36,9 +36,9 @@ def test_admin_enable_validates_public_catalog_without_key(mx, monkeypatch):
         return httpx.Response(200, json=CATALOG)
 
     monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
-    assert "только администратору" in run(core.on_menu(mx, "9", "m:compare_toggle"))[0]
+    assert "только администратору" in run(core.on_menu(mx, "9", "m:compare_set:1"))[0]
     assert not calls
-    text, _ = run(core.on_menu(mx, "5", "m:compare_toggle"))
+    text, _ = run(core.on_menu(mx, "5", "m:compare_set:1"))
     assert all(m in text for m in MODELS) and comparison.config()["enabled"]
 
 

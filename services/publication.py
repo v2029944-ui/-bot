@@ -10,6 +10,10 @@ async def _publish(adapter: core.Adapter, user_id, did: int, attempt: int, force
     return await core._guard(core._publish_safe(adapter, user_id, did, attempt, force))
 
 
+def publication_channels(targets):
+    return {target.name: str(getattr(target, "channel", "")) for target in targets}
+
+
 def publication_targets(d, adapter):
     if os.getenv("PUBLISH_TO_ALL") == "1":
         return list(core.ADAPTERS.values())
@@ -26,11 +30,13 @@ def publication_view(d, adapter):
     names = {"max": "MAX", "tg": "Telegram"}
     lines = [f"Публикация поста №{d['id']}:"]
     rows = []
+    channels = json.loads(d.get("publication_channels") or "{}")
     for target in core.publication_targets(d, adapter):
         name = names.get(target.name, target.name)
         mark = marks.get(target.name)
         status = "✅ опубликовано" if mark == "done" else "❓ результат неизвестен" if mark == "unknown" else "❌ ошибка" if target.name in errors else "⏳ не отправлено"
-        lines.append(f"{name} — {status}")
+        destination = f" (канал {channels[target.name]})" if channels.get(target.name) else ""
+        lines.append(f"{name} — {status}{destination}")
         if mark != "done" and target.name in errors:
             lines.append(errors[target.name][:180])
         if mark == "unknown":
@@ -96,6 +102,15 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
         return False, "Это устаревший вариант. Используйте последнее сообщение с постом."
 
     targets = core.publication_targets(d, adapter)
+    channels = core.publication_channels(targets)
+    saved = json.loads(d.get("publication_channels") or "{}")
+    if saved and channels != saved:
+        core._set(did, status="pending")
+        return False, ("⛔ Каналы публикации изменились после подтверждения или начала отправки. "
+                       "Верните прежние настройки каналов и проверьте результат в них. "
+                       "Автоматическая отправка в новые каналы заблокирована.")
+    if not saved:
+        core._set(did, publication_channels=json.dumps(channels, ensure_ascii=False))
     footer = json.loads(d["footer"]) if d.get("footer") is not None else post_footer.config()
     posts = {t.name: post_footer.render(d["post"], t.name, footer) for t in targets}
     if d.get("footer") is None:

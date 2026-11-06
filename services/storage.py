@@ -99,7 +99,7 @@ def clear_source_cache(d):
 def scrub_published(d):
     """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
     core.db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
-                  photo='',video='',media='[]',published_to='',publish_errors='{}',
+                  photo='',video='',media='[]',published_to='',publish_errors='{}',publication_channels='{}',
                   post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0
                   WHERE id=? AND status='published'""", (d["id"],))
     if d.get("source_key"):

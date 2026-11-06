@@ -16,6 +16,8 @@ import resources
 def llm_config_problem() -> str | None:
     """Адрес провайдера обязателен: молчаливая подстановка адреса OpenAI отправляла чужой ключ не туда
     и выглядела как «неверный ключ»."""
+    if core.PROVIDER not in ("openai", "anthropic"):
+        return "LLM_PROVIDER: укажите openai или anthropic."
     if core.PROVIDER != "openai":
         return None
     base = core.env("LLM_BASE_URL", "").strip()

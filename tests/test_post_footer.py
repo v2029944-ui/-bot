@@ -14,10 +14,10 @@ def test_admin_can_configure_enable_and_disable_link(mx):
     run(core.on_text(mx, "5", "Записаться"))
     run(core.on_menu(mx, "5", "m:footer_max"))
     run(core.on_text(mx, "5", "https://max.ru/examplebot"))
-    run(core.on_menu(mx, "5", "m:footer_toggle"))
+    run(core.on_menu(mx, "5", "m:footer_set:1"))
     assert post_footer.config()["enabled"] and post_footer.config()["text"] == "Записаться"
     assert "Записаться" in post_footer.view()[0]
-    run(core.on_menu(mx, "5", "m:footer_toggle"))
+    run(core.on_menu(mx, "5", "m:footer_set:0"))
     assert not post_footer.config()["enabled"]
 
 

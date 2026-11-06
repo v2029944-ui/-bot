@@ -136,6 +136,9 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         return await core._regenerate(adapter, user_id, did, post_length=length, attempt=attempt)
 
     if action == "ok":
+        if not core._parse_marks(d.get("published_to")):
+            core._set(did, publication_channels=json.dumps(
+                core.publication_channels(core.publication_targets(d, adapter)), ensure_ascii=False))
         names = {"max": "MAX", "tg": "Telegram"}
         marks = core._parse_marks(d.get("published_to"))
         targets = [names.get(t.name, t.name) for t in core.publication_targets(d, adapter)
