@@ -40,7 +40,7 @@ def test_only_approvers_can_press_buttons(tg, llm, png):
 def test_regenerate_sends_to_author_and_acting_admin_and_old_buttons_expire(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "x", png))
     llm.reply = "Новый вариант"
-    run(core.on_action(tg, "1", "redo", did, 1))
+    run(core.on_action(tg, "1", "regen", did, 1))
     assert core.get(did)["attempts"] == 2 and core.get(did)["post"] == "Новый вариант"
     assert len(tg.sent("approval")) == 3  # первоначальный автору, новый — автору и действующему администратору
     ok, text = run(core.on_action(tg, "1", "okyes", did, 1))  # кнопка под старым вариантом
@@ -50,7 +50,7 @@ def test_regenerate_sends_to_author_and_acting_admin_and_old_buttons_expire(tg, 
 def test_failed_regenerate_rolls_back(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "x", png))
     llm.reply = RuntimeError("нет баланса")
-    ok, text = run(core.on_action(tg, "1", "redo", did, 1))
+    ok, text = run(core.on_action(tg, "1", "regen", did, 1))
     d = core.get(did)
     assert not ok and "нет баланса" in text and d["status"] == "pending" and d["attempts"] == 1
 

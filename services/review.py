@@ -79,7 +79,8 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
             return False, "Не удалось отправить выбранный вариант. Повторите выбор."
         core._set(did, status="pending")
         return True, ""
-    if options and action not in ("redo", "del", "delyes", "delno", "rejectphoto", "rejecttext", "rejectcustom"):
+    comparison_actions = {"redo", "regen", "redoc", "change", "length", "back", "del", "delyes", "delno", "rejectphoto", "rejecttext", "rejectcustom"}
+    if options and action not in comparison_actions and not action.startswith("len_"):
         return False, "Сначала выберите один из вариантов моделей."
 
     if action == "pubstatus":
@@ -101,10 +102,10 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         await adapter.send_menu(str(user_id), text, rows)
         return False, ""
 
-    if (action in ("redo", "redoc", "edit", "change", "length") or action.startswith("len_")) and core._parse_marks(d.get("published_to")):
+    if (action in ("redo", "regen", "redoc", "edit", "change", "length") or action.startswith("len_")) and core._parse_marks(d.get("published_to")):
         return False, core.PARTIAL_EDIT_BLOCKED
 
-    if action in ("change", "length", "back"):
+    if action in ("redo", "change", "length", "back"):
         key = (adapter.name, str(user_id))
         core.WAITING.pop(key, None)
         core.WAITING_EDIT.pop(key, None)
@@ -112,7 +113,13 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         core.WAITING_RULE.discard(key)
         def button(label, act):
             return (label, f"d:{act}:{did}:{attempt}")
-        if action == "change":
+        if action == "redo":
+            rows = [[button("🔁 Без изменений", "regen")],
+                    [button("📏 Другой размер", "length"), button("✏️ С комментарием", "redoc")],
+                    [button("↩️ Назад", "back")]]
+            scope = "все модели сравнения" if comparison.config()["enabled"] else "одна модель"
+            text = f"Перегенерировать пост №{did}: {scope}. Выберите способ."
+        elif action == "change":
             rows = [[button("🔁 Заново", "redo"), button("✏️ С комментарием", "redoc")],
                     [button("✍️ Править самому", "edit"), button("📏 Длина поста", "length")],
                     [button("↩️ Назад", "back")]]
@@ -122,8 +129,12 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
                     for name, (label, low, high) in core.POST_LENGTHS.items()]
             rows.append([button("↩️ Назад", "change")])
             current = core.POST_LENGTHS.get(d.get("post_length"), ("По правилам редакции",))[0]
-            text = (f"Длина поста №{did}: {current}.\nВыберите длину — бот сразу подготовит новый вариант. "
+            scope = "варианты всеми моделями" if options and comparison.config()["enabled"] else "один новый вариант"
+            text = (f"Длина поста №{did}: {current}.\nВыберите длину — бот подготовит {scope}. "
                     "Размер примерный: если исходных фактов мало, текст будет короче.")
+        elif options:
+            await adapter.send_for_approval(str(user_id), did, d["photo"], d["post"], **core.media_kw(d))
+            return False, ""
         else:
             rows = core.approval_rows(did, attempt)
             text = f"Пост №{did}:\n\n{d['post']}"
@@ -192,7 +203,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
                   "rejecttext": "Добавьте описание выполненной работы и отправьте материал заново."}.get(action, "")
         return await core.reject_post(adapter, user_id, did, attempt, reason)
 
-    if action == "redo":
+    if action == "regen":
         return await core._regenerate(adapter, user_id, did, attempt=attempt, compare=True)
 
     if action == "redoc":
@@ -200,7 +211,8 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         core.WAITING[(adapter.name, str(user_id))] = (did, attempt)
         core.WAITING_RULE.discard((adapter.name, str(user_id)))
         core.WAITING_EDIT.pop((adapter.name, str(user_id)), None)
-        return False, "✏️ Напишите одним сообщением, что изменить в посте."
+        scope = " Будут пересозданы все варианты сравнения." if options and comparison.config()["enabled"] else ""
+        return False, "✏️ Напишите одним сообщением, что изменить в посте." + scope
 
     if action == "edit":  # «Править самому»: следующее сообщение согласующего станет текстом поста
         key = (adapter.name, str(user_id))
@@ -277,9 +289,12 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
         length = (d.get("post_length") or "") if post_length is None else post_length
         model_token = comparison.MODEL.set(d.get("selected_model") or None)
         try:
-            generate = core.generate_options if compare else core.generate_post
+            candidates = json.loads(d.get("candidates") or "[]")
+            generate = core.generate_options if compare or candidates else core.generate_post
+            previous = {o["model"]: o["post"] for o in candidates if o.get("post")}
+            extra = {"previous": previous} if generate is core.generate_options else {}
             post = await generate(d["photo"], d["source_text"], prev=d["post"], comment=comment,
-                                       video=bool(d.get("video")), media=core.draft_media(d), post_length=length)
+                                       video=bool(d.get("video")), media=core.draft_media(d), post_length=length, **extra)
         finally:
             comparison.MODEL.reset(model_token)
     except Exception as e:

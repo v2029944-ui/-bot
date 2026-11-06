@@ -91,7 +91,7 @@ def test_album_edit_regenerate_show_deferred_and_delete(png, llm):
     core.ADAPTERS["max"] = mx
     did = run(core.submit_album(mx, "9", "Анна", "Заменили насос", photos(png)))
     media = core.draft_media(core.get(did))
-    run(core.on_action(mx, "5", "redo", did, 1))
+    run(core.on_action(mx, "5", "regen", did, 1))
     assert "АЛЬБОМ из 2" in llm.calls[-1]["text"]
     run(core.on_action(mx, "5", "edit", did, 2))
     run(core.on_text(mx, "5", "Исправленный общий текст"))

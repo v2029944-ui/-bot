@@ -11,7 +11,7 @@ import max_
 
 
 @pytest.mark.parametrize("mark", ["max", "max?"])
-@pytest.mark.parametrize("action", ["edit", "redoc", "redo"])
+@pytest.mark.parametrize("action", ["edit", "redoc", "regen"])
 def test_cannot_change_post_after_any_publication_attempt(mark, action, png, llm):
     mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS["max"] = mx

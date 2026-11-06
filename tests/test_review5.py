@@ -75,7 +75,7 @@ def test_shutdown_waits_for_publish_in_progress(llm, png, monkeypatch):
             await REAL_SLEEP(0.01)
         assert core.get(did)["status"] == "publishing"
         monkeypatch.setattr(core, "SHUTTING_DOWN", True)  # пошла остановка
-        ok, msg = await core.on_action(ad, "2", "redo", did, 1)  # новую работу не начинаем
+        ok, msg = await core.on_action(ad, "2", "regen", did, 1)  # новую работу не начинаем
         assert not ok and "перезапускается" in msg
         press.cancel()  # внешняя задача сорвана, как при остановке
         with pytest.raises(asyncio.CancelledError):

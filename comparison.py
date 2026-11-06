@@ -1,6 +1,7 @@
 """Выбор четырёх vision-моделей по публичному каталогу AITunnel."""
 import contextvars
 import json
+import math
 
 import httpx
 
@@ -29,14 +30,25 @@ def select(catalog):
               and "text" in i.get("modalities", {}).get("output", [])}
     result = []
     for prefix, preferred in [("gpt-", ["gpt-4.1-mini", "gpt-4o-mini"]),
-                              ("claude-sonnet", ["claude-sonnet-4.6", "claude-sonnet-4.5"]),
+                              ("claude-haiku", []),
                               ("gemini-", ["gemini-2.5-flash", "gemini-2.0-flash"]),
-                              ("grok-", ["grok-4.1-fast", "grok-4-fast", "grok-4"])]:
-        choices = [n for n in usable if n.startswith(prefix) and (prefix != "gemini-" or "flash" in n)]
+                              ("grok-", [])]:
+        choices = [n for n in usable if n.startswith(prefix) and (prefix != "gemini-" or "flash" in n)
+                   and (prefix != "grok-" or "fast" in n)]
+        prices = {}
+        for name in choices:
+            try:
+                prompt = float(usable[name]["prompt_cost"])
+                completion = float(usable[name]["completion_cost"])
+                if all(math.isfinite(value) and value >= 0 for value in (prompt, completion, prompt + completion)):
+                    prices[name] = prompt + completion
+            except (KeyError, TypeError, ValueError):
+                continue
+        choices = [name for name in choices if name in prices]
         choices.sort(key=lambda n: (preferred.index(n) if n in preferred else len(preferred),
-                     float(usable[n].get("prompt_cost", 1e9)) + float(usable[n].get("completion_cost", 1e9)), n))
+                     prices[n], n))
         if not choices:
-            raise ValueError("Нет подходящей vision-модели " + prefix)
+            raise ValueError("Нет подходящей vision-модели с известной ценой " + prefix)
         result.append(choices[0])
     return result
 
@@ -64,10 +76,10 @@ async def _menu(toggle=False, enabled=None, refresh=False):
                     response.raise_for_status()
                     models = select(response.json())
             except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-                return "Не удалось выбрать четыре vision-модели, включая Grok. Настройки сохранены без изменений; попробуйте позже.", [[("Повторить", "m:compare_refresh" if c["enabled"] else "m:compare_set:1")]]
+                return "Не удалось подобрать четыре vision-модели с ценами, включая Claude Haiku и Grok Fast. Настройки сохранены без изменений; попробуйте позже.", [[("Повторить", "m:compare_refresh" if c["enabled"] else "m:compare_set:1")]]
             c = {"enabled": True, "models": models}
         ops.set_setting("model_comparison", json.dumps(c))
     return ("🧪 Сравнение моделей: " + ("включено" if c["enabled"] else "выключено") + "\n" +
             "\n".join(c["models"]) + f"\nОдин материал — {len(c['models'])} генерации и столько же запросов к провайдеру. Выберите один вариант перед публикацией.",
             [[("Выключить" if c["enabled"] else "Включить и выбрать модели", f"m:compare_set:{0 if c['enabled'] else 1}")]] +
-            ([[("🔄 Обновить список моделей", "m:compare_refresh")]] if c["enabled"] else []))
+            ([[("🔄 Подобрать недорогие модели", "m:compare_refresh")]] if c["enabled"] else []))

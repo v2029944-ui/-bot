@@ -8,7 +8,7 @@ import comparison
 import core
 import ops
 
-MODELS = ["gpt-4.1-mini", "claude-sonnet-4.6", "gemini-2.5-flash", "grok-4.1-fast"]
+MODELS = ["gpt-4.1-mini", "claude-haiku-4.5", "gemini-2.5-flash", "grok-4.1-fast"]
 CATALOG = {m: {"modalities": {"input": ["text", "image"], "output": ["text"]}, "prompt_cost": 10, "completion_cost": 20} for m in MODELS}
 
 
@@ -58,7 +58,7 @@ def test_four_generations_one_draft_selection_and_publication(mx, png, llm, albu
     assert core.get(did)["selected_model"] == MODELS[1]
     assert "устаревший" in run(core.on_action(mx, "5", "choose_0", did, 1))[1]
     assert comparison.MODEL.get() is None
-    run(core.on_action(mx, "5", "redo", did, 2))
+    run(core.on_action(mx, "5", "regen", did, 2))
     assert len(llm.calls) == 8 and len(json.loads(core.get(did)["candidates"])) == 4
     run(core.on_action(mx, "5", "choose_1", did, 3))
     run(core.on_action(mx, "5", "okyes", did, 4))
@@ -70,7 +70,7 @@ def test_redo_before_selection_replaces_all_candidates(mx, png, llm):
     enable()
     llm.reply = lambda system, text: "Вариант " + comparison.MODEL.get()
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
-    assert run(core.on_action(mx, "5", "redo", did, 1))[0]
+    assert run(core.on_action(mx, "5", "regen", did, 1))[0]
     assert len(llm.calls) == 8 and core.get(did)["attempts"] == 2
     assert "устаревший" in run(core.on_action(mx, "5", "choose_0", did, 1))[1]
     assert "выберите" in run(core.on_action(mx, "5", "okyes", did, 2))[1]
@@ -81,7 +81,7 @@ def test_failed_regeneration_keeps_old_candidates(mx, png, llm):
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     before = core.get(did)
     llm.reply = RuntimeError("Unavailable")
-    assert not run(core.on_action(mx, "5", "redo", did, 1))[0]
+    assert not run(core.on_action(mx, "5", "regen", did, 1))[0]
     assert core.get(did)["candidates"] == before["candidates"] and core.get(did)["attempts"] == 1
 
 
@@ -91,7 +91,7 @@ def test_disabled_comparison_regenerates_only_selected_model(mx, png, llm):
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     run(core.on_action(mx, "5", "choose_1", did, 1))
     ops.set_setting("model_comparison", json.dumps({"enabled": False, "models": MODELS}))
-    run(core.on_action(mx, "5", "redo", did, 2))
+    run(core.on_action(mx, "5", "regen", did, 2))
     assert len(llm.calls) == 5 and core.get(did)["post"] == "Пост " + MODELS[1]
 
 
@@ -150,3 +150,131 @@ def test_failed_refresh_keeps_existing_models_and_allows_retry(mx, monkeypatch):
     text, rows = run(core.on_menu(mx, "5", "m:compare_refresh"))
     assert "Grok" in text and comparison.config() == previous
     assert rows[0][0][1] == "m:compare_refresh"
+
+
+def test_budget_models_use_haiku_and_cheapest_vision_grok_fast():
+    catalog = dict(CATALOG)
+    for name, cost in [("claude-sonnet-4.6", 8), ("claude-haiku-3.5", 1),
+                       ("grok-4", 10), ("grok-4-fast", 0.1), ("grok-4.2-fast", 0.05)]:
+        catalog[name] = {"modalities": {"input": ["image", "text"], "output": ["text"]},
+                         "prompt_cost": cost, "completion_cost": cost}
+    catalog["grok-4.2-fast"]["modalities"]["input"] = ["text"]
+    selected = comparison.select(catalog)
+    assert selected[1] == "claude-haiku-3.5" and selected[3] == "grok-4-fast"
+    assert not any("sonnet" in model for model in selected)
+
+
+@pytest.mark.parametrize("cost", [None, -1, "NaN", "Infinity", "not-a-price"])
+def test_budget_selection_does_not_fall_back_to_expensive_models_when_price_invalid(cost):
+    catalog = {name: {**info} for name, info in CATALOG.items()}
+    catalog[MODELS[3]]["prompt_cost"] = cost
+    catalog["grok-4"] = CATALOG[MODELS[3]]
+    with pytest.raises(ValueError):
+        comparison.select(catalog)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_redo_opens_menu_without_charges_then_regenerates_when_requested(mx, png, llm, enabled):
+    if enabled:
+        enable()
+    did = run(core.submit(mx, "9", "Анна", "Описание", png))
+    count = len(llm.calls)
+    before = core.get(did)
+    run(core.on_action(mx, "5", "redo", did, 1))
+    assert len(llm.calls) == count and core.get(did) == before
+    payloads = [p for row in mx.sent("menu")[-1][3] for _, p in row]
+    assert all(f"d:{action}:{did}:1" in payloads for action in ("regen", "length", "redoc", "back"))
+    assert run(core.on_action(mx, "5", "regen", did, 1))[0]
+    assert len(llm.calls) == count * 2
+
+
+def test_comparison_length_and_comment_regenerate_all_candidates_before_selection(mx, png, llm, monkeypatch):
+    enable()
+    monkeypatch.setenv("LEARN_RULES", "0")
+    seen = []
+
+    def answer(system, text):
+        model = comparison.MODEL.get()
+        seen.append((model, system, text))
+        return "Вариант модели " + model
+
+    llm.reply = answer
+    did = run(core.submit(mx, "9", "Анна", "Описание", png))
+    run(core.on_action(mx, "5", "length", did, 1))
+    assert mx.sent("menu")[-1][3][0][0][1] == f"d:len_short:{did}:1"
+    assert run(core.on_action(mx, "5", "len_short", did, 1))[0]
+    assert core.get(did)["post_length"] == "short"
+    assert len(json.loads(core.get(did)["candidates"])) == 4 and core.get(did)["attempts"] == 2
+    seen.clear()
+    run(core.on_action(mx, "5", "redoc", did, 2))
+    assert ("max", "5") in core.WAITING
+    run(core.on_text(mx, "5", "Добавь конкретики"))
+    assert len(seen) == 4 and {model for model, _, _ in seen} == set(MODELS)
+    for model, system, text in seen:
+        assert "150–300" in system
+        assert "Добавь конкретики" in text and "Текущий вариант поста:\nВариант модели " + model in text
+    assert len(json.loads(core.get(did)["candidates"])) == 4 and core.get(did)["attempts"] == 3
+    assert "выберите" in run(core.on_action(mx, "5", "okyes", did, 3))[1]
+    assert "устаревший" in run(core.on_action(mx, "5", "len_long", did, 2))[1]
+
+
+def test_selected_comparison_variant_length_and_comment_use_only_selected_model(mx, png, llm, monkeypatch):
+    enable()
+    monkeypatch.setenv("LEARN_RULES", "0")
+    llm.reply = lambda system, text: "Пост " + comparison.MODEL.get()
+    did = run(core.submit(mx, "9", "Анна", "Описание", png))
+    run(core.on_action(mx, "5", "choose_1", did, 1))
+    assert run(core.on_action(mx, "5", "len_long", did, 2))[0]
+    assert len(llm.calls) == 5 and core.get(did)["selected_model"] == MODELS[1]
+    run(core.on_action(mx, "5", "redoc", did, 3))
+    run(core.on_text(mx, "5", "Убери вводную фразу"))
+    assert len(llm.calls) == 6 and core.get(did)["selected_model"] == MODELS[1]
+    assert core.get(did)["candidates"] == "[]"
+
+
+def test_real_max_redo_opens_options_on_existing_card_without_requesting_models(monkeypatch, png, llm):
+    from test_admin_menu_button import Api, buttons, make
+
+    async def scenario():
+        enable()
+        api = Api()
+        ad = make(api)
+        core.ADAPTERS["max"] = ad
+
+        async def upload(path):
+            return "token"
+
+        monkeypatch.setattr(ad, "_upload_image", upload)
+        did = await core.submit(ad, "9", "Автор", "Описание", png)
+        mid = f"m{api.n}"
+        count = len(api.of("POST"))
+        await ad.on_callback({"user": {"user_id": 1}, "callback_id": "redo-options",
+                              "payload": f"d:redo:{did}:1", "message": {"body": {"mid": mid}}})
+        payloads = [b["payload"] for b in buttons(api.of("PUT")[-1][3])]
+        assert all(f"d:{action}:{did}:1" in payloads for action in ("regen", "length", "redoc", "back")), payloads
+        assert len(llm.calls) == 4 and len(api.of("POST")) == count
+        await ad.on_callback({"user": {"user_id": 1}, "callback_id": "length-options",
+                              "payload": f"d:length:{did}:1", "message": {"body": {"mid": mid}}})
+        assert len(llm.calls) == 4
+        await ad.on_callback({"user": {"user_id": 1}, "callback_id": "new-length", "payload": f"d:len_long:{did}:1"})
+        assert len(llm.calls) == 8 and core.get(did)["post_length"] == "long"
+        assert len(json.loads(core.get(did)["candidates"])) == 4
+        await ad.http.aclose()
+    run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["llm", "delivery"])
+def test_comparison_length_failure_restores_candidates_version_and_length(mx, png, llm, monkeypatch, failure):
+    enable()
+    did = run(core.submit(mx, "9", "Автор", "Описание", png))
+    before = core.get(did)
+    if failure == "llm":
+        llm.reply = RuntimeError("Unavailable")
+    else:
+        async def fail(*args, **kwargs):
+            raise RuntimeError("Cannot send")
+        monkeypatch.setattr(mx, "send_for_approval", fail)
+    assert not run(core.on_action(mx, "5", "len_long", did, 1))[0]
+    after = core.get(did)
+    assert all(after[key] == before[key] for key in ("post", "candidates", "attempts", "post_length", "selected_model"))
+    assert after["status"] == "pending"

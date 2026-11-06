@@ -56,7 +56,7 @@ def test_utf16_length_counts_emoji_twice():
 def test_show_works_after_regeneration(tg, llm, png):
     run(core.submit(tg, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
-    run(core.on_action(tg, "1", "redo", did, 1))  # теперь вариант №2
+    run(core.on_action(tg, "1", "regen", did, 1))  # теперь вариант №2
     before = len(tg.sent("approval"))
     ok, msg = run(core.on_action(tg, "2", "show", did, 1))  # кнопка из старого напоминания
     assert msg == "" and len(tg.sent("approval")) == before + 1

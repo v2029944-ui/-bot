@@ -41,7 +41,7 @@ def test_length_regenerates_only_this_post_and_persists(mx, llm, png, length, bo
     assert {a[1] for a in mx.sent("approval")[-2:]} == {"5", "9"}
     assert not mx.sent("publish")
     assert "устаревший" in run(core.on_action(mx, "5", "okyes", did, 1))[1]
-    run(core.on_action(mx, "5", "redo", did, 2))
+    run(core.on_action(mx, "5", "regen", did, 2))
     assert bounds in llm.calls[-1]["system"]
     run(core._regenerate(mx, "5", did, comment="Добавь акцент на результате"))
     assert bounds in llm.calls[-1]["system"]

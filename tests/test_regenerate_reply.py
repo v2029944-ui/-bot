@@ -4,7 +4,7 @@ from conftest import run
 import core
 
 
-@pytest.mark.parametrize("action", ["redo", "len_short", "len_long"])
+@pytest.mark.parametrize("action", ["regen", "len_short", "len_long"])
 def test_max_new_draft_does_not_get_redundant_reply(mx, llm, png, action):
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     llm.reply = "Новый пост"
@@ -16,5 +16,5 @@ def test_max_new_draft_does_not_get_redundant_reply(mx, llm, png, action):
 def test_max_regeneration_error_is_still_reported(mx, llm, png):
     did = run(core.submit(mx, "9", "Анна", "Описание работы", png))
     llm.reply = RuntimeError("Сервис недоступен")
-    ok, text = run(core.on_action(mx, "5", "redo", did, 1))
+    ok, text = run(core.on_action(mx, "5", "regen", did, 1))
     assert not ok and "Не удалось пересоздать" in text

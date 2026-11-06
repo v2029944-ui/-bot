@@ -682,7 +682,7 @@ class Max(core.Adapter):
         pressed = ((cb.get("message") or {}).get("body") or {}).get("mid")  # сообщение, под которым нажали
         ctx = {"uid": str(uid), "sent_menu": False}
         parts = payload.split(":")
-        if pressed and len(parts) == 4 and parts[0] == "d" and parts[1] in ("change", "length", "back"):
+        if pressed and len(parts) == 4 and parts[0] == "d" and parts[1] in ("redo", "change", "length", "back"):
             ctx["inline_mid"] = pressed
         token = _NAV.set(ctx)
         channel_token = publication.EXPECTED_CHANNELS.set(expected_channels)

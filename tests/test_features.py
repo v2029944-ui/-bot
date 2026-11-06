@@ -81,7 +81,7 @@ def test_edit_cancel_and_too_long_keep_state(tg, llm, png, monkeypatch):
 def test_edit_not_applied_if_draft_changed_meanwhile(tg, llm, png):
     did = new_draft(tg, llm, png)
     run(core.on_action(tg, "1", "edit", did, 1))
-    run(core.on_action(tg, "2", "redo", did, 1))  # второй согласующий пересоздал вариант
+    run(core.on_action(tg, "2", "regen", did, 1))  # второй согласующий пересоздал вариант
     run(core.on_text(tg, "1", "Мой текст"))
     assert core.get(did)["post"] != "Мой текст" and "уже изменён" in tg.sent("notify")[-1][2]
 
@@ -169,7 +169,7 @@ def test_reminder_respects_off_window_and_published(tg, llm, png, monkeypatch):
 def test_regenerated_variant_restarts_the_clock(tg, llm, png, window):
     did = new_draft(tg, llm, png)
     age_draft(did, 4)
-    run(core.on_action(tg, "1", "redo", did, 1))
+    run(core.on_action(tg, "1", "regen", did, 1))
     assert run(core.remind_once()) == 0  # новый вариант только что отправлен
 
 

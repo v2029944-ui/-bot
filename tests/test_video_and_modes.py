@@ -67,7 +67,7 @@ def test_video_goes_through_approval_and_publish_with_the_file(tg, llm, mp4):
 def test_regenerate_and_show_keep_the_video(tg, llm, mp4):
     run(core.submit(tg, "9", "Анна", "Установили новый насос", mp4, kind="video"))
     did = draft_id()
-    run(core.on_action(tg, "1", "redo", did, 1))
+    run(core.on_action(tg, "1", "regen", did, 1))
     assert "ВИДЕО" in llm.calls[-1]["text"]
     before = len(tg.sent("approval_video"))
     run(core.on_action(tg, "2", "show", did, 2))

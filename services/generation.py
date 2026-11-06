@@ -151,7 +151,7 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
     return out
 
 
-async def generate_options(*args, **kwargs):
+async def generate_options(*args, previous=None, **kwargs):
     c = comparison.config()
     if not c["enabled"]:
         return await core.generate_post(*args, **kwargs)
@@ -159,7 +159,10 @@ async def generate_options(*args, **kwargs):
     async def one(model):
         token = comparison.MODEL.set(model)
         try:
-            post = await core.generate_post(*args, **kwargs)
+            request = dict(kwargs)
+            if previous and previous.get(model):
+                request["prev"] = previous[model]
+            post = await core.generate_post(*args, **request)
             if len(post.encode("utf-16-le")) // 2 > 3500:
                 raise ValueError("Слишком длинный вариант для сравнения")
             return {"model": model, "post": post}

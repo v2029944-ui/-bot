@@ -126,7 +126,7 @@ def test_actor_gets_new_variant_immediately_even_in_defer_mode(tg, llm, png, mon
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
     ops.set_mode(tg, "1", "defer")
     before = len(tg.sent("approval"))
-    run(core.on_action(tg, "1", "redo", did, 1))
+    run(core.on_action(tg, "1", "regen", did, 1))
     assert [o[1] for o in tg.sent("approval")[before:]] == ["9", "1"]  # автор и действующий администратор: он сам нажал — ждать нечего
 
 
