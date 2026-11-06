@@ -242,12 +242,12 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         import max_queue
         if act == "inretry" and len(parts) == 3:
             queue = spaces.queue_db()
-            if spaces.active_id():
+            if spaces.active_id() or not core.is_global_admin(adapter, uid):
                 queue.execute("UPDATE max_inbox SET state='pending',attempts=0,next_try=0 WHERE event_key=? AND state='failed' AND space_id=?", (parts[2], spaces.active_id()))
             else:
                 queue.execute("UPDATE max_inbox SET state='pending',attempts=0,next_try=0 WHERE event_key=? AND state='failed'", (parts[2],))
             queue.commit()
-        return max_queue.view()
+        return max_queue.view(all_spaces=core.is_global_admin(adapter, uid))
     if act == "rules":
         page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
         return core.rules_view(page)
@@ -269,7 +269,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     if act == "status":
         if not core.can_status(adapter, uid):
             return "⛔ Статус показывается администратору.", None
-        return await core.status_text(adapter), None
+        return await core.status_text(adapter, include_global=core.is_global_admin(adapter, uid)), None
     if act in core.PEOPLE_ACTS:
         if not core.is_admin(adapter, uid):
             return "⛔ Людей добавляет только администратор.", None
@@ -370,7 +370,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         await adapter.notify(uid, message)
         return True
     if cmd == "/status":  # ни при каких условиях не должна уходить дальше как комментарий к посту
-        await adapter.notify(uid, await core.status_text(adapter) if core.can_status(adapter, uid)
+        await adapter.notify(uid, await core.status_text(adapter, include_global=core.is_global_admin(adapter, uid)) if core.can_status(adapter, uid)
                              else "⛔ Статус показывается администратору.")
         return True
     if cmd and cmd not in core.SAFE_CMDS and (key in core.WAITING_EDIT or key in core.WAITING_RULE or key in core.WAITING):

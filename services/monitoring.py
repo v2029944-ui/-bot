@@ -136,7 +136,7 @@ async def aitunnel_balance() -> str | None:
         return "💰 Баланс AITunnel: сервис вернул неожиданный ответ."
 
 
-async def status_text(adapter: core.Adapter) -> str:
+async def status_text(adapter: core.Adapter, include_global=True) -> str:
     """Сводка для /status: жив ли бот, что в очереди, отвечает ли нейросеть (проверка стоит доли копейки)."""
     now = time.time()
     def one(sql, *a):
@@ -153,7 +153,7 @@ async def status_text(adapter: core.Adapter) -> str:
         except Exception as e:
             return f"❌ {type(e).__name__}: {core.err(e)[:150]}"
     async def balance_for_space():
-        return await core.aitunnel_balance() if not spaces.active_id() else None
+        return await core.aitunnel_balance() if include_global and not spaces.active_id() else None
     llm, balance = await asyncio.gather(check_llm(), balance_for_space())
     last = ("нет данных" if not (core.LLM_STATE["ok"] or core.LLM_STATE["err"]) else
             f"последний пост написан {core._ago(now - core.LLM_STATE['ok'])} назад" if core.LLM_STATE["ok"] >= core.LLM_STATE["err"] else

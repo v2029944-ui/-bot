@@ -64,10 +64,11 @@ def recover():
     core.db.commit()
 
 
-def view():
+def view(all_spaces=None):
     queue = spaces.queue_db()
-    clause = " WHERE space_id=?" if spaces.active_id() else ""
-    args = (spaces.active_id(),) if spaces.active_id() else ()
+    limited = bool(spaces.active_id()) or all_spaces is False
+    clause = " WHERE space_id=?" if limited else ""
+    args = (spaces.active_id(),) if limited else ()
     counts = dict(queue.execute("SELECT state,COUNT(*) FROM max_inbox" + clause + " GROUP BY state", args).fetchall())
     text = (f"Обработка материалов: в очереди {counts.get('pending', 0)}, "
             f"в работе {counts.get('processing', 0)}, с ошибкой {counts.get('failed', 0)}.")

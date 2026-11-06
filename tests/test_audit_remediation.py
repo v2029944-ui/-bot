@@ -342,7 +342,8 @@ def test_failed_workspace_can_be_retried_without_duplicate_registration(tmp_path
     schema.add_columns(core.db, "workspaces", ("state TEXT DEFAULT 'ready'", "error TEXT DEFAULT ''"))
     core.db.execute("DELETE FROM workspaces")
     core.db.commit()
-    monkeypatch.setattr(spaces, "ROOT", SimpleNamespace(db=core.db,folder=tmp_path,adapters={"max":ad,"tg":tg}))
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    monkeypatch.setattr(spaces, "ROOT", SimpleNamespace(db=core.db,folder=tmp_path,adapters={"max":ad,"tg":tg},name="Основное",owner=None))
     monkeypatch.setattr(spaces, "global_admin", lambda uid: True)
     spaces.WAITING_CREATE.add("1")
     def failed(sid):

@@ -115,10 +115,15 @@ async def main():
     log.info("Нейросеть: %s / %s", core.PROVIDER, core.MODEL)
     if not os.getenv("MAX_TOKEN"):
         raise SystemExit("Для приёма и согласования нужен MAX_TOKEN")
-    if os.getenv("TG_TOKEN"):
-        core.ADAPTERS["tg"] = Telegram(need("TG_TOKEN"), need("TG_CHANNEL"))
-    core.ADAPTERS["max"] = Max(need("MAX_TOKEN"), need("MAX_CHANNEL"), ids("MAX_APPROVERS"), ids("MAX_EMPLOYEES"),
-                                ids("MAX_ADMINS"))
+    primary = spaces.configured_root(core.db)
+    telegram = primary["tg_channel"] if primary else need("TG_CHANNEL") if core.env("TG_TOKEN") else None
+    if telegram:
+        core.ADAPTERS["tg"] = Telegram(need("TG_TOKEN"), telegram)
+    admins = ids("MAX_ADMINS")
+    core.ADAPTERS["max"] = Max(need("MAX_TOKEN"), primary["max_channel"] if primary else need("MAX_CHANNEL"),
+                                [] if primary else ids("MAX_APPROVERS"), [] if primary else ids("MAX_EMPLOYEES"),
+                                list(dict.fromkeys([*admins, primary["owner"]])) if primary else admins)
+    core.ADAPTERS["max"].global_admins = admins
     if ids("MAX_ADMINS"):
         log.info("MAX_ADMINS задан: новые люди добавляются кнопками (заявки)")
     elif core.ADAPTERS["max"].allowed is None:

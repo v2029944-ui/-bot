@@ -82,8 +82,9 @@ async def generate_post(photo: str, description: str, prev: str | None = None,
 def build_system() -> str:
     """Базовые правила и отдельно сохранённые пожелания редакции."""
     s = core.SYSTEM
-    if spaces.active_id():
-        s = s.replace(f"компании «{core.env('COMPANY', 'нашей компании')}»", f"компании «{getattr(spaces.CURRENT.get(), "name", "Основное")}»", 1)
+    if spaces.active_id() or spaces.INSTALLED and spaces.configured_root(spaces.root().db):
+        name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name
+        s = s.replace(f"компании «{core.env('COMPANY', 'нашей компании')}»", f"компании «{name}»", 1)
     # в запрос идут последние 30 правил, чтобы он не разрастался
     rules = editor_rules.active()
     if rules:

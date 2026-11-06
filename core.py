@@ -126,6 +126,7 @@ class Adapter:
     base_approvers: list[str]
     base_employees: list[str]
     base_admins: list[str]
+    global_admins: list[str]  # immutable MAX_ADMINS snapshot, separate from workspace ownership
     workspace_id: int | None = None
     http: httpx.AsyncClient
     if TYPE_CHECKING:

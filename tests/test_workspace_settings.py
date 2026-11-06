@@ -1,4 +1,5 @@
 import shutil
+import time
 
 import pytest
 from conftest import run
@@ -244,3 +245,170 @@ def test_cancel_is_scoped_to_workspace_and_does_not_clear_other_input(runtime):
         assert ("max", "33") in core.WAITING_RULE
         run(core.on_menu(core.ADAPTERS["max"], "33", cancel_a))
         assert ("max", "33") not in core.WAITING_RULE
+
+
+def test_primary_space_adopts_env_members_without_moving_data_and_keeps_global_control(runtime):
+    ad, _ = runtime
+    ad.base_employees = ["77"]
+    ad.base_approvers = ["78"]
+    core.refresh_people(ad)
+    core.db.execute("INSERT INTO rules(text,created) VALUES('Исходное правило',0)")
+    core.db.execute("INSERT INTO drafts(platform,author_id,status,created,post) VALUES('max','77','pending',?, 'Черновик')", (time.time(),))
+    core.db.commit()
+    before = core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
+    assert any(p == "m:space:0" for row in spaces.view()[1] for _, p in row)
+    payload = preview(ad, 0, "Наша компания\n22\n-110\n-")
+    assert spaces.configured_root(spaces.root().db) is None
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    assert spaces.configured_root(spaces.root().db) == {"name": "Наша компания", "owner": "22", "max_channel": "-110", "tg_channel": None}
+    assert ad.channel == "-110" and spaces.root().name == "Наша компания"
+    assert core.role_of(ad, "77") == core.role_of(ad, "78") == "member"
+    assert core.is_admin(ad, "22") and not spaces.global_admin("22") and not core.is_global_admin(ad, "22")
+    assert core.is_global_admin(ad, "1") and spaces.global_admin("1")
+    assert "только администратор из MAX_ADMINS" in run(core.on_menu(ad, "22", "m:upd"))[0]
+    assert "главный" in run(core.on_menu(ad, "22", "m:spaces"))[0]
+    assert core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == before
+    assert "Исходное правило" in core.build_system() and "Наша компания" in core.build_system()
+    assert core.db.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+    core._remove_person(ad, "77", "Удалённый")
+    payload = preview(ad, 0, "Наша компания\n33\n-110\n-")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    assert core.role_of(ad, "77") is None and not core.is_member(ad, "22")
+    assert core.is_admin(ad, "33") and spaces.global_admin("1")
+
+
+def test_primary_space_blocks_group_collision_and_partial_publication(runtime):
+    ad, _ = runtime
+    create(ad, 11, -101)
+    run(core.on_menu(ad, "1", "m:space_edit:0"))
+    run(core.on_text(ad, "1", "Основное\n1\n-101\n-"))
+    assert spaces.settings_state()[("max", "1")]["waiting"]
+    assert spaces.configured_root(spaces.root().db) is None
+    payload = preview(ad, 0, "Основное\n1\n-100\n-")
+    spaces.root().db.execute("INSERT INTO drafts(status,published_to) VALUES('pending','max?')")
+    spaces.root().db.commit()
+    assert "незавершённая" in run(core.on_menu(ad, "1", payload))[0]
+    assert spaces.configured_root(spaces.root().db) is None
+    assert ad.channel == "-100"
+
+
+def test_primary_telegram_can_be_disabled_without_disabling_other_spaces(runtime, monkeypatch):
+    ad, _ = runtime
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    spaces.root().adapters["tg"] = tg.Telegram("123456:ABCDEF", "-200")
+    row = create(ad, telegram="-201")
+    payload = preview(ad, 0, "Основное\n1\n-100\n-")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    assert "tg" not in spaces.root().adapters
+    assert spaces.get(row["id"]).memory["ADAPTERS"]["tg"].channel == "-201"
+    run(spaces.close())
+    assert spaces.get(row["id"]).memory["ADAPTERS"]["tg"].channel == "-201"
+    assert create(ad, 22, -102, "-202")["tg_channel"] == "-202"
+
+
+def test_primary_owner_routes_to_primary_even_if_previously_used_another_space(runtime):
+    ad, _ = runtime
+    row = create(ad)
+    child = spaces.get(row["id"])
+    with spaces.enter(child):
+        core._add_person(core.ADAPTERS["max"], "22", "Участник", "member")
+    spaces.root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES('22',?)", (row["id"],))
+    spaces.root().db.commit()
+    assert spaces.for_user("22") == row["id"]
+    payload = preview(ad, 0, "Основное\n22\n-100\n-")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    assert spaces.for_user("22") == 0
+    assert not spaces.global_admin("22")
+
+
+def test_restart_uses_saved_primary_settings_when_env_channel_ids_are_empty(runtime, monkeypatch, tmp_path):
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+
+    ad, _ = runtime
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    spaces.root().adapters["tg"] = tg.Telegram("123456:ABCDEF", "-200")
+    ad.base_employees = ["77", "78"]
+    core.refresh_people(ad)
+    child = create(ad, telegram="-201")
+    payload = preview(ad, 0, "Название из базы\n22\n-110\n-")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    core._remove_person(ad, "77", "Убрали")
+    target = sqlite3.connect(tmp_path / "drafts.db")
+    spaces.root().db.backup(target)
+    target.close()
+    script = '''import asyncio
+import core, main, spaces
+async def quiet(*args): pass
+core.announce_start = quiet
+main.ops.announce_update_result = quiet
+async def pilot(workers):
+    ad = core.ADAPTERS['max']
+    assert ad.channel == '-110'
+    assert spaces.root().name == 'Название из базы'
+    assert core.is_admin(ad, '22') and not core.is_global_admin(ad, '22')
+    assert core.is_global_admin(ad, '1')
+    assert core.role_of(ad, '77') is None  # stale env must not restore a removed member
+    assert core.role_of(ad, '78') == 'member'
+    assert 'tg' not in core.ADAPTERS
+    assert spaces.get(CHILD).memory['ADAPTERS']['tg'].channel == '-201'
+    assert core.db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+main.serve = pilot
+asyncio.run(main.main())
+'''.replace('CHILD', str(child["id"]))
+    env = {**os.environ, "DATA_DIR": str(tmp_path), "MAX_TOKEN": "test-token", "MAX_CHANNEL": "", "TG_CHANNEL": "",
+           "MAX_ADMINS": "1", "MAX_EMPLOYEES": "77", "TG_TOKEN": "123456:ABCDEF", "LLM_API_KEY": "test-key",
+           "LLM_PROVIDER": "openai", "LLM_BASE_URL": "https://llm.example/v1"}
+    result = subprocess.run([sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
+def test_primary_owner_cannot_view_or_retry_foreign_queue_or_see_global_balance(runtime, monkeypatch, llm):
+    ad, _ = runtime
+    child = create(ad)
+    payload = preview(ad, 0, "Основное\n22\n-100\n-")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    spaces.root().db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('foreign','failed','ЧУЖОЙ_МАТЕРИАЛ',?)", (child["id"],))
+    spaces.root().db.commit()
+    text, _ = run(core.on_menu(ad, "22", "m:inbox"))
+    assert "ЧУЖОЙ_МАТЕРИАЛ" not in text
+    run(core.on_menu(ad, "22", "m:inretry:foreign"))
+    assert spaces.root().db.execute("SELECT state FROM max_inbox WHERE event_key='foreign'").fetchone()[0] == "failed"
+    assert "ЧУЖОЙ_МАТЕРИАЛ" in run(core.on_menu(ad, "1", "m:inbox"))[0]
+    balances = []
+    async def balance():
+        balances.append(True)
+        return "Общий баланс"
+    monkeypatch.setattr(core, "aitunnel_balance", balance)
+    assert "Общий баланс" not in run(core.on_menu(ad, "22", "m:status"))[0]
+    assert not balances
+    assert "Общий баланс" in run(core.on_menu(ad, "1", "m:status"))[0]
+
+
+def test_primary_space_preserves_telegram_username_and_rejects_corrupt_config(runtime, monkeypatch):
+    ad, _ = runtime
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    spaces.root().adapters["tg"] = tg.Telegram("123456:ABCDEF", "@CompanyNews")
+    payload = preview(ad, 0, "Основное\n1\n-100\n@CompanyNews")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    assert spaces.configured_root(spaces.root().db)["tg_channel"] == "@companynews"
+    run(core.on_menu(ad, "1", "m:space_add"))
+    run(core.on_text(ad, "1", "Дубль\n22\n-101\n@COMPANYNEWS"))
+    assert spaces.root().db.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0] == 0
+    spaces.root().db.execute("UPDATE settings SET value='{}' WHERE key='root_workspace'")
+    spaces.root().db.commit()
+    with pytest.raises(ValueError, match="Повреждены"):
+        spaces.configured_root(spaces.root().db)
+
+
+def test_existing_member_becomes_protected_primary_owner_without_global_powers(runtime):
+    ad, _ = runtime
+    core._add_person(ad, "22", "Будущий владелец", "member")
+    payload = preview(ad, 0, "Основное\n22\n-100\n-")
+    assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
+    assert core._person(ad, "22")["role"] == "adm"
+    assert "👑 Будущий владелец" in core.people_view(ad)[0]
+    assert "защищённый" in run(core.on_menu(ad, "1", "m:pdel:22"))[0]
+    assert not spaces.global_admin("22") and not core.is_global_admin(ad, "22")

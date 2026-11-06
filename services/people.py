@@ -16,7 +16,7 @@ def is_global_admin(adapter, uid):
     if adapter.publish_only or spaces.active_id():
         return False
     root = spaces.root().adapters.get("max") if spaces.INSTALLED else adapter
-    return root is adapter and str(uid) in core._base_admins(root)
+    return root is adapter and str(uid) in getattr(root, "global_admins", core._base_admins(root))
 
 
 def is_member(adapter, uid):
@@ -62,7 +62,7 @@ def _base(adapter: core.Adapter) -> tuple[list[str], list[str]]:
 
 def _db_people(adapter: core.Adapter) -> list[dict]:
     rows = core.db.execute("SELECT * FROM people WHERE platform=? ORDER BY created", (adapter.name,)).fetchall()
-    return [{**dict(r), "role": "member" if r["role"] in ("emp", "apr") else r["role"]} for r in rows]
+    return [{**dict(r), "role": "adm" if r["uid"] in core._base_admins(adapter) else "member" if r["role"] in ("emp", "apr") else r["role"]} for r in rows]
 
 
 def _base_admins(adapter: core.Adapter) -> list[str]:
@@ -182,9 +182,9 @@ def people_view(adapter: core.Adapter, page: int = 0) -> tuple[str, list]:
                 icon = "👑" if uid in base_adm else "👤"
                 lines.append(f"{icon} Без имени (id {uid}) — из настроек")
     for p in people:
-        role = "member" if p["role"] in ("emp", "apr") else p["role"]
+        role = "adm" if p["uid"] in base_adm else "member" if p["role"] in ("emp", "apr") else p["role"]
         lines.append(f"{core.ROLE_ICON.get(role, '👤')} {(p['name'] or 'Без имени')[:60]} (id {p['uid']})")
-    suffix = "\n\nНажмите ⚙, чтобы сменить роль или убрать человека. Люди «из настроек» меняются в файле .env."
+    suffix = "\n\nНажмите ⚙, чтобы сменить роль или убрать человека. Защищённый владелец меняется в настройках пространства, главные администраторы — в .env."
     # Reserve the footer and budget UTF-16 consistently with the rest of the UI.
     body = "\n".join(lines).encode("utf-16-le")[:6000].decode("utf-16-le", errors="ignore")
     btns = [(f"⚙ {(p['name'] or p['uid'])[:18]}", f"m:pset:{p['uid']}") for p in people]
@@ -232,6 +232,11 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
     actor = uid
     def arg(i):
         return parts[i] if len(parts) > i else ""
+    if (spaces.INSTALLED and not spaces.active_id() and spaces.configured_root(spaces.root().db)
+            and act in ("pset", "prole", "proleok", "pdel", "pdelok")):
+        target = arg(3) if act in ("prole", "proleok") else arg(2)
+        if target in core._base_admins(adapter):
+            return "Это защищённый владелец или главный администратор. Владелец меняется в настройках пространства, MAX_ADMINS — в .env.", [[("← Люди", "m:people")]]
     if act == "people":
         page = int(arg(2)) if arg(2).isascii() and arg(2).isdigit() and len(arg(2)) < 8 else 0
         return core.people_view(adapter, page)

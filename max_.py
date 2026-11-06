@@ -414,7 +414,7 @@ class Max(core.Adapter):
 
     async def send_menu(self, user_id, text, rows, silent=False):
         if spaces.INSTALLED:
-            name = getattr(spaces.CURRENT.get(), "name", "Основное") if spaces.active_id() else "Основное"
+            name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name
             titled = f"Пространство: {name}\n\n{text}"
             if len(titled.encode("utf-16-le")) // 2 <= 4000:
                 text = titled
