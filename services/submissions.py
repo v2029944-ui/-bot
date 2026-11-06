@@ -17,7 +17,9 @@ def _discard_media(result):
 
 
 async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, source_key=None):
-    """Защита бюджета: не больше RATE_LIMIT_PER_HOUR фото в час от сотрудника (согласующие без лимита)."""
+    """Защита бюджета: не больше RATE_LIMIT_PER_HOUR материалов в час от участника.
+    Администраторы без лимита; повтор обработки одного материала не расходует лимит повторно.
+    """
     if str(author_id) in adapter.approvers:
         return
     if source_key:
@@ -29,7 +31,7 @@ async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, s
     hits = [t for t in core._HITS.get(key, []) if now - t < 3600]
     if len(hits) >= limit:
         core._HITS[key] = hits
-        if now - core._RL_ALERT.get(key, 0) > 3600:  # согласующим пишем не чаще раза в час
+        if now - core._RL_ALERT.get(key, 0) > 3600:  # администраторам пишем не чаще раза в час
             core._RL_ALERT[key] = now
             await core.alert(adapter, f"⚠️ {author_name} отправил больше {limit} фото за час. Новые фото игнорируются.")
         raise core.RateLimited(key)
@@ -41,7 +43,7 @@ async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, s
 
 
 def _approval_adapter(d: dict, fallback: core.Adapter) -> core.Adapter:
-    """Кто согласует: APPROVAL_PLATFORM (если задан), иначе — мессенджер автора."""
+    """Адаптер доставки черновика: APPROVAL_PLATFORM (если задан), иначе — мессенджер автора."""
     approval = core.ADAPTERS.get(os.getenv("APPROVAL_PLATFORM") or d["platform"])
     if approval is not None and approval.publish_only:
         # Сохраняем доступ к старым черновикам из Telegram после перехода в MAX.
@@ -75,7 +77,7 @@ async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
             for admin in getattr(approval, "admins", []):
                 if admin not in recipients and core.can_manage_draft(approval, admin, d):
                     recipients.append(admin)
-            core.log.warning("не удалось отправить черновик %s согласующему %s: %s", did, a, e)
+            core.log.warning("не удалось доставить черновик %s получателю %s: %s", did, a, e)
     if sent:  # от этого момента считаем, сколько черновик ждёт согласования
         core._set(did, last_sent=time.time(), reminded=0)
     return sent, last
@@ -136,11 +138,11 @@ async def _submit(adapter: core.Adapter, author_id: str, author_name: str, text:
     sent, last = await core._send_draft(d, did, post, adapter)
     if not sent:  # иначе черновик-сирота: в базе есть, никто не видел
         if source_key:  # очередь повторит доставку уже готового черновика
-            raise RuntimeError(f"Не удалось отправить черновик согласующим: {core.err(last)}")
+            raise RuntimeError(f"Не удалось доставить черновик получателям: {core.err(last)}")
         core.db.execute("DELETE FROM drafts WHERE id=?", (did,))
         core.db.commit()
         rm()
-        raise RuntimeError(f"Не удалось отправить черновик согласующим: {core.err(last)}")
+        raise RuntimeError(f"Не удалось доставить черновик получателям: {core.err(last)}")
     return did
 
 
@@ -185,11 +187,11 @@ async def _submit_album(adapter, author_id, author_name, text, items, source_key
         sent, last = await core._send_draft(core.get(did), did, post, adapter)
         if not sent:
             if source_key:
-                raise RuntimeError(f"Не удалось отправить черновик согласующим: {core.err(last)}")
+                raise RuntimeError(f"Не удалось доставить черновик получателям: {core.err(last)}")
             core.db.execute("DELETE FROM drafts WHERE id=?", (did,))
             core.db.commit()
             did = None
-            raise RuntimeError(f"Не удалось отправить черновик согласующим: {core.err(last)}")
+            raise RuntimeError(f"Не удалось доставить черновик получателям: {core.err(last)}")
         return did
     finally:
         if did is None:

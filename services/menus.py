@@ -86,7 +86,7 @@ def cancel_input(adapter, uid, payload):
 
 
 def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
-    """/rules, /rule_add, /rule_del — только для согласующих. None = это не наша команда."""
+    """/rules, /rule_add, /rule_del — только для администраторов. None = это не наша команда."""
     cmd, _, arg = text.strip().partition(" ")
     cmd, arg = cmd.split("@")[0].lower(), arg.strip()
     if cmd not in ("/rules", "/rule_add", "/rule_del") or not core.is_admin(adapter, user_id):
@@ -329,7 +329,7 @@ def pending_view(adapter, page=0, uid=None):
 
 
 async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
-    """Текст от согласующего: кнопки нижнего меню, текст нового правила, комментарий к посту, старые команды.
+    """Текст от участника или администратора: кнопки нижнего меню, текст нового правила, комментарий к посту, старые команды.
     True = сообщение обработано."""
     uid, t = str(user_id), text.strip()
     if spaces.INSTALLED and await spaces.settings_input(adapter, uid, t):

@@ -52,7 +52,7 @@ def test_edit_replaces_text_without_llm_and_resends_to_everyone(tg, llm, png):
     d = core.get(did)
     assert d["post"] == "Мой точный текст поста." and d["attempts"] == 2 and d["status"] == "pending"
     assert len(llm.calls) == calls  # нейросеть не вызывалась
-    assert [o for o in tg.sent("approval") if o[3] == "Мой точный текст поста."].__len__() == 2  # обоим согласующим
+    assert [o for o in tg.sent("approval") if o[3] == "Мой точный текст поста."].__len__() == 2  # автору и администратору, выполнившему правку
     assert "заменил черновик" in tg.sent("notify")[-1][2]
     assert "устаревший" in run(core.on_action(tg, "1", "okyes", did, 1))[1]  # старые кнопки погашены
     assert not core.WAITING_EDIT

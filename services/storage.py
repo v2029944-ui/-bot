@@ -16,7 +16,7 @@ def get(did: int):
 
 
 def _claim(did: int, src: str, dst: str) -> bool:
-    """Атомарно меняет статус: защита от двойных нажатий и гонки двух согласующих."""
+    """Атомарно меняет статус: защита от двойных нажатий и одновременных действий автора и администратора."""
     fields = "status=?"
     values: list[str | float] = [dst]
     if dst in ("deleted", "expired"):

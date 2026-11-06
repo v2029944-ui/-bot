@@ -133,7 +133,7 @@ class Adapter:
         from aiogram import Bot
         bot: Bot
     approvers: list[str] = []
-    admins: list[str] = []         # управляют людьми кнопками (MAX_ADMINS); они же согласующие
+    admins: list[str] = []         # администраторы пространства: управляют людьми и постами
     allowed: set[str] | None = None  # кто может присылать фото; None = любой
     publish_only = False             # только публикует в канал: не принимает сообщения и не согласует (Telegram в схеме «всё в MAX»)
 

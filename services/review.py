@@ -215,7 +215,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         scope = " Будут пересозданы все варианты сравнения." if options and comparison.config()["enabled"] else ""
         return False, "✏️ Напишите одним сообщением, что изменить в посте." + scope
 
-    if action == "edit":  # «Править самому»: следующее сообщение согласующего станет текстом поста
+    if action == "edit":  # «Править самому»: следующее сообщение автора или администратора станет текстом поста
         key = (adapter.name, str(user_id))
         core.WAITING_REJECT.pop(key, None)
         core.WAITING.pop(key, None)

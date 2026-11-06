@@ -365,7 +365,7 @@ class Max(core.Adapter):
     async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
         d = core.get(did)
         if not d:  # черновик успели удалить — не роняем рассылку остальным
-            log.warning("черновик %s не найден, отправка согласующему %s пропущена", did, approver)
+            log.warning("черновик %s не найден, доставка получателю %s пропущена", did, approver)
             return
         n = d["attempts"]
         settings = post_footer.for_draft(did)
@@ -605,14 +605,14 @@ class Max(core.Adapter):
             log.warning("лимит материалов: %s", uid)
             if not quiet:
                 await self.notify(uid, "Слишком много материалов за час. Попробуйте позже.")
-        except core.BadImage as e:  # файл не картинка: согласующих не тревожим
+        except core.BadImage as e:  # файл не картинка: администраторов не тревожим
             log.info("неподходящий материал от %s: %s", uid, e)
             await self.notify(uid, f"⚠️ {core.err(e)}. Материал не принят. Исправьте файл и отправьте весь набор заново.")
         except Exception as e:
             log.exception("submit failed")
             if source_key:
                 raise  # очередь повторит временный сбой без повторного запроса сотруднику
-            if quiet:  # сотруднику ничего не пишем, ошибка уходит согласующим
+            if quiet:  # сотруднику ничего не пишем, ошибка уходит администраторам
                 await core.alert(self, f"⚠️ Не удалось обработать материал от {name}: {core.err(e)}")
             else:
                 await self.notify(uid, "⚠️ Не получилось обработать материал. Попробуйте ещё раз позже.")

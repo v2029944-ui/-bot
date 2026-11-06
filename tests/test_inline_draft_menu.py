@@ -15,7 +15,7 @@ def test_change_length_and_back_replace_buttons_under_post(monkeypatch, png, llm
 
         monkeypatch.setattr(adapter, "_upload_image", upload)
         did = await core.submit(adapter, "9", "Анна", "Описание работы", png)
-        # Последняя отправка согласующему — исходный пост.
+        # Последняя доставка получателю — исходный пост.
         original = api.of("POST")[-1][3]
         mid = f"m{api.n}"
         count = len(api.of("POST"))

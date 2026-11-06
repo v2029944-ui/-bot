@@ -139,7 +139,7 @@ def test_publish_only_telegram_does_not_poll_and_gets_every_post(llm, png, monke
     # сотрудник пишет в MAX → согласует MAX → публикация идёт и в MAX, и в Telegram (PUBLISH_TO_ALL не нужен)
     run(core.submit(mx, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
-    assert mx.sent("approval") and not t.bot.calls  # Telegram согласующим ничего не слал
+    assert mx.sent("approval") and not t.bot.calls  # Telegram не доставляет черновики
     ok, msg = run(core.on_action(mx, "5", "okyes", did, 1))
     assert ok and mx.sent("publish") and [c[0] for c in t.bot.calls] == ["send_photo"]
     assert core.get(did)["status"] == "published" and core.get(did)["published_to"] == ""

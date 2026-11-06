@@ -49,7 +49,7 @@ def test_no_deliverable_approver_removes_draft(llm, png):
         async def send_for_approval(self, *a):
             raise RuntimeError("чат не найден")
     core.ADAPTERS["tg"] = Broken()
-    with pytest.raises(RuntimeError, match="согласующим"):
+    with pytest.raises(RuntimeError, match="Не удалось доставить черновик получателям"):
         run(core.submit(core.ADAPTERS["tg"], "9", "Вася", "x", png))
     assert core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
 

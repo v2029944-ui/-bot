@@ -24,7 +24,7 @@ def confirm_mode() -> str:
 
 
 async def alert(adapter: core.Adapter, text: str):
-    """Сообщение об ошибке — согласующим, а не сотруднику. С троттлингом: сломанный ключ LLM
+    """Сообщение об ошибке — администраторам. С троттлингом: сломанный ключ LLM
     не превращается в поток сообщений на каждое фото."""
     text = core.redact(text)
     key = text[:60]
@@ -42,7 +42,7 @@ async def alert(adapter: core.Adapter, text: str):
 
 
 def staff(adapter: core.Adapter) -> list[str]:
-    """Кому писать о состоянии бота: администраторам, а если их нет — согласующим."""
+    """О состоянии бота сообщаем администраторам; адаптер публикации не получает уведомлений."""
     if getattr(adapter, "publish_only", False):
         return []
     return list(getattr(adapter, "admins", None) or [])
@@ -192,7 +192,8 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
 
 
 async def remind_once(now: float | None = None) -> int:
-    """Если черновик ждёт дольше REMIND_AFTER_MIN минут (0 — выключено), один раз напоминаем согласующим.
+    """Если черновик ждёт дольше REMIND_AFTER_MIN минут (0 — выключено), один раз напоминаем автору.
+    Для старых черновиков Telegram и авторов без доступа получатели — администраторы пространства.
     Возвращает число черновиков, о которых напомнили."""
     now = now or time.time()
     after = float(core.env("REMIND_AFTER_MIN", "180")) * 60
