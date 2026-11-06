@@ -7,8 +7,11 @@ import signal
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
+import configuration
 import core
+import schema
 
 log = core.log
 REPO_DIR = Path(__file__).resolve().parent
@@ -19,6 +22,7 @@ core.db.execute("""CREATE TABLE IF NOT EXISTS prefs (
 # черновики, которые ждут начала рабочего времени у тех, кто выбрал режим «отложить»
 core.db.execute("""CREATE TABLE IF NOT EXISTS deferred (
     platform TEXT, uid TEXT, did INTEGER, created REAL, PRIMARY KEY (platform, uid, did))""")
+schema.add_columns(core.db, "deferred", ("lease_until REAL DEFAULT 0",))
 core.db.commit()
 
 
@@ -107,6 +111,8 @@ def _days() -> set[int]:
 
 def config_problem() -> str | None:
     """Проверка настроек времени при запуске: ошибка видна сразу, а не как «черновики не приходят»."""
+    if problem := configuration.validate():
+        return problem
     if core.env("MATERIAL_WORKERS", "2") not in ("1", "2"):
         return "MATERIAL_WORKERS: укажите 1 или 2 обработчика материалов."
     raw_h = core.env("NOTIFY_HOURS", "10-18")
@@ -202,7 +208,8 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
     """Доставляем придержанные черновики тем, у кого уже началось рабочее время (или сменился режим).
     Запись удаляется только когда черновик закончил жизнь; пока он публикуется или пересоздаётся — ждём."""
     now = now or time.time()
-    sql, args = "SELECT * FROM deferred", ()
+    args: tuple[Any, ...] = ()
+    sql = "SELECT * FROM deferred"
     if adapter is not None and uid is not None:
         sql, args = sql + " WHERE platform=? AND uid=?", (adapter.name, str(uid))
     # Old deferred broadcasts may target former reviewers. Reassign those deliveries
@@ -227,18 +234,24 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
         mode = delivery_for(ad, r["uid"], now)
         if mode == "defer":
             continue
-        # забираем запись ДО отправки: цикл напоминаний и смена режима не пришлют один черновик дважды
-        cur = core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?", key)
+        # A durable lease prevents concurrent delivery without deleting its retry record.
+        lease = now + 600
+        cur = core.db.execute("UPDATE deferred SET lease_until=? WHERE platform=? AND uid=? AND did=? AND COALESCE(lease_until,0)<=?", (lease, *key, now))
         core.db.commit()
         if cur.rowcount != 1:
             continue
         try:
-            kw = {"silent": True} if mode == "silent" else {}
+            kw: dict[str, Any] = {"silent": True} if mode == "silent" else {}
             await ad.send_for_approval(r["uid"], d["id"], d["photo"], d["post"], **kw, **core.media_kw(d))
-        except Exception:
+        except BaseException as exc:
+            core.db.execute("UPDATE deferred SET lease_until=0 WHERE platform=? AND uid=? AND did=? AND lease_until=?", (*key, lease))
+            core.db.commit()
+            if not isinstance(exc, Exception):
+                raise
             log.warning("не удалось доставить отложенный черновик %s человеку %s", r["did"], r["uid"], exc_info=True)
-            enqueue(ad, r["uid"], d["id"])  # вернём в очередь: попробуем в следующий круг
             continue
+        core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=? AND lease_until=?", (*key, lease))
+        core.db.commit()
         core._set(d["id"], last_sent=now, reminded=0)  # напоминание считаем от фактической доставки
         done += 1
     return done
@@ -286,8 +299,8 @@ async def _git(*args: str, timeout: int = 60) -> tuple[int, str]:
             "git", *args, cwd=REPO_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=os.name == "posix")
         out, _ = await asyncio.wait_for(p.communicate(), timeout)
-        return p.returncode, scrub(out.decode("utf-8", "replace")).strip()
-    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        return p.returncode or 0, scrub(out.decode("utf-8", "replace")).strip()
+    except (TimeoutError, asyncio.CancelledError) as exc:
         if p is not None:
             if os.name == "posix" or p.returncode is None:
                 try:

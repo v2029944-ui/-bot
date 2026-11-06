@@ -1,13 +1,14 @@
 """Приём материалов и доставка на согласование."""
-import core
 import json
 import os
 import time
 from pathlib import Path
+
 import comparison
-import spaces
-import resources
+import core
 import ops
+import resources
+import spaces
 
 
 def _discard_media(result):
@@ -111,7 +112,9 @@ async def _submit(adapter: core.Adapter, author_id: str, author_name: str, text:
     else:
         vpath, path = "", await resources.media(core.save_photo, photo_bytes, discard=_discard_media)  # BadImage — файл не картинка
     files = [path, vpath] if vpath else [path]
-    rm = lambda: [Path(f).unlink(missing_ok=True) for f in files]
+    def rm():
+        for filename in files:
+            Path(filename).unlink(missing_ok=True)
     try:
         await core._check_rate(adapter, author_id, author_name, source_key)  # лимит считаем только за валидные файлы
     except BaseException:
@@ -153,7 +156,9 @@ async def submit_album(adapter: core.Adapter, author_id: str, author_name: str, 
 async def _submit_album(adapter, author_id, author_name, text, items, source_key=None):
     if (existing := await core.resume_submission(adapter, source_key)) is not None:
         return existing
-    media, files, did = [], set(), None
+    media = []
+    files: set[str] = set()
+    did = None
     try:
         for item in items:
             if item["type"] == "video":

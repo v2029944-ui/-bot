@@ -1,10 +1,11 @@
 import asyncio
 import threading
 
+from conftest import run
+
 import core
 import max_queue
 import resources
-from conftest import run
 
 
 def event(mid, sid):

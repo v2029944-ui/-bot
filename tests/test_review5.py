@@ -7,10 +7,10 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import FakeAdapter, draft_id, run
 
 import core
 import ops
-from conftest import FakeAdapter, draft_id, run
 
 ROOT = Path(__file__).resolve().parents[1]
 REAL_SLEEP = asyncio.sleep
@@ -41,7 +41,8 @@ def test_days_can_wrap_through_sunday(monkeypatch):
         monkeypatch.setenv("NOTIFY_DAYS", raw)
         assert ops._days() == expected and ops.config_problem() is None, raw
     monkeypatch.setenv("NOTIFY_DAYS", "6-2")
-    day = lambda d: datetime.datetime(2026, 11, d, 12, 0, tzinfo=datetime.timezone.utc).timestamp()
+    def day(d):
+        return datetime.datetime(2026, 11, d, 12, 0, tzinfo=datetime.UTC).timestamp()
     # 7 ноября 2026 — суббота
     assert [ops.in_window(day(d)) for d in (7, 8, 9, 10, 11)] == [True, True, True, True, False]
     assert "сб" in ops.window_text()
@@ -60,7 +61,7 @@ class SlowPublish(FakeAdapter):
 
 
 def test_shutdown_waits_for_publish_in_progress(llm, png, monkeypatch):
-    ad = SlowPublish("tg", ["1", "2"])
+    ad = SlowPublish("tg", ["1", "2"], admins=["1", "2"])
     core.ADAPTERS["tg"] = ad
     run(core.submit(ad, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
@@ -129,8 +130,8 @@ def test_iphone_48mp_heif_is_allowed_but_huge_png_is_not():
 
 # ---------- закреплённые версии ----------
 def test_direct_dependencies_are_pinned_so_rollback_can_downgrade():
-    lines = [l.split("#")[0].strip() for l in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()]
-    reqs = [l for l in lines if l]
+    lines = [line.split("#")[0].strip() for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()]
+    reqs = [line for line in lines if line]
     unpinned = [r for r in reqs if "==" not in r and not r.startswith("tzdata")]
     assert reqs and not unpinned, f"версии не закреплены (откат библиотек не сработает): {unpinned}"
 

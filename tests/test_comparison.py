@@ -2,11 +2,11 @@ import json
 
 import httpx
 import pytest
+from conftest import run
 
 import comparison
 import core
 import ops
-from conftest import run
 
 MODELS = ["gpt-4.1-mini", "claude-sonnet-4.6", "gemini-2.5-flash"]
 CATALOG = {m: {"modalities": {"input": ["text", "image"], "output": ["text"]}, "prompt_cost": 10, "completion_cost": 20} for m in MODELS}
@@ -104,7 +104,7 @@ def test_failed_model_does_not_discard_other_candidates(mx, png, llm):
 
 
 def test_real_max_shows_labels_and_selection_buttons(monkeypatch, png, llm):
-    from test_admin_menu_button import Api, make, buttons
+    from test_admin_menu_button import Api, buttons, make
 
     async def scenario():
         enable()

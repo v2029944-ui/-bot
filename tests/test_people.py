@@ -1,13 +1,14 @@
 """Добавление людей кнопками: заявки, добавление по ID, удаление, права. Без сети."""
 import time
 
-import core
 import pytest
 from conftest import FakeAdapter, run
 
+import core
+
 
 def make(admins=("1",), approvers=("1", "2")):
-    a = FakeAdapter("tg", list(approvers))
+    a = FakeAdapter("tg", list(approvers), admins=list(approvers))
     a.admins = list(admins)
     core.ADAPTERS["tg"] = a
     core.refresh_people(a)
@@ -78,9 +79,9 @@ def test_remove_needs_confirm_and_blocks_reappearing_request():
     run(core.unknown_user(a, "77", "Иван"))
     menu(a, "1", "m:acc:emp:77")
     text, rows = menu(a, "1", "m:pdel:77")
-    assert "Убрать Иван" in text and ("Да, убрать", "m:pdelok:77") in rows[0]
+    assert "Убрать Иван" in text and rows[0][0][1].startswith("m:pdelok:77:")
     assert "77" in a.allowed  # пока не подтвердили — человек на месте
-    menu(a, "1", "m:pdelok:77")
+    menu(a, "1", rows[0][0][1])
     assert "77" not in a.allowed
     assert run(core.unknown_user(a, "77", "Иван")) is False  # сам заявкой не вернётся
 
@@ -103,7 +104,7 @@ def test_pending_requests_are_capped(monkeypatch):
 
 
 def test_without_admins_nothing_changes():
-    a = FakeAdapter("tg", ["1"])
+    a = FakeAdapter("tg", ["1"], admins=["1"])
     a.admins = []
     core.refresh_people(a)
     assert a.allowed == {"1"}  # известные участники из старых настроек

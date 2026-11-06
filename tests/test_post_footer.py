@@ -1,10 +1,9 @@
-import json
 
 import pytest
+from conftest import FakeAdapter, run
 
 import core
 import post_footer
-from conftest import FakeAdapter, run
 
 
 def test_admin_can_configure_enable_and_disable_link(mx):
@@ -28,7 +27,7 @@ def test_unsafe_addresses_rejected(value):
 
 
 def test_footer_snapshot_does_not_change_during_partial_retry(mx, llm, png):
-    tg = FakeAdapter("tg", [], fail=[ValueError("Отказ")], sure=(ValueError,))
+    tg = FakeAdapter("tg", [], fail=[ValueError("Отказ")], sure=(ValueError,), admins=[])
     tg.publish_only = True
     core.ADAPTERS["tg"] = tg
     settings = {"enabled": True, "text": "A & B", "max": "https://max.ru/bot", "tg": "https://t.me/bot"}

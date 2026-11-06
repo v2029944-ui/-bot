@@ -1,9 +1,10 @@
 import asyncio
 
-import core
-import max_actions
 from conftest import run
 from test_background_actions import event
+
+import core
+import max_actions
 
 
 def test_large_emoji_rules_list_fits_both_platform_limits(tg):

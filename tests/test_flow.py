@@ -1,8 +1,9 @@
 """Основной сценарий: фото -> пост -> согласование -> публикация / правка / удаление."""
 from pathlib import Path
 
-import core
 from conftest import run
+
+import core
 
 
 def test_submit_sends_draft_only_to_author(tg, llm, png):

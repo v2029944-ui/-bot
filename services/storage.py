@@ -1,9 +1,13 @@
 """Хранилище и очистка черновиков."""
-import core
 import time
 from pathlib import Path
-import spaces
+
+import core
 import dialog_state
+import spaces
+
+TERMINAL_TEXT_TTL = 7 * 86400
+CLEANUP_BATCH = 200
 
 
 def get(did: int):
@@ -19,6 +23,10 @@ def _claim(did: int, src: str, dst: str) -> bool:
 
 
 def _set(did: int, **f):
+    if "status" in f:
+        f.setdefault("cleaned", 0)
+        if f["status"] in ("deleted", "expired"):
+            f.setdefault("closed_at", time.time())
     core.db.execute(f"UPDATE drafts SET {', '.join(k + '=?' for k in f)} WHERE id=?", (*f.values(), did))
     core.db.commit()
 
@@ -46,26 +54,37 @@ def housekeeping() -> int:
     стираем оставшиеся файлы опубликованных/удалённых/просроченных постов и файлы-сироты (которых нет ни в одном черновике).
     Вызывается при старте и периодически (HOUSEKEEPING_SEC). Возвращает число закрытых черновиков."""
     dialog_state.cleanup(core.db)
+    core.db.execute("DELETE FROM requests WHERE created<?", (time.time() - core.REQ_TTL,))
+    core.db.commit()
     expired = 0
     ttl = int(core.env("DRAFT_TTL_DAYS", "7"))  # 0 — не закрывать
     if ttl > 0:
         for r in core.db.execute("SELECT * FROM drafts WHERE status='pending' AND "
-                            "COALESCE(published_to,'')='' AND COALESCE(NULLIF(last_sent,0), created) < ?", (time.time() - ttl * 86400,)).fetchall():
+                            "COALESCE(published_to,'')='' AND COALESCE(NULLIF(last_sent,0), created) < ? ORDER BY id LIMIT ?", (time.time() - ttl * 86400, CLEANUP_BATCH)).fetchall():
             for path in core.draft_files(dict(r)):
                 core._unlink(path)
-            core.clear_source_cache(dict(r))
-            core.db.execute("UPDATE drafts SET status='expired' WHERE id=?", (r["id"],))
+            core.clear_source_cache(dict(r), commit=False)
+            core.db.execute("UPDATE drafts SET status='expired',closed_at=?,cleaned=0 WHERE id=?", (time.time(), r["id"]))
             expired += 1
         core.db.commit()
         if expired:
             core.log.warning("Закрыто черновиков без решения (старше %s дн.): %s", ttl, expired)
-    for r in core.db.execute("SELECT * FROM drafts WHERE status IN ('published','deleted','expired')").fetchall():
-        for path in core.draft_files(dict(r)):
+    cutoff = time.time() - TERMINAL_TEXT_TTL
+    rows = core.db.execute("SELECT * FROM drafts WHERE status IN ('published','deleted','expired') AND "
+                           "(cleaned=0 OR (cleaned=1 AND COALESCE(NULLIF(closed_at,0),created)<?)) "
+                           "ORDER BY id LIMIT ?", (cutoff, CLEANUP_BATCH)).fetchall()
+    for row in rows:
+        d = dict(row)
+        for path in core.draft_files(d):
             core._unlink(path)
-        core.clear_source_cache(dict(r))
-        if r["status"] == "published":
-            core.scrub_published(dict(r))
-    known = {p for r in core.db.execute("SELECT * FROM drafts") for p in core.draft_files(dict(r))}
+        core.clear_source_cache(d, commit=False)
+        if d["status"] == "published" or (d.get("closed_at") or d["created"] or 0) < cutoff:
+            _scrub_terminal(d)
+        else:
+            core.db.execute("UPDATE drafts SET cleaned=1,photo='',video='',media='[]' WHERE id=?", (d["id"],))
+    core.db.commit()
+    spaces.queue_db().commit()
+    known = {p for r in core.db.execute("SELECT photo,video,media FROM drafts WHERE status IN ('pending','publishing','regenerating')") for p in core.draft_files(dict(r))}
     for folder in (core.PHOTOS, core.VIDEOS):
         for f in folder.glob("*"):  # файл моложе часа может принадлежать материалу, который сейчас обрабатывается
             try:
@@ -77,6 +96,16 @@ def housekeeping() -> int:
     return expired
 
 
+def cleanup_pending() -> bool:
+    cutoff = time.time() - TERMINAL_TEXT_TTL
+    if core.db.execute("SELECT 1 FROM drafts WHERE status IN ('published','deleted','expired') AND "
+                       "(cleaned=0 OR (cleaned=1 AND COALESCE(NULLIF(closed_at,0),created)<?)) LIMIT 1", (cutoff,)).fetchone():
+        return True
+    ttl = int(core.env("DRAFT_TTL_DAYS", "7"))
+    return ttl > 0 and core.db.execute("SELECT 1 FROM drafts WHERE status='pending' AND COALESCE(published_to,'')='' "
+                                     "AND COALESCE(NULLIF(last_sent,0),created)<? LIMIT 1", (time.time() - ttl * 86400,)).fetchone() is not None
+
+
 def _unlink(path):
     try:
         Path(path or "").unlink(missing_ok=True)
@@ -84,33 +113,39 @@ def _unlink(path):
         core.log.warning("не удалось удалить фото %s", path, exc_info=True)
 
 
-def clear_source_cache(d):
+def clear_source_cache(d, commit=True):
     for adapter in core.ADAPTERS.values():
         if forget := getattr(adapter, "forget_uploads", None):
             forget(core.draft_files(d))
     if core.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_button_cache'").fetchone():
         core.db.execute("DELETE FROM max_button_cache WHERE mid IN (SELECT mid FROM max_draft_ui WHERE did=?)", (d["id"],))
-        core.db.commit()
+        if commit:
+            core.db.commit()
     if d.get("source_key"):
         import max_queue
         max_queue.clear_cache(d["source_key"])
 
 
 def scrub_published(d):
+    _scrub_terminal(d)
+    core.db.commit()
+    spaces.queue_db().commit()
+
+
+def _scrub_terminal(d):
     """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
     core.db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
                   photo='',video='',media='[]',published_to='',publish_errors='{}',publication_channels='{}',
-                  post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0
-                  WHERE id=? AND status='published'""", (d["id"],))
+                  post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0,cleaned=2
+                  WHERE id=? AND status IN ('published','deleted','expired')""", (d["id"],))
     if d.get("source_key"):
         queue = spaces.queue_db()
         queue.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))
-        queue.commit()
-    core.db.commit()
 
 
 def startup():
     """При старте: возвращаем «зависшие» после сбоя черновики в работу и убираем старое."""
+    core.db.execute("UPDATE deferred SET lease_until=0 WHERE lease_until!=0")
     n = core.db.execute("UPDATE drafts SET status='pending' WHERE status IN ('publishing','regenerating')").rowcount
     core.db.commit()
     if n:

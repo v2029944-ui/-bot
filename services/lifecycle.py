@@ -1,7 +1,8 @@
 """Защита текущих операций и остановка."""
-import core
 import asyncio
 import time
+
+import core
 
 
 async def _guard(coro):

@@ -2,9 +2,9 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import FakeAdapter, run
 
 import core
-from conftest import FakeAdapter, run
 
 
 def draft(mx, png, text="Установили новый насос"):
@@ -87,7 +87,7 @@ def test_expiry_warning_skips_terminal_and_disabled_ttl(mx, llm, png, monkeypatc
 
 
 def test_per_channel_status_retry_and_manual_confirmation(mx, llm, png):
-    tg = FakeAdapter("tg", [], fail=[TimeoutError("Потерян ответ")])
+    tg = FakeAdapter("tg", [], fail=[TimeoutError("Потерян ответ")], admins=[])
     tg.publish_only = True
     core.ADAPTERS["tg"] = tg
     did = draft(mx, png)
@@ -103,7 +103,7 @@ def test_per_channel_status_retry_and_manual_confirmation(mx, llm, png):
 
 
 def test_definite_failure_status_and_retry_only_remaining_channel(mx, llm, png):
-    tg = FakeAdapter("tg", [], fail=[ValueError("Нет прав")], sure=(ValueError,))
+    tg = FakeAdapter("tg", [], fail=[ValueError("Нет прав")], sure=(ValueError,), admins=[])
     tg.publish_only = True
     core.ADAPTERS["tg"] = tg
     did = draft(mx, png)

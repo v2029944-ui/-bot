@@ -2,13 +2,14 @@
 import time
 
 import pytest
+from conftest import FakeAdapter, run
+
 import core
 import ops
-from conftest import FakeAdapter, run
 
 
 def members():
-    ad = FakeAdapter('max', ['1', '2'])
+    ad = FakeAdapter('max', ['1', '2'], admins=['1', '2'])
     ad.admins = ['1']
     ad.base_employees = ['9', '8']
     core.ADAPTERS['max'] = ad

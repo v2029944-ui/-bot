@@ -4,10 +4,10 @@ import time
 import types
 
 import pytest
+from conftest import FakeAdapter, draft_id, run
 
 import core
 import tg as tgmod
-from conftest import FakeAdapter, draft_id, run
 
 S = types.SimpleNamespace
 
@@ -116,7 +116,7 @@ def test_learning_can_be_disabled(tg, llm, png, monkeypatch):
 
 # мелочи: протухшие заявки и «сиротские» токены
 def test_stale_pending_requests_do_not_block_new_people(monkeypatch):
-    a = FakeAdapter("tg", ["1"])
+    a = FakeAdapter("tg", ["1"], admins=["1"])
     a.admins = ["1"]
     core.ADAPTERS["tg"] = a
     core.refresh_people(a)

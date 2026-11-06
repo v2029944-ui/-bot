@@ -1,9 +1,9 @@
 """Общие ограничения тяжёлых операций для всех пространств одного процесса."""
 import asyncio
-from contextlib import asynccontextmanager
 import weakref
+from contextlib import asynccontextmanager
 
-_loops = weakref.WeakKeyDictionary()
+_loops: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, weakref.WeakValueDictionary[str, asyncio.Semaphore]] = weakref.WeakKeyDictionary()
 
 
 @asynccontextmanager

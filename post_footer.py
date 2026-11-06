@@ -1,12 +1,15 @@
 """Управляемая администратором ссылка в опубликованных постах."""
 import html
 import json
+from collections.abc import MutableMapping
+from typing import Any
 from urllib.parse import urlsplit
 
-WAITING = {}
+WAITING: MutableMapping[tuple[str, str], Any] = {}
 
 
 class LinkedPost(str):
+    plain: str
     def __new__(cls, markup, plain):
         obj = super().__new__(cls, markup)
         obj.plain = plain

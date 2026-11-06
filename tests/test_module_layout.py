@@ -1,10 +1,10 @@
 """Штатный набор COPY Docker должен включать все сервисы, а не зависеть от cwd репозитория."""
 import os
-from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def test_docker_sources_import_without_repository_on_pythonpath(tmp_path):

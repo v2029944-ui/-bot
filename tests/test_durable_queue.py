@@ -1,15 +1,14 @@
 import asyncio
-import json
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
+from conftest import run
 
 import core
 import max_
 import max_queue
-from conftest import run
 
 
 def event(mid="message-1", count=1):

@@ -1,7 +1,7 @@
 import pytest
+from conftest import run
 
 import core
-from conftest import run
 
 
 @pytest.mark.parametrize("action", ["redo", "len_short", "len_long"])

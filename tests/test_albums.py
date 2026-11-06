@@ -1,5 +1,4 @@
 """Альбомы: весь набор проходит согласование и публикацию как один черновик."""
-import asyncio
 import os
 import sqlite3
 import subprocess
@@ -9,12 +8,12 @@ from pathlib import Path
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendMessage
+from conftest import FakeAdapter, run
 
 import core
 import max_
 import ops
 import tg as telegram
-from conftest import FakeAdapter, run
 
 
 @pytest.fixture(scope="module")
@@ -88,7 +87,7 @@ def test_mixed_album_max_approval_and_both_channels(png, clip, llm, monkeypatch)
 
 
 def test_album_edit_regenerate_show_deferred_and_delete(png, llm):
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS["max"] = mx
     did = run(core.submit_album(mx, "9", "Анна", "Заменили насос", photos(png)))
     media = core.draft_media(core.get(did))
@@ -110,7 +109,7 @@ def test_album_edit_regenerate_show_deferred_and_delete(png, llm):
 
 @pytest.mark.parametrize("failure", ["invalid_file", "llm", "approval"])
 def test_failed_album_leaves_no_files_or_draft(png, llm, failure):
-    mx = FakeAdapter("max", [] if failure == "approval" else ["5"])
+    mx = FakeAdapter("max", [] if failure == "approval" else ["5"], admins=[] if failure == "approval" else ["5"])
     core.ADAPTERS["max"] = mx
     if failure == "approval":
         async def broken(*a, **kw):
@@ -129,7 +128,7 @@ def test_failed_album_leaves_no_files_or_draft(png, llm, failure):
 
 
 def test_album_housekeeping_protects_active_media_then_expires(png, llm):
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS["max"] = mx
     did = run(core.submit_album(mx, "9", "Анна", "Заменили насос", photos(png)))
     paths = core.draft_files(core.get(did))
@@ -143,7 +142,7 @@ def test_album_housekeeping_protects_active_media_then_expires(png, llm):
 
 
 def test_partial_telegram_album_requires_confirmation_and_does_not_repeat_max(png, llm):
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     tg = telegram.Telegram("123456:ABCDEF", "@channel")
     tg.bot = RecordingBot(fail_text=True)
     core.ADAPTERS.update(max=mx, tg=tg)
@@ -161,14 +160,14 @@ def test_partial_telegram_album_requires_confirmation_and_does_not_repeat_max(pn
 @pytest.mark.parametrize("count", [0, 1, 11])
 def test_album_count_limits(count, png, llm):
     with pytest.raises(core.BadImage):
-        run(core.submit_album(FakeAdapter("max", ["5"]), "9", "Анна", "Описание", photos(png, count)))
+        run(core.submit_album(FakeAdapter("max", ["5"], admins=["5"]), "9", "Анна", "Описание", photos(png, count)))
     assert not llm.calls
 
 
 def test_album_total_size_limit(png, llm, monkeypatch):
     monkeypatch.setattr(core, "MAX_ALBUM_BYTES", len(png))
     with pytest.raises(core.BadImage):
-        run(core.submit_album(FakeAdapter("max", ["5"]), "9", "Анна", "Описание", photos(png)))
+        run(core.submit_album(FakeAdapter("max", ["5"], admins=["5"]), "9", "Анна", "Описание", photos(png)))
     assert not llm.calls
 
 
@@ -212,7 +211,7 @@ def test_old_database_migrates_without_losing_single_draft(tmp_path):
 
 
 def test_ten_photos_are_kept_and_sent_as_one_telegram_group(png, llm):
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     tg = telegram.Telegram("123456:ABCDEF", "@channel")
     tg.bot = RecordingBot()
     core.ADAPTERS.update(max=mx, tg=tg)
@@ -226,5 +225,5 @@ def test_converted_album_size_limit_also_cleans_files(png, llm, monkeypatch):
     monkeypatch.setattr(core, "MAX_ALBUM_BYTES", len(png) * 2 + 1)
     before = files()
     with pytest.raises(core.BadImage, match="После обработки"):
-        run(core.submit_album(FakeAdapter("max", ["5"]), "9", "Анна", "Описание", photos(png)))
+        run(core.submit_album(FakeAdapter("max", ["5"], admins=["5"]), "9", "Анна", "Описание", photos(png)))
     assert files() == before and not llm.calls

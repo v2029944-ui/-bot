@@ -6,21 +6,21 @@ import subprocess
 import sys
 import time
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from conftest import FakeAdapter, draft_id, run
 
 import core
 import ops
-from conftest import FakeAdapter, draft_id, run
 
 S = types.SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def admin_adapter(name="tg", approvers=("1", "2"), admins=("1",)):
-    a = FakeAdapter(name, list(approvers))
+    a = FakeAdapter(name, list(approvers), admins=list(approvers))
     a.admins = list(admins)
     core.ADAPTERS[name] = a
     core.refresh_people(a)
@@ -29,7 +29,7 @@ def admin_adapter(name="tg", approvers=("1", "2"), admins=("1",)):
 
 def ts(y, m, d, h, tz_hours=5):
     """Метка времени для локального часа в часовом поясе UTC+tz_hours (Екатеринбург = +5)."""
-    return datetime(y, m, d, h - tz_hours, 0, tzinfo=timezone.utc).timestamp()
+    return datetime(y, m, d, h - tz_hours, 0, tzinfo=UTC).timestamp()
 
 
 # ---------- рабочее окно ----------
@@ -88,7 +88,7 @@ def test_menu_lets_every_approver_choose_mode():
 def test_draft_goes_silent_outside_hours_and_waits_in_defer_mode(tg, llm, png, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
     ops.set_mode(tg, "9", "silent")
-    did = run(core.submit(tg, "9", "Анна", "Заменили масло", png))
+    run(core.submit(tg, "9", "Анна", "Заменили масло", png))
     assert [o[1] for o in tg.sent("approval")] == ["9"] and tg.sent("silent")
     ops.set_mode(tg, "9", "defer")
     did2 = run(core.submit(tg, "9", "Анна", "Заменили фильтр", png))
@@ -105,7 +105,7 @@ def test_deferred_draft_is_dropped_if_resolved_and_sent_at_once_when_mode_change
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
     ops.set_mode(a, "9", "defer")
     run(core.submit(a, "9", "Анна", "Заменили масло и фильтры", png))
-    did = draft_id()
+    draft_id()
     run(core.on_menu(a, "9", "m:nset:normal"))  # передумал: всё придержанное приходит сразу
     assert [o[1] for o in a.sent("approval")] == ["9"]
 
@@ -134,7 +134,7 @@ def test_reminders_respect_mute_and_pause(tg, llm, png, monkeypatch):
     monkeypatch.setenv("NOTIFY_HOURS", "0-24")
     monkeypatch.setenv("NOTIFY_DAYS", "1-7")
     run(core.submit(tg, "9", "Анна", "Заменили масло и фильтры", png))
-    did = draft_id()
+    draft_id()
     t = time.time() - 4 * 3600
     core.db.execute("UPDATE drafts SET created=?, last_sent=?", (t, t))
     core.db.commit()
@@ -170,13 +170,14 @@ def test_admin_changes_roles_with_confirmation():
     text, rows = run(core.on_menu(a, "1", "m:pset:77"))
     assert "сейчас: участник" in text and [b[1] for b in rows[0]] == ["m:prole:member:77", "m:prole:adm:77"]
     text, rows = run(core.on_menu(a, "1", "m:prole:adm:77"))
-    assert "администратор" in text and rows[0][0][1] == "m:proleok:adm:77" and "добавляет и убирает людей" in text
+    assert "администратор" in text and rows[0][0][1].startswith("m:proleok:adm:77:") and "добавляет и убирает людей" in text
     assert "77" not in a.admins  # без подтверждения ничего не изменилось
-    run(core.on_menu(a, "1", "m:proleok:adm:77"))
+    run(core.on_menu(a, "1", rows[0][0][1]))
     assert "77" in a.admins and "77" in a.approvers and core.role_of(a, "77") == "adm"
     assert any(o[1] == "77" and "роль изменена" in o[2] for o in a.sent("notify"))
     assert is_admin_menu_visible(a, "77")
-    run(core.on_menu(a, "77", "m:proleok:apr:77"))  # сам себя понизил: другой админ остался
+    _, rows = run(core.on_menu(a, "77", "m:prole:member:77"))
+    run(core.on_menu(a, "77", rows[0][0][1]))  # сам себя понизил: другой админ остался
     assert "77" not in a.admins and "77" in a.allowed and "77" not in a.approvers
 
 
@@ -196,7 +197,7 @@ def test_cannot_demote_last_admin_and_env_people_are_fixed():
     b = admin_adapter("max", approvers=("5",), admins=("5",))
     text, rows = run(core.on_menu(b, "5", "m:people"))
     assert "id 5) — из настроек" in text and not any("m:pset:5" == x[1] for r in rows for x in r)
-    assert run(core.on_menu(b, "5", "m:proleok:emp:5"))[0].startswith("👥")  # такого человека нет в базе
+    assert "подтверждение больше не действует" in run(core.on_menu(b, "5", "m:proleok:emp:5"))[0]  # такого человека нет в базе
 
 
 # ---------- обновление ----------
@@ -488,7 +489,7 @@ def test_failed_dependency_install_forces_resync_after_rollback(sandbox):
         f'echo "$*" >> {shlex.quote(str(pip_log))}\n'
         f'if [ ! -f {shlex.quote(str(first))} ]; then touch {shlex.quote(str(first))}; exit 1; fi\n'
         'exit 0\n')
-    p, calls = run_entry(sandbox, [1, 0], {'GITHUB_REPO': 'file:///x', 'CODE_DIR': str(code)})
+    p, calls = run_entry(sandbox, [0], {'GITHUB_REPO': 'file:///x', 'CODE_DIR': str(code)})
     assert p.returncode == 0
     assert any('--rollback' in call for call in calls)
     assert len(pip_log.read_text().splitlines()) == 2

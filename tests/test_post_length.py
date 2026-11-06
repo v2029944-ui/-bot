@@ -1,9 +1,9 @@
 import asyncio
 
 import pytest
+from conftest import run
 
 import core
-from conftest import run
 
 
 def draft(mx, png):

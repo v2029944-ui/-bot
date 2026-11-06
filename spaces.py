@@ -1,20 +1,42 @@
 """Изолированные рабочие пространства одного бота. Основная база остаётся пространством 0."""
 import asyncio
-from collections.abc import MutableMapping
-from contextlib import contextmanager
 import contextvars
 import json
-from pathlib import Path
 import sqlite3
 import time
-import dialog_state
+from collections.abc import MutableMapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-CURRENT = contextvars.ContextVar("workspace", default=None)
+import dialog_state
+import schema
+
+if TYPE_CHECKING:
+    from core import Adapter
+
+
+@dataclass
+class Root:
+    db: schema.Connection
+    folder: Path
+    adapters: MutableMapping[str, "Adapter"]
+    memories: dict[str, Any]
+
+
+def root() -> Root:
+    if ROOT is None:
+        raise RuntimeError("Рабочие пространства ещё не инициализированы")
+    return ROOT
+
+
+CURRENT: contextvars.ContextVar[Any] = contextvars.ContextVar("workspace", default=None)
 INSTALLED = False
-ROOT = None
-OPEN = {}
-WAITING_CREATE = set()
-WAITING_MEMBER = set()
+ROOT: Root | None = None
+OPEN: dict[int, Any] = {}
+WAITING_CREATE: set[str] = set()
+WAITING_MEMBER: set[tuple[int, str]] = set()
 
 
 class Mapping(MutableMapping):
@@ -43,13 +65,13 @@ class Set:
 
 class Database:
     def __getattr__(self, name):
-        return getattr(CURRENT.get().db if CURRENT.get() else ROOT.db, name)
+        return getattr(CURRENT.get().db if CURRENT.get() else root().db, name)
 
 
 class Folder:
     def __init__(self, child=""): self.child = child
     def value(self):
-        base = CURRENT.get().folder if CURRENT.get() else ROOT.folder
+        base = CURRENT.get().folder if CURRENT.get() else root().folder
         return base / self.child if self.child else base
     def __truediv__(self, other): return self.value() / other
     def __fspath__(self): return str(self.value())
@@ -74,39 +96,114 @@ def install():
     global INSTALLED, ROOT
     if INSTALLED:
         return
+
     import core
     import post_footer
-    from types import SimpleNamespace
-    ROOT = SimpleNamespace(db=core.db, folder=Path(core.DATA), adapters=core.ADAPTERS, memories={})
-    ROOT.db.execute("""CREATE TABLE IF NOT EXISTS workspaces (
+    ROOT = Root(db=core.db, folder=Path(core.DATA), adapters=core.ADAPTERS, memories={})
+    root().db.execute("""CREATE TABLE IF NOT EXISTS workspaces (
         id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,owner TEXT UNIQUE,max_channel TEXT,tg_channel TEXT)""")
-    ROOT.db.execute("CREATE TABLE IF NOT EXISTS workspace_routes(uid TEXT PRIMARY KEY, sid INTEGER)")
-    ROOT.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS workspace_max_group ON workspaces(max_channel)")
-    ROOT.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS workspace_tg_group ON workspaces(tg_channel)")
-    ROOT.db.commit()
+    schema.add_columns(root().db, "workspaces", ("state TEXT DEFAULT 'ready'", "error TEXT DEFAULT ''"))
+    root().db.execute("CREATE TABLE IF NOT EXISTS workspace_routes(uid TEXT PRIMARY KEY, sid INTEGER)")
+    root().db.execute("CREATE UNIQUE INDEX IF NOT EXISTS workspace_max_group ON workspaces(max_channel)")
+    root().db.execute("CREATE UNIQUE INDEX IF NOT EXISTS workspace_tg_group ON workspaces(tg_channel)")
+    root().db.commit()
     core.db = Database()
     core.DATA, core.PHOTOS, core.VIDEOS = Folder(), Folder("photos"), Folder("videos")
     for name in ("ADAPTERS", "WAITING", "WAITING_EDIT", "WAITING_REJECT", "_HITS", "_RL_ALERT", "_ALERT_LAST", "LLM_STATE"):
         original = getattr(core, name)
-        ROOT.memories[name] = original
+        root().memories[name] = original
         setattr(core, name, Mapping(name, original))
-    ROOT.memories["footer_waiting"] = post_footer.WAITING
+    root().memories["footer_waiting"] = post_footer.WAITING
     post_footer.WAITING = Mapping("footer_waiting", post_footer.WAITING)
     core.WAITING_RULE = Set(core.WAITING_RULE)
-    ROOT.adapters["max"].workspace_id = 0
+    root().adapters["max"].workspace_id = 0
     INSTALLED = True
-    for row in ROOT.db.execute("SELECT * FROM workspaces"):
-        get(row["id"])
-    core.refresh_people(ROOT.adapters["max"])
+    for row in root().db.execute("SELECT * FROM workspaces").fetchall():
+        try:
+            get(row["id"])
+        except Exception:
+            core.log.exception("не удалось открыть пространство %s; остальные команды продолжают работу", row["id"])
+    core.refresh_people(root().adapters["max"])
 
 
 def queue_db():
     import core
-    return ROOT.db if INSTALLED else core.db
+    return root().db if INSTALLED else core.db
 
 
 def global_admin(uid):
-    return INSTALLED and str(uid) in ROOT.adapters["max"].base_admins
+    return INSTALLED and str(uid) in root().adapters["max"].base_admins
+
+
+def _get(sid):
+    if not sid:
+        return None
+    if sid in OPEN:
+        return OPEN[sid]
+    row = root().db.execute("SELECT * FROM workspaces WHERE id=?", (sid,)).fetchone()
+    if not row:
+        raise ValueError("Пространство не найдено")
+    from types import SimpleNamespace
+
+    import core
+    from max_ import Max
+    from tg import Telegram
+    folder = root().folder / "spaces" / str(sid)
+    folder.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(folder / "drafts.db", check_same_thread=False)
+    memory: dict[str, Any] = {"ADAPTERS": {}}
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+        objects = root().db.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND tbl_name NOT IN ('workspaces','workspace_routes') ORDER BY type DESC").fetchall()
+        for obj in objects:
+            if obj["type"] == "table":
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (obj["name"],)).fetchone():
+                    db.execute(obj["sql"])
+                existing = {c["name"] for c in db.execute(f'PRAGMA table_info("{obj["name"]}")')}
+                for col in root().db.execute(f'PRAGMA table_info("{obj["name"]}")'):
+                    if col["name"] not in existing:
+                        default = " DEFAULT " + col["dflt_value"] if col["dflt_value"] is not None else ""
+                        db.execute(f'ALTER TABLE "{obj["name"]}" ADD COLUMN "{col["name"]}" {col["type"]}{default}')
+        for obj in objects:
+            if obj["type"] == "index" and not db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (obj["name"],)).fetchone():
+                db.execute(obj["sql"])
+        db.commit()
+        schema.audit_tables(db)
+        memory = {name: {} for name in root().memories}
+        for name, original in root().memories.items():
+            if isinstance(original, dialog_state.PendingMap):
+                memory[name] = dialog_state.PendingMap(db, original.kind)
+        memory["LLM_STATE"] = {"ok": 0., "err": 0., "msg": ""}
+        space = SimpleNamespace(id=sid, name=row["name"], folder=folder, db=db, memory=memory,
+                                waiting_rule=dialog_state.PendingSet(db), last_housekeeping=time.monotonic())
+        memory["ADAPTERS"] = {}
+        with enter(space):
+            core.PHOTOS.mkdir(parents=True, exist_ok=True)
+            core.VIDEOS.mkdir(parents=True, exist_ok=True)
+            root_max = root().adapters["max"]
+            ad = Max(root_max.http.headers["Authorization"], row["max_channel"], [row["owner"]], [row["owner"]], [row["owner"]])
+            ad.workspace_id = sid
+            memory["ADAPTERS"]["max"] = ad
+            import os
+            if "tg" in root().adapters:
+                memory["ADAPTERS"]["tg"] = Telegram(os.environ["TG_TOKEN"], row["tg_channel"])
+            core.startup()
+    except BaseException:
+        db.close()
+        for adapter in memory.get("ADAPTERS", {}).values():
+            close = adapter.http.aclose if adapter.name == "max" else adapter.bot.session.close
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(close())
+            else:
+                task = loop.create_task(close())
+                task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        raise
+    OPEN[sid] = space
+    return space
 
 
 def get(sid):
@@ -114,67 +211,34 @@ def get(sid):
         return None
     if sid in OPEN:
         return OPEN[sid]
-    row = ROOT.db.execute("SELECT * FROM workspaces WHERE id=?", (sid,)).fetchone()
-    if not row:
-        raise ValueError("Пространство не найдено")
-    from types import SimpleNamespace
     import core
-    from max_ import Max
-    from tg import Telegram
-    folder = ROOT.folder / "spaces" / str(sid)
-    folder.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(folder / "drafts.db", check_same_thread=False)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-    schema = ROOT.db.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND tbl_name NOT IN ('workspaces','workspace_routes') ORDER BY type DESC").fetchall()
-    for obj in schema:
-        if obj["type"] == "table":
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (obj["name"],)).fetchone():
-                db.execute(obj["sql"])
-            existing = {c["name"] for c in db.execute(f'PRAGMA table_info("{obj["name"]}")')}
-            for col in ROOT.db.execute(f'PRAGMA table_info("{obj["name"]}")'):
-                if col["name"] not in existing:
-                    default = " DEFAULT " + col["dflt_value"] if col["dflt_value"] is not None else ""
-                    db.execute(f'ALTER TABLE "{obj["name"]}" ADD COLUMN "{col["name"]}" {col["type"]}{default}')
-    for obj in schema:
-        if obj["type"] == "index" and not db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (obj["name"],)).fetchone():
-            db.execute(obj["sql"])
-    db.commit()
-    memory = {name: {} for name in ROOT.memories}
-    for name, original in ROOT.memories.items():
-        if isinstance(original, dialog_state.PendingMap):
-            memory[name] = dialog_state.PendingMap(db, original.kind)
-    memory["LLM_STATE"] = {"ok": 0., "err": 0., "msg": ""}
-    space = SimpleNamespace(id=sid, name=row["name"], folder=folder, db=db, memory=memory,
-                            waiting_rule=dialog_state.PendingSet(db), last_housekeeping=time.monotonic())
-    memory["ADAPTERS"] = {}
-    with enter(space):
-        core.PHOTOS.mkdir(parents=True, exist_ok=True)
-        core.VIDEOS.mkdir(parents=True, exist_ok=True)
-        root_max = ROOT.adapters["max"]
-        ad = Max(root_max.http.headers["Authorization"], row["max_channel"], [row["owner"]], [row["owner"]], [row["owner"]])
-        ad.workspace_id = sid
-        memory["ADAPTERS"]["max"] = ad
-        import os
-        if "tg" in ROOT.adapters:
-            memory["ADAPTERS"]["tg"] = Telegram(os.environ["TG_TOKEN"], row["tg_channel"])
-        core.startup()
-    OPEN[sid] = space
+    try:
+        space = _get(sid)
+    except Exception as exc:
+        root().db.execute("UPDATE workspaces SET state='failed',error=? WHERE id=?", (core.err(exc)[:200], sid))
+        root().db.commit()
+        raise
+    root().db.execute("UPDATE workspaces SET state='ready',error='' WHERE id=? AND state!='ready'", (sid,))
+    root().db.commit()
     return space
+
+
+def _root_allows(uid):
+    allowed = root().adapters["max"].allowed
+    return allowed is None or str(uid) in allowed
 
 
 def for_user(uid, continue_input=False):
     uid = str(uid)
-    owner = ROOT.db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
-    selected = ROOT.db.execute("SELECT sid FROM workspace_routes WHERE uid=?", (str(uid),)).fetchone()
+    owner = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
+    selected = root().db.execute("SELECT sid FROM workspace_routes WHERE uid=?", (str(uid),)).fetchone()
     if owner:
         if continue_input and selected:
             sid = selected["sid"]
             import core
             if sid == 0:
-                memory, rules = ROOT.memories, core.WAITING_RULE.root
-                allowed = (ROOT.adapters["max"].allowed is None or uid in ROOT.adapters["max"].allowed)
+                memory, rules = root().memories, getattr(core.WAITING_RULE, "root", core.WAITING_RULE)
+                allowed = _root_allows(uid)
             elif sid in OPEN:
                 memory, rules = OPEN[sid].memory, OPEN[sid].waiting_rule
                 allowed = uid in memory["ADAPTERS"]["max"].allowed
@@ -185,7 +249,7 @@ def for_user(uid, continue_input=False):
             if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or sid == 0 and uid in WAITING_CREATE):
                 return sid
         return owner["id"]
-    if selected and selected["sid"] == 0 and (ROOT.adapters["max"].allowed is None or str(uid) in ROOT.adapters["max"].allowed):
+    if selected and selected["sid"] == 0 and _root_allows(uid):
         return 0
     if selected and selected["sid"] in OPEN and str(uid) in OPEN[selected["sid"]].memory["ADAPTERS"]["max"].allowed:
         return selected["sid"]
@@ -204,13 +268,13 @@ def stamp(update):
     body = message.get("body") or {}
     text = (body.get("text") or "").strip()
     uid = str((message.get("sender") or {}).get("user_id"))
-    if text in ("/menu", "/myspace", "/admin") and (global_admin(uid) or ROOT.db.execute("SELECT 1 FROM workspaces WHERE owner=?", (uid,)).fetchone()):
+    if text in ("/menu", "/myspace", "/admin") and (global_admin(uid) or root().db.execute("SELECT 1 FROM workspaces WHERE owner=?", (uid,)).fetchone()):
         import core
         key = ("max", uid)
-        for memory in [ROOT.memories, *(s.memory for s in OPEN.values())]:
+        for memory in [root().memories, *(s.memory for s in OPEN.values())]:
             for name in ("WAITING", "WAITING_EDIT", "WAITING_REJECT", "footer_waiting"):
                 memory[name].pop(key, None)
-        core.WAITING_RULE.root.discard(key)
+        getattr(core.WAITING_RULE, "root", core.WAITING_RULE).discard(key)
         for space in OPEN.values():
             space.waiting_rule.discard(key)
         WAITING_MEMBER.difference_update({k for k in WAITING_MEMBER if k[1] == uid})
@@ -219,17 +283,17 @@ def stamp(update):
     message = {**message, "_space": for_user((message.get("sender") or {}).get("user_id"), continue_input=continuing)}
     if (message.get("body") or {}).get("text", "").strip() == "/admin" and global_admin((message.get("sender") or {}).get("user_id")):
         message["_space"] = 0
-        ROOT.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str((message.get("sender") or {}).get("user_id")),))
-        ROOT.db.commit()
+        root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str((message.get("sender") or {}).get("user_id")),))
+        root().db.commit()
     uid = str((message.get("sender") or {}).get("user_id"))
     if continuing and uid in WAITING_CREATE and global_admin(uid):
         message["_space"] = 0
     if (message.get("body") or {}).get("text", "").strip() == "/myspace":
-        owner = ROOT.db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
+        owner = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
         if owner:
             message["_space"] = owner["id"]
-            ROOT.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, owner["id"]))
-            ROOT.db.commit()
+            root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, owner["id"]))
+            root().db.commit()
     return {**update, "message": message}
 
 
@@ -266,12 +330,12 @@ async def route_update(adapter, update):
             sid = int(number)
             update = {**update, "callback": {**cb, "payload": payload}}
         if sid == 0:
-            if ROOT.db.execute("SELECT 1 FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone() and not global_admin(cb["user"]["user_id"]):
+            if root().db.execute("SELECT 1 FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone() and not global_admin(cb["user"]["user_id"]):
                 await adapter.notify(cb["user"]["user_id"], "Эта кнопка относится к основному пространству. Откройте /myspace.")
                 return True
-            if (ROOT.adapters["max"].allowed is None or str(cb["user"]["user_id"]) in ROOT.adapters["max"].allowed):
-                ROOT.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str(cb["user"]["user_id"]),))
-                ROOT.db.commit()
+            if _root_allows(cb["user"]["user_id"]):
+                root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str(cb["user"]["user_id"]),))
+                root().db.commit()
             # Разворачиваем namespace основного пространства, не перенаправляя по владельцу.
             await adapter.handle({**update, "_routed": True})
             return True
@@ -281,8 +345,8 @@ async def route_update(adapter, update):
         space = get(sid)
         uid = str((update.get("callback", {}).get("user") or update.get("user") or {}).get("user_id"))
         if uid in space.memory["ADAPTERS"]["max"].allowed:
-            ROOT.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, sid))
-            ROOT.db.commit()
+            root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, sid))
+            root().db.commit()
         with enter(space):
             await space.memory["ADAPTERS"]["max"].handle({**update, "_routed": True})
         return True
@@ -302,8 +366,8 @@ def payload(button):
 
 def view():
     lines = ["Рабочие пространства:", "0 · Основное (существующий бот)"]
-    for row in ROOT.db.execute("SELECT * FROM workspaces ORDER BY id"):
-        lines.append(f"{row['id']} · {row['name']} · владелец {row['owner']}\nMAX: {row['max_channel']} · Telegram: {row['tg_channel']}")
+    for row in root().db.execute("SELECT * FROM workspaces ORDER BY id"):
+        lines.append(f"{row['id']} · {row['name']} [{row['state']}] · владелец {row['owner']}\nMAX: {row['max_channel']} · Telegram: {row['tg_channel']}")
     text = "\n".join(lines).encode("utf-16-le")[:7000].decode("utf-16-le", errors="ignore")
     return text, [[("➕ Создать пространство", "m:space_add")]]
 
@@ -324,28 +388,40 @@ async def create_input(adapter, uid, text):
     if len(parts) != 4 or not 1 <= len(parts[0]) <= 80 or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[1]) or not all(re.fullmatch(r"-?[1-9][0-9]{0,18}", p) for p in parts[2:]):
         await adapter.notify(uid, "Нужны четыре строки: название, ID владельца MAX, ID группы MAX, ID группы Telegram. Отмена: /cancel")
         return True
-    if "tg" not in ROOT.adapters:
+    if "tg" not in root().adapters:
         await adapter.notify(uid, "Сначала подключите Telegram в .env основного бота.")
         return True
     try:
-        updating = json.loads((ROOT.folder / "update_state.json").read_text()).get("status") == "probation"
+        updating = json.loads((root().folder / "update_state.json").read_text()).get("status") == "probation"
     except (OSError, ValueError, AttributeError):
         updating = False
     if updating:
         await adapter.notify(uid, "Обновление ещё проверяется. Повторите создание пространства через пару минут.")
         return True
-    if parts[2] == str(ROOT.adapters["max"].channel) or parts[3] == str(ROOT.adapters["tg"].channel):
+    if parts[2] == str(root().adapters["max"].channel) or parts[3] == str(root().adapters["tg"].channel):
         await adapter.notify(uid, "Эта группа уже используется основным пространством. Укажите отдельные группы.")
         return True
+    existing = root().db.execute("SELECT * FROM workspaces WHERE owner=?", (parts[1],)).fetchone()
+    if existing and existing["state"] == "failed" and list(existing[k] for k in ("name", "owner", "max_channel", "tg_channel")) == parts:
+        sid = existing["id"]
+    else:
+        try:
+            cur = root().db.execute("INSERT INTO workspaces(name,owner,max_channel,tg_channel,state) VALUES(?,?,?,?,'provisioning')", parts)
+            root().db.commit()
+            sid = cur.lastrowid
+        except sqlite3.IntegrityError:
+            root().db.rollback()
+            await adapter.notify(uid, "Владелец или одна из групп уже привязаны к пространству.")
+            return True
     try:
-        cur = ROOT.db.execute("INSERT INTO workspaces(name,owner,max_channel,tg_channel) VALUES(?,?,?,?)", parts)
-        ROOT.db.commit()
-        space = get(cur.lastrowid)
-    except sqlite3.IntegrityError:
-        await adapter.notify(uid, "Владелец или одна из групп уже привязаны к пространству.")
+        space = get(sid)
+    except Exception as exc:
+        root().db.execute("UPDATE workspaces SET state='failed',error=? WHERE id=?", (core.err(exc)[:200], sid))
+        root().db.commit()
+        await adapter.notify(uid, "Не удалось подготовить пространство. После устранения ошибки отправьте те же четыре строки для повторной попытки.")
         return True
     WAITING_CREATE.discard(str(uid))
-    core.refresh_people(ROOT.adapters["max"])
+    core.refresh_people(root().adapters["max"])
     await adapter.send_menu(uid, "Пространство создано. Бот должен быть добавлен в обе группы с правом публикации.\n" + view()[0], view()[1])
     try:
         with enter(space):
@@ -394,13 +470,18 @@ class Maintenance:
         import core
         import ops
         while True:
+            for row in root().db.execute("SELECT id FROM workspaces WHERE state!='ready'").fetchall():
+                try:
+                    get(row["id"])
+                except Exception:
+                    core.log.warning("пространство %s пока недоступно", row["id"], exc_info=True)
             for space in list(OPEN.values()):
                 with enter(space):
                     try:
                         await ops.flush_deferred()
                         await core.remind_once()
                         await core.warn_expiring_once()
-                        if time.monotonic() - space.last_housekeeping >= int(core.env("HOUSEKEEPING_SEC", "21600")):
+                        if time.monotonic() - space.last_housekeeping >= int(core.env("HOUSEKEEPING_SEC", "21600")) or core.cleanup_pending():
                             core.housekeeping()
                             space.last_housekeeping = time.monotonic()
                         await core.ADAPTERS["max"].cleanup_stale_buttons()

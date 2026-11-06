@@ -1,16 +1,32 @@
 """Совместимый интерфейс сервисов, настройки и состояние текущего пространства."""
-import asyncio, base64, io, json, logging, os, re, shutil, sqlite3, subprocess, time, uuid
+import asyncio
+import base64
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import time
+import uuid
+from collections.abc import MutableMapping
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import httpx
-import post_footer
-import comparison
-import spaces
-import dialog_state
-import resources
-from PIL import Image, ImageOps, ImageDraw, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
-log = logging.getLogger("core")
+import comparison
+import configuration
+import dialog_state
+import post_footer
+import resources
+import schema
+import spaces
+
+log: logging.Logger = logging.getLogger("core")
 
 
 def env(name: str, default: str = "") -> str:
@@ -55,10 +71,10 @@ class RedactingFormatter(logging.Formatter):
 SHUTTING_DOWN = False  # идёт остановка: новые фото не принимаем (говорим об этом), текущие дорабатываем
 INFLIGHT: set = set()  # задачи обработки фото, которые не должны оборваться при остановке
 
-DATA = Path(env("DATA_DIR", "data")).resolve()  # абсолютный путь: не зависит от смены рабочей папки
-PHOTOS = DATA / "photos"
+DATA: Path | spaces.Folder = Path(env("DATA_DIR", "data")).resolve()  # абсолютный путь: не зависит от смены рабочей папки
+PHOTOS: Path | spaces.Folder = DATA / "photos"
 PHOTOS.mkdir(parents=True, exist_ok=True)
-VIDEOS = DATA / "videos"
+VIDEOS: Path | spaces.Folder = DATA / "videos"
 VIDEOS.mkdir(parents=True, exist_ok=True)
 
 try:  # HEIC с iPhone: Pillow сам его не открывает
@@ -68,7 +84,7 @@ try:  # HEIC с iPhone: Pillow сам его не открывает
 except ImportError:  # зависимость необязательная: обычные форматы работают и без неё
     log.info("pillow-heif не установлен: HEIC (файлом) не поддерживается")
 
-db = sqlite3.connect(DATA / "drafts.db", check_same_thread=False)
+db: schema.Connection = sqlite3.connect(DATA / "drafts.db", check_same_thread=False)
 db.row_factory = sqlite3.Row
 db.execute("PRAGMA journal_mode=WAL")   # чтение не блокирует запись
 db.execute("PRAGMA busy_timeout=5000")  # ждём блокировку вместо мгновенного "database is locked"
@@ -85,34 +101,20 @@ db.execute("""CREATE TABLE IF NOT EXISTS people (
 # заявки на доступ: pending — ждёт решения, rejected — отклонена или человек удалён (молчим 7 дней)
 db.execute("""CREATE TABLE IF NOT EXISTS requests (
     platform TEXT, uid TEXT, name TEXT, username TEXT, status TEXT, created REAL, PRIMARY KEY (platform, uid))""")
-try:  # миграция старых баз: в какие каналы пост уже опубликован (защита от дублей)
-    db.execute("ALTER TABLE drafts ADD COLUMN published_to TEXT DEFAULT ''")
-except sqlite3.OperationalError:
-    pass
-for _col in ("last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
+schema.add_columns(db, "drafts", ("published_to TEXT DEFAULT ''", "last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
              "publication_channels TEXT DEFAULT '{}'", "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
-             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''"):
-    try:
-        db.execute(f"ALTER TABLE drafts ADD COLUMN {_col}")
-    except sqlite3.OperationalError:
-        pass
+             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''"))
 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS drafts_source_key ON drafts(source_key)")
 db.execute("""CREATE TABLE IF NOT EXISTS max_inbox (
     event_key TEXT PRIMARY KEY, payload TEXT, state TEXT DEFAULT 'pending',
     attempts INTEGER DEFAULT 0, next_try REAL DEFAULT 0, created REAL,
     error TEXT DEFAULT '')""")
-try:
-    db.execute("ALTER TABLE max_inbox ADD COLUMN rate_counted INTEGER DEFAULT 0")
-except sqlite3.OperationalError:
-    pass
+schema.add_columns(db, "max_inbox", ("rate_counted INTEGER DEFAULT 0", "space_id INTEGER DEFAULT 0"))
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_work ON max_inbox(state,next_try,created)")
-try:
-    db.execute("ALTER TABLE max_inbox ADD COLUMN space_id INTEGER DEFAULT 0")
-except sqlite3.OperationalError:
-    pass
 db.commit()
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_space_state ON max_inbox(space_id,state)")
 db.commit()
+schema.audit_tables(db)
 dialog_state.initialize(db)
 post_footer.WAITING = dialog_state.PendingMap(db, "footer")
 
@@ -120,6 +122,15 @@ post_footer.WAITING = dialog_state.PendingMap(db, "footer")
 class Adapter:
     """Базовый класс мессенджера. Реализации: tg.py, max_.py"""
     name = ""
+    channel: str = ""
+    base_approvers: list[str]
+    base_employees: list[str]
+    base_admins: list[str]
+    workspace_id: int | None = None
+    http: httpx.AsyncClient
+    if TYPE_CHECKING:
+        from aiogram import Bot
+        bot: Bot
     approvers: list[str] = []
     admins: list[str] = []         # управляют людьми кнопками (MAX_ADMINS); они же согласующие
     allowed: set[str] | None = None  # кто может присылать фото; None = любой
@@ -131,6 +142,7 @@ class Adapter:
     async def notify(self, user_id: str, text: str): ...
     async def send_menu(self, user_id: str, text: str, rows: list | None): ...  # rows: [[(подпись, payload), ...], ...]
     async def run(self): ...
+    async def cleanup_stale_buttons(self): ...
 
     def not_sent(self, e: Exception) -> bool:
         """True, если по ошибке ТОЧНО видно, что пост в канал не вышел (сервис отклонил запрос).
@@ -138,7 +150,7 @@ class Adapter:
         return False
 
 
-ADAPTERS: dict[str, Adapter] = {}
+ADAPTERS: MutableMapping[str, Adapter] = {}
 
 
 _ALERT_LAST: dict[str, float] = {}
@@ -174,8 +186,8 @@ CAPTION_ASK = ("📝 К фото или видео нужна короткая �
 
 
 # ---------- Видео ----------
-MAX_VIDEO_BYTES = int(float(env("MAX_VIDEO_MB", "49")) * 1024 * 1024)  # Telegram принимает от бота файлы до 50 МБ
-MAX_VIDEO_SEC = int(env("MAX_VIDEO_SEC", "180"))
+MAX_VIDEO_BYTES = int(configuration.number("MAX_VIDEO_MB", "49", 0.001, 49, integer=False) * 1024 * 1024)  # Telegram принимает от бота файлы до 50 МБ
+MAX_VIDEO_SEC = configuration.number("MAX_VIDEO_SEC", "180", 1, 3600)
 _VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
@@ -203,7 +215,7 @@ SYSTEM = f"""Ты SMM-редактор компании «{env('COMPANY', 'на�
 - Выведи только текст поста, без пояснений и кавычек."""
 
 PROVIDER = env("LLM_PROVIDER", "openai").lower()  # anthropic | openai (любой OpenAI-совместимый сервис)
-_client = None
+_client: Any = None
 
 
 MAX_PHOTO_BYTES = 25 * 1024 * 1024
@@ -229,14 +241,14 @@ _RL_ALERT: dict[str, float] = {}
 
 
 WAITING = dialog_state.PendingMap(db, "comment")
-WAITING_RULE = dialog_state.PendingSet(db)
+WAITING_RULE: dialog_state.PendingSet | spaces.Set = dialog_state.PendingSet(db)
 
 BUSY = "⏳ Пост уже обрабатывается, подождите пару секунд."
 
 # ---------- «Править самому» ----------
 WAITING_EDIT = dialog_state.PendingMap(db, "edit")
 WAITING_REJECT = dialog_state.PendingMap(db, "reject")
-MAX_POST_CHARS = int(env("MAX_POST_CHARS", "3900"))
+MAX_POST_CHARS = configuration.number("MAX_POST_CHARS", "3900", 1, 3900)
 PARTIAL_EDIT_BLOCKED = "⚠️ Публикация уже началась. Сначала завершите её в остальных каналах; менять текст этого поста нельзя."
 POST_LENGTHS = {
     "short": ("Короткий", 150, 300),
@@ -275,7 +287,7 @@ import ops  # noqa: E402  (в конце: ops сам импортирует core
 # Сервисы загружаются по первому обращению: их можно импортировать и напрямую.
 # Имена core сохраняются для адаптеров и проверок совместимости.
 _SERVICE_EXPORTS = {
-    'services.storage': ('get', '_claim', '_set', '_parse_marks', '_dump_marks', 'housekeeping', '_unlink', 'clear_source_cache', 'scrub_published', 'startup'),
+    'services.storage': ('get', '_claim', '_set', '_parse_marks', '_dump_marks', 'housekeeping', 'cleanup_pending', '_unlink', 'clear_source_cache', 'scrub_published', 'startup'),
     'services.media': ('caption_ok', '_ffmpeg', '_probe', '_contact_sheet', 'save_video', 'draft_media', 'draft_files', 'media_kw', 'album_preview', '_pixel_limit', 'save_photo'),
     'services.generation': ('llm_config_problem', 'generate_post', 'build_system', '_complete', '_claude', '_openai', 'generate_options', '_learn'),
     'services.submissions': ('_check_rate', '_approval_adapter', '_send_draft', 'submit', 'resume_submission', '_submit', 'submit_album', '_submit_album'),

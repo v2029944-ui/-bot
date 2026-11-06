@@ -1,6 +1,7 @@
-import core
 from conftest import run
-from test_admin_menu_button import Api, make, buttons
+from test_admin_menu_button import Api, buttons, make
+
+import core
 
 
 def test_change_length_and_back_replace_buttons_under_post(monkeypatch, png, llm):

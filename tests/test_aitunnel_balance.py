@@ -1,8 +1,8 @@
 import httpx
 import pytest
+from conftest import FakeAdapter, run
 
 import core
-from conftest import FakeAdapter, run
 
 
 def setup(monkeypatch, handler):
@@ -25,7 +25,7 @@ def test_status_fetches_balance_with_existing_key(monkeypatch, llm, data, expect
         return httpx.Response(200, json=data)
 
     setup(monkeypatch, handler)
-    ad = FakeAdapter("max", ["5", "6"])
+    ad = FakeAdapter("max", ["5", "6"], admins=["5", "6"])
     ad.admins = ["5"]
     assert "администратору" in run(core.on_menu(ad, "6", "m:status"))[0]
     assert not calls
@@ -43,7 +43,7 @@ def test_balance_failure_does_not_break_status(monkeypatch, llm, failure):
         return httpx.Response(403 if failure == "403" else 200,
                               json={"balance": "NaN"} if failure == "nan" else {"error": "test-secret"})
     setup(monkeypatch, handler)
-    text = run(core.status_text(FakeAdapter("max", ["5"])))
+    text = run(core.status_text(FakeAdapter("max", ["5"], admins=["5"])))
     assert "Баланс AITunnel:" in text and "Свободно на диске" in text
     assert "test-secret" not in text
 

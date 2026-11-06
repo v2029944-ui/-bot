@@ -1,14 +1,15 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+from conftest import run
 
 import core
 import dialog_state
-from conftest import run
 
 
 def test_waiting_input_survives_a_new_python_process(tmp_path):

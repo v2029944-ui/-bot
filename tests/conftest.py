@@ -2,12 +2,14 @@
 import asyncio
 import io
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 
+REAL_SLEEP = asyncio.sleep
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import re
 
 
 def _settings_names() -> list[str]:
@@ -25,6 +27,7 @@ import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 
 import core  # noqa: E402
+import max_ as max_  # noqa: E402 — initialize adapter/queue tables for isolated test modules
 
 
 def run(coro):
@@ -34,9 +37,9 @@ def run(coro):
 class FakeAdapter(core.Adapter):
     """Мессенджер-пустышка: всё, что бот «отправил», складывается в self.out."""
 
-    def __init__(self, name="tg", approvers=("1",), fail=None, sure=()):
+    def __init__(self, name="tg", approvers=("1",), fail=None, sure=(), admins=()):
         self.name, self.approvers, self.out = name, list(approvers), []
-        self.admins = list(approvers)  # fixture reviewers exercise administrative recovery of others' drafts
+        self.admins = list(admins)
         self.fail = list(fail or [])  # исключения для публикаций по очереди
         self.sure = tuple(sure)       # какие исключения считать «точно не ушло»
 
@@ -92,7 +95,7 @@ def clean_state(monkeypatch):
     """Каждый тест начинает с чистой базы и чистой памяти бота."""
     core.db.execute("DELETE FROM drafts")
     core.db.execute("DELETE FROM rules")
-    for t in ("people", "requests", "settings", "prefs", "deferred", "max_inbox", "max_actions", "max_draft_ui", "max_notices"):
+    for t in ("people", "requests", "settings", "prefs", "deferred", "max_inbox", "max_actions", "max_draft_ui", "max_notices", "command_results"):
         core.db.execute(f"DELETE FROM {t}")
     core.db.commit()
     for d in (core.WAITING, core._HITS, core._RL_ALERT, core._ALERT_LAST, core.ADAPTERS):
@@ -100,6 +103,7 @@ def clean_state(monkeypatch):
     core.WAITING_RULE.clear()
     core.WAITING_EDIT.clear()
     core.WAITING_REJECT.clear()
+    core.db.execute("DELETE FROM dialog_state")
     core.db.execute("DELETE FROM max_button_cache")
     core.db.commit()
     core.post_footer.WAITING.clear()
@@ -115,7 +119,7 @@ def clean_state(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
     async def no_sleep(*a, **k):
-        pass
+        await REAL_SLEEP(0)
     monkeypatch.setattr(asyncio, "sleep", no_sleep)  # повторы с паузами не тормозят тесты
 
 
@@ -128,14 +132,14 @@ def llm(monkeypatch):
 
 @pytest.fixture
 def tg():
-    a = FakeAdapter("tg", ["1", "2"])
+    a = FakeAdapter("tg", ["1", "2"], admins=["1", "2"])
     core.ADAPTERS["tg"] = a
     return a
 
 
 @pytest.fixture
 def mx():
-    a = FakeAdapter("max", ["5"])
+    a = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS["max"] = a
     return a
 

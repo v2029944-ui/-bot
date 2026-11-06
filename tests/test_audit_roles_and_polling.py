@@ -3,16 +3,16 @@ import asyncio
 import gc
 
 import pytest
+from conftest import FakeAdapter, run
 
 import core
 import max_
 import ops
 import spaces
-from conftest import FakeAdapter, run
 
 
 def test_promoting_root_admin_does_not_grant_global_process_control():
-    ad = FakeAdapter('max', ['1'])
+    ad = FakeAdapter('max', ['1'], admins=['1'])
     core.ADAPTERS['max'] = ad
     core.refresh_people(ad)
     core._add_person(ad, '2', 'Team admin', 'adm')
@@ -27,7 +27,7 @@ def test_promoting_root_admin_does_not_grant_global_process_control():
 
 def test_global_admin_uses_configured_ids_not_mutable_admin_roles(monkeypatch):
     from types import SimpleNamespace
-    ad = FakeAdapter('max', ['1'])
+    ad = FakeAdapter('max', ['1'], admins=['1'])
     core.ADAPTERS['max'] = ad
     core.refresh_people(ad)
     core._add_person(ad, '2', 'Team admin', 'adm')

@@ -3,10 +3,10 @@ import time
 import types
 
 import pytest
+from conftest import draft_id, run
 
 import core
 import max_
-from conftest import draft_id, run
 
 S = types.SimpleNamespace
 

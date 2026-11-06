@@ -3,11 +3,11 @@ import io
 import json
 
 import pytest
+from conftest import run
 from PIL import Image
+from test_admin_menu_button import Api, make
 
 import core
-from conftest import run
-from test_admin_menu_button import Api, make
 
 
 def test_official_max_update_passes_original_message_to_callback(monkeypatch):

@@ -1,10 +1,10 @@
 """Очередь материалов: ограниченный параллелизм между пространствами, порядок внутри каждого."""
 import asyncio
-from collections import Counter
 import hashlib
 import json
 import logging
 import time
+from collections import Counter
 
 import core
 import ops
@@ -14,7 +14,7 @@ log = logging.getLogger("max_queue")
 
 
 def cache_dir(key, space_id=None):
-    base = spaces.ROOT.folder / "spaces" / str(space_id) if spaces.INSTALLED and space_id else core.DATA
+    base = spaces.root().folder / "spaces" / str(space_id) if spaces.INSTALLED and space_id else core.DATA
     return base / "inbox" / hashlib.sha256(key.encode()).hexdigest()
 
 

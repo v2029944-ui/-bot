@@ -3,13 +3,12 @@ import json
 
 import httpx
 import pytest
+from conftest import FakeAdapter, run
+from test_comparison import CATALOG
 
 import comparison
 import core
-import ops
 import post_footer
-from conftest import FakeAdapter, run
-from test_comparison import CATALOG
 
 
 def test_double_enable_and_disable_link_are_idempotent(mx):
@@ -52,7 +51,7 @@ def test_unknown_provider_fails_before_any_generation(monkeypatch):
 
 def test_partial_publication_cannot_continue_to_a_different_channel(mx, llm, png):
     mx.channel = '-100'
-    tg = FakeAdapter('tg', [], fail=[ValueError('denied')], sure=(ValueError,))
+    tg = FakeAdapter('tg', [], fail=[ValueError('denied')], sure=(ValueError,), admins=[])
     tg.publish_only, tg.channel = True, '-200'
     core.ADAPTERS['tg'] = tg
     did = run(core.submit(mx, '9', 'Author', 'Caption', png))

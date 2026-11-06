@@ -1,6 +1,7 @@
 """Меню правил, права доступа и то, что попадает в запрос к нейросети."""
-import core
 from conftest import run
+
+import core
 
 
 def test_rules_menu_add_and_delete(tg):

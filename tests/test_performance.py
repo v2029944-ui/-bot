@@ -1,10 +1,10 @@
 import asyncio
 
 import httpx
+from conftest import FakeAdapter, run
 
 import core
 import max_
-from conftest import FakeAdapter, run
 
 
 def test_status_runs_balance_and_model_check_concurrently(monkeypatch):
@@ -23,7 +23,7 @@ def test_status_runs_balance_and_model_check_concurrently(monkeypatch):
 
         monkeypatch.setattr(core, "_complete", complete)
         monkeypatch.setattr(core, "aitunnel_balance", balance)
-        text = await asyncio.wait_for(core.status_text(FakeAdapter()), 2)
+        text = await asyncio.wait_for(core.status_text(FakeAdapter(admins=["1"])), 2)
         assert "Баланс: 100 ₽" in text and "✅ отвечает" in text
     run(scenario())
 

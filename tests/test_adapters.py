@@ -5,12 +5,12 @@ import httpx
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.methods import SendPhoto
+from conftest import run
 
 import core
 import main
 import max_
 import tg
-from conftest import run
 
 S = types.SimpleNamespace
 

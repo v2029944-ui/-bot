@@ -1,15 +1,19 @@
-import asyncio, logging, os, signal
+import asyncio
+import logging
+import os
+import signal
 
 from dotenv import load_dotenv
 
 load_dotenv()
+import configuration  # noqa: E402
 import core  # noqa: E402  (после load_dotenv, чтобы подхватить настройки)
+import max_actions  # noqa: E402
+import max_queue  # noqa: E402
 import ops  # noqa: E402
+import spaces  # noqa: E402
 from max_ import Max  # noqa: E402
 from tg import Telegram  # noqa: E402
-import max_queue  # noqa: E402
-import max_actions  # noqa: E402
-import spaces  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -17,7 +21,7 @@ log = logging.getLogger("main")
 def ids(name):
     """Список числовых id из настройки. @username не подходит: бот не сможет написать такому человеку."""
     out = [x.strip() for x in os.getenv(name, "").split(",") if x.strip()]
-    bad = [x for x in out if not x.lstrip("-").isdigit()]
+    bad = [x for x in out if not configuration.user_id(x)]
     if bad:
         raise SystemExit(f"{name}: нужны числовые id, а не «{bad[0]}». Свой id покажет бот @userinfobot "
                          "(для MAX — id из события или профиля).")
@@ -36,8 +40,10 @@ async def serve(workers):
     его понимает entrypoint.sh (запускает updater.py и поднимает бота заново)."""
     loop = asyncio.get_running_loop()
     try:  # docker stop шлёт SIGTERM: останавливаемся аккуратно, а не по таймауту с SIGKILL
-        loop.add_signal_handler(signal.SIGTERM, lambda: (log.info("получен SIGTERM, останавливаюсь"),
-                                                         ops.request_restart(0, delay=0)))
+        def stop():
+            log.info("получен SIGTERM, останавливаюсь")
+            ops.request_restart(0, delay=0)
+        loop.add_signal_handler(signal.SIGTERM, stop)
         sigterm = True
     except (NotImplementedError, RuntimeError, ValueError):  # Windows, не главный поток
         sigterm = False
@@ -64,8 +70,9 @@ async def serve(workers):
                             task.cancel()
                         await asyncio.gather(*pending, return_exceptions=True)
                     raise SystemExit(t.result())
-                if t.exception():
-                    raise t.exception()
+                exception = t.exception()
+                if exception is not None:
+                    raise exception
     finally:
         if sigterm:
             loop.remove_signal_handler(signal.SIGTERM)
@@ -129,6 +136,9 @@ async def main():
     try:
         await serve([*working, max_queue.Worker(core.ADAPTERS["max"]), max_actions.Worker(core.ADAPTERS["max"]), core.Reminder(), spaces.Maintenance()])
     finally:
+        if core._client is not None:
+            await core._client.close()
+            core._client = None
         await spaces.close()
         await core.ADAPTERS["max"].http.aclose()
         if "tg" in core.ADAPTERS:

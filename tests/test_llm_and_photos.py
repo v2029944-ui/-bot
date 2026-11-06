@@ -4,10 +4,10 @@ import json
 
 import httpx
 import pytest
+from conftest import run
 from PIL import Image
 
 import core
-from conftest import run
 
 OK = {"choices": [{"message": {"content": " Пост "}}]}
 

@@ -2,10 +2,10 @@
 import types
 
 import pytest
+from conftest import run
 
 import core
 import main
-from conftest import run
 
 S = types.SimpleNamespace
 

@@ -1,8 +1,8 @@
 """Лимит фото, тихий режим, тротлинг предупреждений, чистка диска."""
 import pytest
+from conftest import run
 
 import core
-from conftest import run
 
 
 def test_rate_limit_per_employee_with_single_alert(tg, llm, png, monkeypatch):

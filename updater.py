@@ -59,9 +59,9 @@ def _write(name: str, data: dict):
 
 def summarize_failure(out: str) -> str:
     """Из вывода pytest берём главное: какие тесты упали и в чём (строки FAILED/ERROR и первые строки «E …»)."""
-    lines = [l.rstrip() for l in out.splitlines()]
-    failed = [l for l in lines if l.startswith(("FAILED ", "ERROR "))][:5]
-    reasons = [l.strip() for l in lines if l.startswith("E ")][:3]
+    lines = [line.rstrip() for line in out.splitlines()]
+    failed = [line for line in lines if line.startswith(("FAILED ", "ERROR "))][:5]
+    reasons = [line.strip() for line in lines if line.startswith("E ")][:3]
     picked = failed + [r for r in reasons if r not in failed]
     return "\n".join(picked) if picked else "\n".join(lines[-12:])
 
@@ -71,8 +71,52 @@ def finish(status: str, who: dict, **kw):
     print(f"[updater] {status} {kw.get('detail', '')[:200]}", flush=True)
 
 
-def _sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
+def requirements_sha(folder: Path) -> str:
+    digest = hashlib.sha256()
+    for name in ("requirements.txt", "requirements.lock", "requirements-dev.txt", "requirements-dev.lock"):
+        path = folder / name
+        if path.exists():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def validate_requirements(folder: Path) -> None:
+    lock = folder / "requirements.lock"
+    if not lock.exists():
+        return
+    def pins(path):
+        return {re.sub(r"[-_.]+", "-", name).lower(): version
+                for name, version in re.findall(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", path.read_text(), re.M)}
+    runtime = pins(lock)
+    direct = pins(folder / "requirements.txt")
+    if any(runtime.get(name) != version for name, version in direct.items()):
+        raise ValueError("requirements.txt расходится с requirements.lock; обновление остановлено.")
+    dev = folder / "requirements-dev.lock"
+    if dev.exists():
+        development = pins(dev)
+        if any(development.get(name) != version for name, version in runtime.items()):
+            raise ValueError("Runtime-зависимости двух lock-файлов расходятся.")
+        if any(development.get(name) != version for name, version in pins(folder / "requirements-dev.txt").items()):
+            raise ValueError("requirements-dev.txt расходится с requirements-dev.lock.")
+
+
+def compatibility(folder: Path) -> dict | None:
+    path = folder / "compatibility.json"
+    if not path.exists():
+        return None  # Legacy release: the one-time transition cannot promise rollback compatibility.
+    value = json.loads(path.read_text())
+    if (not isinstance(value, dict) or not isinstance(value.get("read_versions"), list)
+            or not value["read_versions"] or any(type(v) is not int or v < 1 for v in value["read_versions"])
+            or type(value.get("write_version")) is not int or value["write_version"] not in value["read_versions"]):
+        raise ValueError("Некорректный compatibility.json")
+    return value
+
+
+def check_compatibility(current: Path, candidate: Path) -> None:
+    old, new = compatibility(current), compatibility(candidate)
+    if old is not None and (new is None or old["write_version"] not in new["read_versions"]
+                            or new["write_version"] not in old["read_versions"]):
+        raise ValueError("Версии формата данных несовместимы с обновлением и откатом; требуется отдельная миграция.")
 
 
 def update():
@@ -91,13 +135,21 @@ def update():
         rc, out = git("worktree", "add", "--detach", str(wt), new)
         if rc:
             return finish("failed", who, detail="не удалось подготовить новую версию: " + out[-300:], commit=short())
+        try:
+            check_compatibility(CODE, wt)
+            validate_requirements(wt)
+        except ValueError as exc:
+            return finish("failed", who, detail=scrub(str(exc)), commit=short())
         pypath = str(wt)
-        if _sha(wt / "requirements.txt") != _sha(CODE / "requirements.txt"):
+        if requirements_sha(wt) != requirements_sha(CODE):
             # новые библиотеки нужны только для проверки: ставим в отдельную папку, общее окружение не трогаем
             # (в рабочее окружение они попадут при запуске, entrypoint.sh сам сверяет requirements.txt)
             libs = tmp / "libs"
-            rc, out = run([sys.executable, "-m", "pip", "install", "-q", "--target", str(libs), "-r",
-                           "requirements.txt"], wt, 900)
+            req = "requirements-dev.lock" if (wt / "requirements-dev.lock").exists() else "requirements.lock" if (wt / "requirements.lock").exists() else "requirements.txt"
+            command = [sys.executable, "-m", "pip", "install", "-q", "--target", str(libs), "-r", req]
+            if req.endswith(".lock"):
+                command.append("--require-hashes")
+            rc, out = run(command, wt, 900)
             if rc:
                 return finish("failed", who, detail="не удалось установить библиотеки: " + out[-300:], commit=short())
             pypath = os.pathsep.join([str(wt), str(libs)])
@@ -124,7 +176,7 @@ def rollback():
     if not prev:
         return print("[updater] откатываться некуда", flush=True)
     rc, out = git("reset", "--hard", prev)
-    state["status"] = "rolled_back"
+    state["status"] = "rolled_back" if not rc else "rollback_failed"
     _write("update_state.json", state)
     finish("rolled_back" if not rc else "failed", who, detail=out[-300:], commit=short())
 

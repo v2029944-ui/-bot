@@ -1,6 +1,7 @@
 """Защита от дублей: что происходит при сбоях публикации."""
-import core
 from conftest import FakeAdapter, run
+
+import core
 
 
 class Refused(Exception):
@@ -13,8 +14,8 @@ class Timeout(Exception):
 
 def setup(monkeypatch, llm, png, mx_fail):
     monkeypatch.setenv("PUBLISH_TO_ALL", "1")
-    tg = FakeAdapter("tg", ["1"])
-    mx = FakeAdapter("max", ["5"], fail=mx_fail, sure=(Refused,))
+    tg = FakeAdapter("tg", ["1"], admins=["1"])
+    mx = FakeAdapter("max", ["5"], fail=mx_fail, sure=(Refused,), admins=["5"])
     core.ADAPTERS.update(tg=tg, max=mx)
     did = run(core.submit(tg, "9", "Вася", "x", png))
     return tg, mx, did

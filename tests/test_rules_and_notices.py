@@ -1,6 +1,7 @@
-import core
 from conftest import run
 from test_admin_menu_button import Api, make
+
+import core
 
 
 def test_deleted_rules_do_not_leave_gaps_and_old_buttons_keep_identity(tg):

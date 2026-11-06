@@ -2,10 +2,10 @@ import json
 
 import httpx
 import pytest
+from conftest import run
 
 import core
 import max_
-from conftest import run
 
 
 def buttons(body):
@@ -163,8 +163,9 @@ def test_only_one_menu_and_old_steps_deleted():
     async def scenario():
         api = Api()
         adapter = make(api)
-        cb = lambda payload, mid: {"callback_id": "c", "user": {"user_id": 1}, "payload": payload,
-                                   "message": {"body": {"mid": mid}}}
+        def cb(payload, mid):
+            return {"callback_id": "c", "user": {"user_id": 1}, "payload": payload,
+                                           "message": {"body": {"mid": mid}}}
         await adapter.notify("1", "Привет")                    # m1, с кнопкой
         await adapter.on_callback(cb("m:admin", "m1"))         # m2 — меню; m1 не удаляется
         assert not api.of("DELETE")
@@ -194,8 +195,9 @@ def test_submenus_have_admin_button_but_main_admin_page_does_not():
     async def scenario():
         api = Api()
         adapter = make(api)
-        cb = lambda payload, mid: {"callback_id": "c", "user": {"user_id": 1}, "payload": payload,
-                                   "message": {"body": {"mid": mid}}}
+        def cb(payload, mid):
+            return {"callback_id": "c", "user": {"user_id": 1}, "payload": payload,
+                                           "message": {"body": {"mid": mid}}}
         await adapter.on_callback(cb("m:admin", "x"))      # главная страница меню админа
         assert "m:admin" not in [b["payload"] for b in buttons(api.of("POST")[-1][3])]
         await adapter.on_callback(cb("m:people", "m1"))    # «Люди»: путь назад есть

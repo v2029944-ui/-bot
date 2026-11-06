@@ -1,16 +1,16 @@
 """Retention, overnight schedules and cancellation of real worker threads."""
 import asyncio
-from datetime import datetime, timezone
-from pathlib import Path
 import threading
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from conftest import run
 
 import core
 import ops
 import resources
-from conftest import run
 
 
 @pytest.mark.parametrize('mark', ['max', 'max?', 'max,tg?'])
@@ -36,7 +36,7 @@ def test_overnight_shift_belongs_to_starting_weekday(monkeypatch, day, hour, exp
     monkeypatch.setenv('NOTIFY_HOURS', '20-6')
     monkeypatch.setenv('NOTIFY_DAYS', '1-5')
     monkeypatch.setenv('NOTIFY_TZ', 'UTC')
-    ts = datetime(2026, 11, day, hour, tzinfo=timezone.utc).timestamp()
+    ts = datetime(2026, 11, day, hour, tzinfo=UTC).timestamp()
     assert ops.in_window(ts) is expected
 
 

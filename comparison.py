@@ -1,7 +1,9 @@
 """Выбор трёх vision-моделей по публичному каталогу AITunnel."""
 import contextvars
 import json
+
 import httpx
+
 import resources
 import spaces
 
@@ -9,6 +11,7 @@ MODEL = contextvars.ContextVar("generation_model", default=None)
 
 
 class Options(str):
+    options: list[dict]
     def __new__(cls, options):
         obj = super().__new__(cls, next(o["post"] for o in options if o.get("post")))
         obj.options = options

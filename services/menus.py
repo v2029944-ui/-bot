@@ -1,10 +1,13 @@
 """Меню, правила и текстовые диалоги."""
-import core
-import time
-import post_footer
+
+import command_context
 import comparison
-import spaces
+import core
+import dialog_state
+import editor_rules
 import ops
+import post_footer
+import spaces
 
 
 def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
@@ -18,19 +21,19 @@ def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
     if cmd == "/rule_add":
         if not arg:
             return "Формат: /rule_add текст правила"
-        core.db.execute("INSERT INTO rules(text,created) VALUES(?,?)", (arg, time.time()))
-        core.db.commit()
-        return "✅ Правило добавлено."
+        return editor_rules.add(arg)
     if not arg.isdigit():
         return "Формат: /rule_del номер (номера смотрите в /rules)"
     if len(arg) > 9 or int(arg) < 1:
         return "Правила с таким номером нет."
-    row = core.db.execute("SELECT id FROM rules ORDER BY id LIMIT 1 OFFSET ?", (int(arg) - 1,)).fetchone()
-    if not row:
-        return "Правила с таким номером нет."
-    cur = core.db.execute("DELETE FROM rules WHERE id=?", (row["id"],))
-    core.db.commit()
-    return "🗑 Правило удалено." if cur.rowcount else "Правила с таким номером нет."
+    def remove():
+        row = core.db.execute("SELECT id FROM rules ORDER BY id LIMIT 1 OFFSET ?", (int(arg) - 1,)).fetchone()
+        if not row:
+            return "Правила с таким номером нет."
+        core.db.execute("DELETE FROM rules WHERE id=?", (row["id"],))
+        return "🗑 Правило удалено."
+    return command_context.mutate("rule_delete", remove)
+
 
 
 def rules_view() -> tuple[str, list]:
@@ -42,6 +45,7 @@ def rules_view() -> tuple[str, list]:
     if len(body.encode("utf-16-le")) // 2 > 3500:
         body = body.encode("utf-16-le")[:3500 * 2].decode("utf-16-le", errors="ignore") + "\n…"
     text = "📝 Правила стиля:\n" + body
+    text += "\n\nВ генерации активны последние 30 правил в пределах 12 000 знаков (до 1000 на правило)."
     if total > len(rows):
         text += f"\n\nПоказаны последние {len(rows)} из {total}. Старые удаляются командой /rule_del номер."
     if rows:
@@ -65,7 +69,22 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     post_footer.WAITING.pop((adapter.name, uid), None)
     spaces.WAITING_CREATE.discard(uid)
     spaces.WAITING_MEMBER.discard((spaces.active_id(), uid))
+    confirmation = dialog_state.PendingMap(core.db, "people_confirmation")
+    key = (adapter.name, uid)
     parts = payload.split(":")
+    if len(parts) > 1 and parts[1] in ("proleok", "pdelok"):
+        if not core.is_admin(adapter, uid):
+            return "⛔ Людей добавляет только администратор.", None
+        saved = confirmation.pop(key, None)
+        expected = saved.get("payload") if isinstance(saved, dict) else None
+        target = parts[3] if parts[1] == "proleok" and len(parts) == 5 else parts[2] if parts[1] == "pdelok" and len(parts) == 4 else ""
+        person = core._person(adapter, target)
+        revision = [person["role"], person["created"]] if person else None
+        if payload != expected or revision != (saved or {}).get("revision"):
+            return "Это подтверждение больше не действует. Откройте человека и подтвердите действие заново.", None
+        parts = parts[:-1]
+    else:
+        confirmation.pop(key, None)
     act = parts[1] if len(parts) > 1 else "menu"
     if act in ("rules", "del", "add") and not core.is_admin(adapter, uid):
         return "⛔ Настройки меняет только администратор.", None
@@ -139,8 +158,10 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     if act == "rules":
         return core.rules_view()
     if act == "del" and len(parts) > 2 and parts[2].isdigit():
-        core.db.execute("DELETE FROM rules WHERE id=?", (int(parts[2]),))
-        core.db.commit()
+        def remove():
+            core.db.execute("DELETE FROM rules WHERE id=?", (int(parts[2]),))
+            return "removed"
+        command_context.mutate("rule_delete_button", remove)
         return core.rules_view()
     if act == "notif":
         return ops.notif_view(adapter, uid)
@@ -211,6 +232,8 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         await adapter.send_menu(uid, message, rows)
         return True
     key = (adapter.name, uid)
+    if t == "/cancel":
+        dialog_state.PendingMap(core.db, "people_confirmation").pop(key, None)
     if key in post_footer.WAITING:
         if not core.is_admin(adapter, uid):
             post_footer.WAITING.pop(key, None)
@@ -277,10 +300,11 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         if t.lower().startswith("/cancel"):
             await adapter.notify(uid, "Отменено.")
             return True
-        core.db.execute("INSERT INTO rules(text,created) VALUES(?,?)", (t, time.time()))
-        core.db.commit()
+        result = editor_rules.add(t)
+        if result.startswith("Пришлите"):
+            core.WAITING_RULE.add(key)
         msg, rows = core.rules_view()
-        await adapter.send_menu(uid, "✅ Правило добавлено.\n\n" + msg, rows)
+        await adapter.send_menu(uid, result + "\n\n" + msg, rows)
         return True
     if t.lower().startswith("/cancel") and await core.on_comment(adapter, uid, t):
         return True

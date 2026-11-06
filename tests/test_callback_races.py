@@ -1,9 +1,10 @@
 import asyncio
 
-import core
 import pytest
 from conftest import run
-from test_admin_menu_button import Api, make, buttons
+from test_admin_menu_button import Api, buttons, make
+
+import core
 
 
 @pytest.mark.parametrize('fails', [False, True])

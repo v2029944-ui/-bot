@@ -1,5 +1,6 @@
-import core
 from conftest import run
+
+import core
 
 
 def test_first_click_and_cancel_do_not_publish(mx, llm, png):

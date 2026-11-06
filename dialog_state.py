@@ -1,7 +1,7 @@
 """Состояния ожидания ввода: только ID/версия поста или имя поля, без текста постов."""
-from collections.abc import MutableMapping, MutableSet
 import json
 import time
+from collections.abc import MutableMapping, MutableSet
 
 TTL = 7 * 86400
 

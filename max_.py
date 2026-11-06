@@ -1,26 +1,28 @@
 """MAX-адаптер на прямых запросах к официальному Bot API (https://dev.max.ru/docs-api)."""
 import asyncio
 import contextvars
+import html
 import json
 import logging
 import os
 import re
+import secrets
 import time
 import weakref
-import secrets
-import dialog_state
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 import core
-import ops
-import max_queue
+import dialog_state
 import max_actions
+import max_queue
+import ops
 import post_footer
 import spaces
-import html
+from services import publication
 
 log = logging.getLogger("max")
 API = "https://platform-api.max.ru"
@@ -57,7 +59,7 @@ def _mid(resp):
 def _id(x):
     """MAX ждёт числовые id, а из настроек и колбэков приходят строки."""
     s = str(x)
-    return int(s) if s.lstrip("-").isdigit() else s
+    return int(s) if re.fullmatch(r"-?[0-9]+", s) else s
 
 
 class Max(core.Adapter):
@@ -71,9 +73,9 @@ class Max(core.Adapter):
         core.refresh_people(self)  # + люди, добавленные кнопками (хранятся в базе)
         self._tasks: set[asyncio.Task] = set()
         self._processing = asyncio.Semaphore(2)
-        self._send_locks = weakref.WeakValueDictionary()
+        self._send_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._upload_cache = {}
-        self._upload_locks = weakref.WeakValueDictionary()
+        self._upload_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     CONFIRM_ACTIONS = {"okyes", "okforce", "delyes", "rejectphoto", "rejecttext", "rejectcustom"}
 
@@ -82,6 +84,7 @@ class Max(core.Adapter):
 
     def _clear_confirmation(self, uid):
         self._confirmations().pop((self.name, str(uid)), None)
+        dialog_state.PendingMap(core.db, "confirmation_channels").pop((self.name, str(uid)), None)
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
@@ -221,7 +224,7 @@ class Max(core.Adapter):
                 rows = spaces.namespace(replacement, getattr(self, "workspace_id", None)) + [row for row in admin_rows if row]
                 if rows:
                     atts.append({"type": "inline_keyboard", "payload": {"buttons": rows}})
-            edit = {"attachments": atts}
+            edit: dict[str, Any] = {"attachments": atts}
             if not body.get("markup"):
                 edit["text"] = body.get("text") or ""
                 if body.get("format") in ("html", "markdown"):
@@ -235,7 +238,9 @@ class Max(core.Adapter):
                                 (json.dumps(atts, ensure_ascii=False), prev["mid"]))
                 core.db.commit()
             return True
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+                return True
             if cached:
                 core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (prev["mid"],))
                 core.db.commit()
@@ -282,7 +287,13 @@ class Max(core.Adapter):
                         button["payload"] += ":" + nonce
                         issued.append(button["payload"])
             if issued:
-                self._confirmations()[(self.name, str(target["user_id"]))] = issued
+                key = (self.name, str(target["user_id"]))
+                self._confirmations()[key] = issued
+                channels = publication.PROMPT_CHANNELS.get()
+                if channels is None:
+                    draft = core.get(int(issued[0].split(":")[2]))
+                    channels = json.loads((draft or {}).get("publication_channels") or "{}")
+                dialog_state.PendingMap(core.db, "confirmation_channels")[key] = {p: channels for p in issued}
         buttons = [list(row) for row in base_buttons]
         if with_admin and not any(b.get("payload") == "m:admin" for row in buttons for b in row):
             # Кнопка стоит только под последним сообщением: при отправке нового она убирается из прежнего.
@@ -400,7 +411,7 @@ class Max(core.Adapter):
 
     async def send_menu(self, user_id, text, rows, silent=False):
         if spaces.INSTALLED:
-            name = spaces.CURRENT.get().name if spaces.active_id() else "Основное"
+            name = getattr(spaces.CURRENT.get(), "name", "Основное") if spaces.active_id() else "Основное"
             titled = f"Пространство: {name}\n\n{text}"
             if len(titled.encode("utf-16-le")) // 2 <= 4000:
                 text = titled
@@ -657,12 +668,21 @@ class Max(core.Adapter):
         payload = cb.get("payload")
         if not isinstance(payload, str):
             return  # payload не обязателен в официальной схеме Callback
+        expected_channels = None
+        if not payload.startswith(("m:proleok:", "m:pdelok:")):
+            dialog_state.PendingMap(core.db, "people_confirmation").pop((self.name, str(uid)), None)
         parts = payload.split(":")
         if len(parts) >= 2 and parts[0] == "d" and parts[1] in self.CONFIRM_ACTIONS:
             pending = self._confirmations().get((self.name, str(uid)), ())
             if len(parts) != 5 or payload not in pending:
                 await self.notify(uid, "Это подтверждение больше не действует. Откройте пост и подтвердите действие заново.")
                 return
+            if parts[1] in ("okyes", "okforce"):
+                expected_channels = dialog_state.PendingMap(core.db, "confirmation_channels").get((self.name, str(uid)), {}).get(payload)
+                if expected_channels is None:
+                    self._clear_confirmation(uid)
+                    await self.notify(uid, "Откройте новое подтверждение публикации: прежнее не содержит получателей.")
+                    return
             self._clear_confirmation(uid)  # consume before the first await/mutation
             payload = ":".join(parts[:4])
         else:
@@ -673,6 +693,7 @@ class Max(core.Adapter):
         if pressed and len(parts) == 4 and parts[0] == "d" and parts[1] in ("change", "length", "back"):
             ctx["inline_mid"] = pressed
         token = _NAV.set(ctx)
+        channel_token = publication.EXPECTED_CHANNELS.set(expected_channels)
         if pressed and pressed == self._ui(uid)["menu"] and payload.startswith("d:"):
             await self._delete(pressed, uid)
             self._ui_set(uid, menu=None)
@@ -692,6 +713,7 @@ class Max(core.Adapter):
             text = f"⚠️ Ошибка: {core.err(e)}"
         finally:
             _NAV.reset(token)
+            publication.EXPECTED_CHANNELS.reset(channel_token)
         if text:
             await self.notify(uid, text)
         # Прошлый шаг не должен висеть. Пост на согласование (кнопки d:) не трогаем: удаляем только сообщения-меню.

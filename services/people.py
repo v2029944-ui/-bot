@@ -1,8 +1,11 @@
 """Роли, заявки и участники."""
-import core
+import secrets
 import time
-import spaces
+
+import core
+import dialog_state
 import ops
+import spaces
 
 
 def is_admin(adapter: core.Adapter, uid) -> bool:
@@ -12,7 +15,7 @@ def is_admin(adapter: core.Adapter, uid) -> bool:
 def is_global_admin(adapter, uid):
     if adapter.publish_only or spaces.active_id():
         return False
-    root = spaces.ROOT.adapters.get("max") if spaces.INSTALLED else adapter
+    root = spaces.root().adapters.get("max") if spaces.INSTALLED else adapter
     return root is adapter and str(uid) in core._base_admins(root)
 
 
@@ -21,7 +24,7 @@ def is_member(adapter, uid):
         return False
     uid = str(uid)
     if spaces.INSTALLED and spaces.active_id() == 0:
-        if spaces.ROOT.db.execute("SELECT 1 FROM workspaces WHERE owner=?", (uid,)).fetchone() and not is_admin(adapter, uid):
+        if spaces.root().db.execute("SELECT 1 FROM workspaces WHERE owner=?", (uid,)).fetchone() and not is_admin(adapter, uid):
             return False
     return is_admin(adapter, uid) or adapter.allowed is None or uid in adapter.allowed
 
@@ -32,7 +35,7 @@ def can_manage_draft(adapter, uid, draft):
         return False
     if spaces.INSTALLED and getattr(adapter, "workspace_id", None) != spaces.active_id():
         return False
-    return is_admin(adapter, uid) or (draft["platform"] == adapter.name and str(draft["author_id"]) == str(uid))
+    return adapter is not None and (is_admin(adapter, uid) or (draft["platform"] == adapter.name and str(draft["author_id"]) == str(uid)))
 
 
 def draft_recipients(draft, adapter):
@@ -59,7 +62,7 @@ def _base(adapter: core.Adapter) -> tuple[list[str], list[str]]:
 
 def _db_people(adapter: core.Adapter) -> list[dict]:
     rows = core.db.execute("SELECT * FROM people WHERE platform=? ORDER BY created", (adapter.name,)).fetchall()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "role": "member" if r["role"] in ("emp", "apr") else r["role"]} for r in rows]
 
 
 def _base_admins(adapter: core.Adapter) -> list[str]:
@@ -76,8 +79,6 @@ def refresh_people(adapter: core.Adapter):
         adapter.admins, adapter.approvers, adapter.allowed = [], [], set()
         return
     base_apr, base_emp = core._base(adapter)
-    core.db.execute("UPDATE people SET role='member' WHERE role IN ('emp','apr')")
-    core.db.commit()
     people = core._db_people(adapter)
     adm = list(dict.fromkeys([*core._base_admins(adapter), *(p["uid"] for p in people if p["role"] == "adm")]))
     members = set(map(str, [*base_apr, *base_emp])) | {p["uid"] for p in people if p["role"] == "member"} | set(adm)
@@ -136,11 +137,8 @@ async def unknown_user(adapter: core.Adapter, uid, name: str, username: str | No
         return False
     uid = str(uid)
     r = core.db.execute("SELECT status, created FROM requests WHERE platform=? AND uid=?", (adapter.name, uid)).fetchone()
-    if r:
-        if r["status"] == "pending":
-            return True
-        if time.time() - r["created"] < core.REQ_TTL:
-            return False
+    if r and time.time() - r["created"] < core.REQ_TTL:
+        return r["status"] == "pending"
     core.db.execute("DELETE FROM requests WHERE status='pending' AND created < ?", (time.time() - core.REQ_TTL,))  # протухшие
     n = core.db.execute("SELECT COUNT(*) FROM requests WHERE platform=? AND status='pending'", (adapter.name,)).fetchone()[0]
     if n >= core.MAX_PENDING_REQUESTS:
@@ -174,31 +172,45 @@ def menu_for(adapter: core.Adapter, uid) -> list:
     return rows
 
 
-def people_view(adapter: core.Adapter) -> tuple[str, list]:
-    people = core._db_people(adapter)
-    in_db = {p["uid"] for p in people}
+def people_view(adapter: core.Adapter, page: int = 0) -> tuple[str, list]:
+    total = core.db.execute("SELECT COUNT(*) FROM people WHERE platform=?", (adapter.name,)).fetchone()[0]
+    page = max(0, min(page, max(0, (total - 1) // 12)))
+    people = [dict(r) for r in core.db.execute("SELECT * FROM people WHERE platform=? ORDER BY created,uid LIMIT 12 OFFSET ?", (adapter.name, page * 12))]
     base_apr, base_emp = core._base(adapter)
     base_adm = core._base_admins(adapter)
-
-    def line(name, uid, note=""):
-        return f"• {name or 'Без имени'} (id {uid}){note}"
-    adm = [line(None, u, " — из настроек") for u in base_adm if u not in in_db]
-    adm += [line(p["name"], p["uid"]) for p in people if p["role"] == "adm"]
-    members = [line(None, u, " — из настроек") for u in dict.fromkeys(map(str, [*base_apr, *base_emp])) if u not in in_db and u not in base_adm]
-    members += [line(p["name"], p["uid"]) for p in people if p["role"] == "member"]
-    text = ("👥 Люди\n\n👑 Администраторы:\n" + ("\n".join(adm) or "—") +
-            "\n\n👤 Участники:\n" + ("\n".join(members) or "—"))
-    if len(text) > 3500:
-        text = text[:3500] + "\n…"
-    btns = [(f"⚙ {(p['name'] or p['uid'])[:18]}", f"m:pset:{p['uid']}") for p in people[:20]]
+    lines = [f"👥 Люди · страница {page + 1} из {max(1, (total + 11) // 12)}", "👑 Администраторы / 👤 Участники"]
+    if page == 0:
+        for uid in dict.fromkeys([*base_adm, *base_apr, *base_emp]):
+            if not core.db.execute("SELECT 1 FROM people WHERE platform=? AND uid=?", (adapter.name, uid)).fetchone():
+                icon = "👑" if uid in base_adm else "👤"
+                lines.append(f"{icon} Без имени (id {uid}) — из настроек")
+    for p in people:
+        role = "member" if p["role"] in ("emp", "apr") else p["role"]
+        lines.append(f"{core.ROLE_ICON.get(role, '👤')} {(p['name'] or 'Без имени')[:60]} (id {p['uid']})")
+    suffix = "\n\nНажмите ⚙, чтобы сменить роль или убрать человека. Люди «из настроек» меняются в файле .env."
+    # Reserve the footer and budget UTF-16 consistently with the rest of the UI.
+    body = "\n".join(lines).encode("utf-16-le")[:6000].decode("utf-16-le", errors="ignore")
+    btns = [(f"⚙ {(p['name'] or p['uid'])[:18]}", f"m:pset:{p['uid']}") for p in people]
     rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
-    if people:
-        text += "\n\nНажмите ⚙, чтобы сменить роль или убрать человека. Люди «из настроек» меняются в файле .env."
+    nav = []
+    if page:
+        nav.append(("← Назад", f"m:people:{page - 1}"))
+    if (page + 1) * 12 < total:
+        nav.append(("Далее →", f"m:people:{page + 1}"))
+    if nav:
+        rows.append(nav)
     n = core.db.execute("SELECT COUNT(*) FROM requests WHERE platform=? AND status='pending'", (adapter.name,)).fetchone()[0]
     if n:
         rows.append([(f"📬 Заявки ({n})", "m:reqs")])
     rows.append([("➕ Добавить человека", "m:member")])
-    return text, rows
+    return body + suffix, rows
+
+
+def _people_confirmation(adapter, actor, payload, person):
+    payload += ":" + secrets.token_urlsafe(12)
+    dialog_state.PendingMap(core.db, "people_confirmation")[(adapter.name, str(actor))] = {
+        "payload": payload, "revision": [person["role"], person["created"]]}
+    return payload
 
 
 def _person(adapter: core.Adapter, uid: str) -> dict | None:
@@ -220,9 +232,12 @@ def reqs_view(adapter: core.Adapter) -> tuple[str, list]:
 
 
 async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: str = "") -> tuple[str, list | None]:
-    arg = lambda i: parts[i] if len(parts) > i else ""
+    actor = uid
+    def arg(i):
+        return parts[i] if len(parts) > i else ""
     if act == "people":
-        return core.people_view(adapter)
+        page = int(arg(2)) if arg(2).isascii() and arg(2).isdigit() and len(arg(2)) < 8 else 0
+        return core.people_view(adapter, page)
     if act == "reqs":
         return core.reqs_view(adapter)
     if act == "acc":
@@ -280,7 +295,7 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
             warn = ("\nАдминистратор добавляет и убирает людей, управляет настройками и всеми постами своего пространства."
                     if role == "adm" else "")
             return (f"Сменить роль: {who} — {core.ROLE_NAME[p['role']]} → {core.ROLE_NAME[role]}?{warn}",
-                    [[("Да, сменить", f"m:proleok:{role}:{uid}"), ("Отмена", f"m:pset:{uid}")]])
+                    [[("Да, сменить", _people_confirmation(adapter, actor, f"m:proleok:{role}:{uid}", p)), ("Отмена", f"m:pset:{uid}")]])
         core._add_person(adapter, uid, p["name"], role)
         try:
             await adapter.notify(uid, f"Ваша роль изменена: {core.ROLE_NAME[role]}. Нажмите /menu, чтобы обновить кнопки.")
@@ -294,7 +309,7 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
         if p["role"] == "adm" and len(adapter.admins) <= 1:
             return "⛔ Нельзя убрать последнего администратора.", [[("← Назад", f"m:pset:{p['uid']}")]]
         return (f"Убрать {p['name'] or p['uid']} из списка? Он перестанет присылать фото.",
-                [[("Да, убрать", f"m:pdelok:{p['uid']}"), ("Отмена", "m:people")]])
+                [[("Да, убрать", _people_confirmation(adapter, actor, f"m:pdelok:{p['uid']}", p)), ("Отмена", "m:people")]])
     if act == "pdelok":
         p = next((x for x in core._db_people(adapter) if x["uid"] == arg(2)), None)
         if p and p["role"] == "adm" and len(adapter.admins) <= 1:  # иначе бот остался бы без админа и открылся всем

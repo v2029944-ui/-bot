@@ -3,11 +3,11 @@ import asyncio
 import os
 
 import pytest
+from conftest import run
 
 import core
 import main
 import ops
-from conftest import run
 
 
 def test_shutdown_finishes_cancelling_guarded_work_before_return(monkeypatch):

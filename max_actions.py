@@ -5,6 +5,7 @@ import json
 import logging
 import time
 
+import command_context
 import core
 import spaces
 
@@ -40,7 +41,7 @@ class Worker:
         self.active = {}
         self.clean_task = None
         self.clean_requested = True
-        self.last_cleanup = 0
+        self.last_cleanup = 0.0
 
     def finished(self, task):
         self.clean_requested = True
@@ -52,7 +53,11 @@ class Worker:
             update = json.loads(row["payload"])
             if update.pop("_route_on_process", False):
                 update = spaces.stamp(update)
-            await self.adapter.handle(update)
+            token = command_context.EVENT.set(row["event_key"])
+            try:
+                await self.adapter.handle(update)
+            finally:
+                command_context.EVENT.reset(token)
         except asyncio.CancelledError:
             core.db.execute("UPDATE max_actions SET state='pending' WHERE id=?", (row["id"],))
             core.db.commit()

@@ -1,12 +1,15 @@
 """Статус, уведомления и напоминания."""
-import core
 import asyncio
 import os
 import shutil
 import time
+from typing import Any
+
 import httpx
-import spaces
+
+import core
 import ops
+import spaces
 
 
 def quiet(adapter: core.Adapter, user_id) -> bool:
@@ -56,7 +59,7 @@ async def alert_staff(adapter, text: str):
     if now - core._ALERT_LAST.get(key, 0) < int(core.env("ALERT_THROTTLE_SEC", "300")):
         return
     core._ALERT_LAST[key] = now
-    seen = []
+    seen: list[core.Adapter] = []
     for a in [adapter, *core.ADAPTERS.values()]:
         if a is None or any(a is x for x in seen):
             continue
@@ -135,9 +138,9 @@ async def aitunnel_balance() -> str | None:
 
 async def status_text(adapter: core.Adapter) -> str:
     """Сводка для /status: жив ли бот, что в очереди, отвечает ли нейросеть (проверка стоит доли копейки)."""
-    import shutil
     now = time.time()
-    one = lambda sql, *a: core.db.execute(sql, a).fetchone()[0]
+    def one(sql, *a):
+        return core.db.execute(sql, a).fetchone()[0]
     pend = one("SELECT COUNT(*) FROM drafts WHERE status='pending'")
     oldest = one("SELECT MIN(COALESCE(NULLIF(last_sent,0), created)) FROM drafts WHERE status='pending'")
     stuck = one("SELECT COUNT(*) FROM drafts WHERE status IN ('publishing','regenerating')")
@@ -184,16 +187,17 @@ async def remind_once(now: float | None = None) -> int:
         return 0
     rows = core.db.execute("SELECT * FROM drafts WHERE status='pending' AND reminded=0 "
                       "AND COALESCE(NULLIF(last_sent,0), created) < ? ORDER BY id", (now - after,)).fetchall()
-    groups = {}
+    groups: dict[tuple[int, str], Any] = {}
     for r in rows:
         d = dict(r)
         ad = core._approval_adapter(d, None)
         if ad is not None:
             for uid in core.draft_recipients(d, ad):
                 groups.setdefault((id(ad), uid), (ad, []))[1].append(d)
-    delivered = set()
+    delivered: set[int] = set()
     for (_, uid), (ad, ds) in groups.items():
-        age = lambda d: now - (d["last_sent"] or d["created"])
+        def age(d):
+            return now - (d["last_sent"] or d["created"])
         waiting, oldest = len(ds), max(age(d) for d in ds)
         ds = ds[:5]
         text = (f"⏰ Ждут решения: {waiting} (самый давний — {core._ago(oldest)}).\n"
@@ -218,7 +222,7 @@ async def reminder_loop():
             await ops.flush_deferred()  # придержанные черновики уходят, когда началось рабочее время
             await core.remind_once()
             await core.warn_expiring_once()
-            if time.time() - last_clean > int(core.env("HOUSEKEEPING_SEC", "21600")):  # раз в 6 часов
+            if time.time() - last_clean > int(core.env("HOUSEKEEPING_SEC", "21600")) or core.cleanup_pending():  # раз в 6 часов
                 last_clean = time.time()
                 core.housekeeping()  # в потоке нельзя: соединение SQLite принадлежит потоку с event loop
         except Exception:

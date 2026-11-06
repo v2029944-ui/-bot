@@ -1,9 +1,10 @@
 """Удаление медиа только после полной публикации и срок хранения черновиков."""
-from pathlib import Path
 import time
+from pathlib import Path
+
+from conftest import FakeAdapter, run
 
 import core
-from conftest import FakeAdapter, run
 
 
 def test_single_photo_and_text_removed_after_publication(tg, llm, png):
@@ -17,8 +18,8 @@ def test_single_photo_and_text_removed_after_publication(tg, llm, png):
 
 
 def test_partial_album_retained_until_retry_succeeds(llm, png):
-    mx = FakeAdapter("max", ["5"])
-    tg = FakeAdapter("tg", [], fail=[RuntimeError("timeout")])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
+    tg = FakeAdapter("tg", [], fail=[RuntimeError("timeout")], admins=[])
     tg.publish_only = True
     core.ADAPTERS.update(max=mx, tg=tg)
     did = run(core.submit_album(mx, "9", "Анна", "Описание работы", [{"type": "image", "data": png}] * 2))
@@ -54,7 +55,7 @@ def test_startup_removes_recently_published_files_from_previous_version(tg, llm,
 
 
 def test_partial_publication_preserves_text_until_retry_succeeds(mx, llm, png):
-    tg = FakeAdapter("tg", [], fail=[ValueError("Отказ")], sure=(ValueError,))
+    tg = FakeAdapter("tg", [], fail=[ValueError("Отказ")], sure=(ValueError,), admins=[])
     tg.publish_only = True
     core.ADAPTERS["tg"] = tg
     did = run(core.submit(mx, "9", "Анна", "Важная подпись", png, source_key="source-1"))

@@ -1,16 +1,20 @@
 """Промпты и провайдеры нейросетей."""
-import core
 import asyncio
 import base64
 import os
 import re
 import time
 from pathlib import Path
+from typing import Any
+
 import httpx
-import post_footer
+
 import comparison
-import spaces
+import core
+import editor_rules
+import post_footer
 import resources
+import spaces
 
 
 def llm_config_problem() -> str | None:
@@ -79,10 +83,9 @@ def build_system() -> str:
     """Базовые правила и отдельно сохранённые пожелания редакции."""
     s = core.SYSTEM
     if spaces.active_id():
-        s = s.replace(f"компании «{core.env('COMPANY', 'нашей компании')}»", f"компании «{spaces.CURRENT.get().name}»", 1)
+        s = s.replace(f"компании «{core.env('COMPANY', 'нашей компании')}»", f"компании «{getattr(spaces.CURRENT.get(), "name", "Основное")}»", 1)
     # в запрос идут последние 30 правил, чтобы он не разрастался
-    rules = [r["text"] for r in core.db.execute(
-        "SELECT text FROM (SELECT id, text FROM rules ORDER BY id DESC LIMIT 30) ORDER BY id")]
+    rules = editor_rules.active()
     if rules:
         s += ("\n\nПостоянные пожелания редакции (дополняют правила выше, учитывай всегда):\n"
               + "\n".join(f"- {r}" for r in rules))
@@ -103,7 +106,7 @@ async def _complete(system: str, text: str, b64: str | None = None) -> str:
 async def _claude(system: str, text: str, b64: str | None) -> str:
     from anthropic import AsyncAnthropic
     core._client = core._client or AsyncAnthropic()  # ключ из ANTHROPIC_API_KEY
-    content = [{"type": "text", "text": text}]
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
     r = await core._client.messages.create(model=comparison.MODEL.get() or core.MODEL, max_tokens=1000, system=system,
@@ -120,7 +123,7 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
     if (problem := core.llm_config_problem()):
         raise RuntimeError(problem)
     base = core.env("LLM_BASE_URL", "").strip().rstrip("/")
-    content = [{"type": "text", "text": text}]
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
     payload = {"model": comparison.MODEL.get() or core.MODEL, "messages": [{"role": "system", "content": system},
@@ -173,7 +176,7 @@ async def generate_options(*args, **kwargs):
 async def _learn(comment: str, old_post: str) -> str | None:
     """Если комментарий — общее пожелание к стилю, сохраняем его как правило."""
     try:
-        rules = [r["text"] for r in core.db.execute("SELECT text FROM rules ORDER BY id")]
+        rules = editor_rules.active()
         prompt = (f"Редактор оставил комментарий к посту.\nПост: {old_post}\nКомментарий: {comment}\n\n"
                   f"Уже сохранённые правила:\n{chr(10).join(rules) or '(нет)'}\n\n"
                   "Если комментарий выражает ОБЩЕЕ пожелание к стилю, длине, структуре или тону будущих постов "
@@ -182,9 +185,8 @@ async def _learn(comment: str, old_post: str) -> str | None:
         out = (await core._complete("Ты ведёшь свод правил стиля для корпоративного канала.", prompt)).strip()
         out = out.lstrip("-• ").strip()
         if out and not re.match(r"^\W*нет\b", out, re.I) and len(out) < 300:  # «НЕТ», «Нет.», «НЕТ, это разовая…»
-            core.db.execute("INSERT INTO rules(text,created) VALUES(?,?)", (out, time.time()))
-            core.db.commit()
-            return out
+            if editor_rules.add(out, "rule_learn") == "✅ Правило добавлено.":
+                return out
     except Exception:
         core.log.warning("learn failed", exc_info=True)
     return None

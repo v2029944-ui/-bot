@@ -1,9 +1,14 @@
 """Подтверждение и отправка в каналы."""
-import core
 import json
 import os
 import time
+from contextvars import ContextVar
+
+import core
 import post_footer
+
+EXPECTED_CHANNELS: ContextVar[dict | None] = ContextVar("confirmed_channels", default=None)
+PROMPT_CHANNELS: ContextVar[dict | None] = ContextVar("prompt_channels", default=None)
 
 
 async def _publish(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
@@ -103,6 +108,10 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
 
     targets = core.publication_targets(d, adapter)
     channels = core.publication_channels(targets)
+    expected = EXPECTED_CHANNELS.get()
+    if expected is not None and channels != expected:
+        core._set(did, status="pending")
+        return False, "Каналы публикации изменились. Откройте новое подтверждение."
     saved = json.loads(d.get("publication_channels") or "{}")
     if saved and channels != saved:
         core._set(did, status="pending")

@@ -1,9 +1,10 @@
 import asyncio
 
-import core
-import max_actions
 from conftest import run
 from test_admin_menu_button import Api, make
+
+import core
+import max_actions
 
 
 def event(uid, cid):

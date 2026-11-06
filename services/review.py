@@ -1,8 +1,10 @@
 """Правка, повторная генерация и отклонение."""
-import core
 import json
-import post_footer
+
 import comparison
+import core
+import post_footer
+from services import publication
 
 
 def approval_rows(did: int, attempt: int):
@@ -102,15 +104,14 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
     if (action in ("redo", "redoc", "edit", "change", "length") or action.startswith("len_")) and core._parse_marks(d.get("published_to")):
         return False, core.PARTIAL_EDIT_BLOCKED
 
-    author = core.ADAPTERS.get(d["platform"])
-
     if action in ("change", "length", "back"):
         key = (adapter.name, str(user_id))
         core.WAITING.pop(key, None)
         core.WAITING_EDIT.pop(key, None)
         core.WAITING_REJECT.pop(key, None)
         core.WAITING_RULE.discard(key)
-        button = lambda label, act: (label, f"d:{act}:{did}:{attempt}")
+        def button(label, act):
+            return (label, f"d:{act}:{did}:{attempt}")
         if action == "change":
             rows = [[button("🔁 Заново", "redo"), button("✏️ С комментарием", "redoc")],
                     [button("✍️ Править самому", "edit"), button("📏 Длина поста", "length")],
@@ -144,10 +145,16 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         targets = [names.get(t.name, t.name) for t in core.publication_targets(d, adapter)
                    if marks.get(t.name) != "done"]
         preview = d["post"][:200] + ("…" if len(d["post"]) > 200 else "")
-        await adapter.send_menu(str(user_id),
-                                f"Опубликовать пост №{did} в {', '.join(targets)}?\n\n«{preview}»",
-                                [[("✅ Да, опубликовать", f"d:okyes:{did}:{attempt}")],
-                                 [("↩️ Отмена", f"d:okno:{did}:{attempt}")]])
+        channels = core.publication_channels(core.publication_targets(d, adapter))
+        destination = ", ".join(f"{name}: {channel}" for name, channel in channels.items())
+        token = publication.PROMPT_CHANNELS.set(channels)
+        try:
+            await adapter.send_menu(str(user_id),
+                                    f"Опубликовать пост №{did} в {', '.join(targets)}?\n{destination}\n\n«{preview}»",
+                                    [[("✅ Да, опубликовать", f"d:okyes:{did}:{attempt}")],
+                                     [("↩️ Отмена", f"d:okno:{did}:{attempt}")]])
+        finally:
+            publication.PROMPT_CHANNELS.reset(token)
         return False, ""
 
     if action == "okno":

@@ -3,10 +3,10 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import run
 
 import core
 import main
-from conftest import run
 
 ROOT = Path(__file__).resolve().parents[1]
 INTERNAL = {"REQ_STAMP"}
@@ -16,7 +16,7 @@ def _vars_read_by_code() -> set[str]:
     found = set()
     for path in [*ROOT.glob("*.py"), *ROOT.glob("services/*.py")]:
         src = path.read_text(encoding="utf-8")
-        found |= set(re.findall(r'(?:getenv|environ\.get|need|ids|env)\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
+        found |= set(re.findall(r'(?:getenv|environ\.get|need|ids|env|number)\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
         found |= set(re.findall(r'environ\[["\']([A-Z][A-Z0-9_]+)["\']\]', src))
         found |= set(re.findall(r'_env\(\s*["\']([A-Z][A-Z0-9_]+)["\']', src))
     sh = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")

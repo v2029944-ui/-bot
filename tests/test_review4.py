@@ -11,11 +11,11 @@ import time
 import types
 
 import pytest
+from conftest import FakeAdapter, draft_id, run
 from PIL import Image
 
 import core
 import ops
-from conftest import FakeAdapter, draft_id, run
 
 S = types.SimpleNamespace
 REAL_SLEEP = asyncio.sleep  # conftest подменяет asyncio.sleep пустышкой; для тестов со временем нужен настоящий
@@ -63,17 +63,18 @@ def test_status_from_non_admin_never_becomes_a_comment(tg, llm, png):
 
 # ---------- 4. последний админ ----------
 def test_last_admin_cannot_be_removed_but_one_of_two_can():
-    a = FakeAdapter("tg", ["1"])
+    a = FakeAdapter("tg", ["1"], admins=["1"])
     a.admins = []
     core.ADAPTERS["tg"] = a
     core.refresh_people(a)
     core._add_person(a, "7", "Админ", "adm")
     assert a.admins == ["7"]
     assert "последнего администратора" in run(core.on_menu(a, "7", "m:pdel:7"))[0]
-    assert "последнего администратора" in run(core.on_menu(a, "7", "m:pdelok:7"))[0]
+    assert "подтверждение больше не действует" in run(core.on_menu(a, "7", "m:pdelok:7"))[0]
     assert a.admins == ["7"] and a.allowed is not None  # бот не открылся всем
     core._add_person(a, "8", "Второй", "adm")
-    run(core.on_menu(a, "7", "m:pdelok:8"))
+    _, rows = run(core.on_menu(a, "7", "m:pdel:8"))
+    run(core.on_menu(a, "7", rows[0][0][1]))
     assert a.admins == ["7"]
 
 
@@ -141,7 +142,8 @@ def test_overnight_window_and_bad_values(monkeypatch):
     monkeypatch.setenv("NOTIFY_TZ", "UTC")
     monkeypatch.setenv("NOTIFY_DAYS", "1-7")
     monkeypatch.setenv("NOTIFY_HOURS", "20-6")
-    at = lambda h: __import__("datetime").datetime(2026, 11, 3, h, 0, tzinfo=__import__("datetime").timezone.utc).timestamp()
+    def at(h):
+        return __import__("datetime").datetime(2026, 11, 3, h, 0, tzinfo=__import__("datetime").timezone.utc).timestamp()
     assert ops.in_window(at(23)) and ops.in_window(at(3)) and not ops.in_window(at(12))
     assert "20:00–06:00" in ops.window_text()
     assert ops.config_problem() is None
@@ -246,9 +248,10 @@ def test_deferred_entry_survives_regeneration_and_is_not_sent_twice(tg, llm, png
 def test_updater_installs_new_requirements_into_separate_folder(tmp_path):
     import json
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    git = lambda cwd, *a: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True,
-                                         env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-                                              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+    def git(cwd, *a):
+        return subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True,
+                                             env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                                                  "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
     origin = tmp_path / "origin"
     origin.mkdir()
     git(origin, "init", "-q", "-b", "main")

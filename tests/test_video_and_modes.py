@@ -5,12 +5,12 @@ import subprocess
 import types
 
 import pytest
+from conftest import FakeAdapter, draft_id, run
 from PIL import Image
 
 import core
 import max_
 import tg as tgmod
-from conftest import FakeAdapter, draft_id, run
 
 S = types.SimpleNamespace
 
@@ -132,7 +132,7 @@ def test_telegram_sends_video_file_not_the_preview(tmp_path):
 def test_publish_only_telegram_does_not_poll_and_gets_every_post(llm, png, monkeypatch):
     t = tgmod.Telegram("123456:ABCDEF", "@chan")
     t.bot = RecBot()
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS.update(tg=t, max=mx)
     run(asyncio.wait_for(t.run(), 1))  # сразу возвращается: getUpdates не запускается, конфликта токена нет
     assert t.publish_only and not [c for c in t.bot.calls if c[0] in ("get_updates", "set_my_commands")]
@@ -151,7 +151,7 @@ def test_telegram_failure_is_reported_in_max_and_retry_does_not_duplicate_max(ll
             raise RuntimeError("таймаут")
     t = tgmod.Telegram("123456:ABCDEF", "@chan")
     t.bot = BrokenBot()
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS.update(tg=t, max=mx)
     run(core.submit(mx, "9", "Анна", "Заменили масло и фильтры", png))
     did = draft_id()
@@ -170,7 +170,7 @@ def test_telegram_failure_is_reported_in_max_and_retry_does_not_duplicate_max(ll
 def test_video_from_max_is_approved_then_sent_to_both_channels(llm, mp4):
     t = tgmod.Telegram("123456:ABCDEF", "@chan")
     t.bot = RecBot()
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS.update(tg=t, max=mx)
     did = run(core.submit(mx, "9", "Анна", "Установили новый насос", mp4, kind="video"))
     d = core.get(did)
@@ -201,7 +201,7 @@ def test_publish_only_ignores_old_telegram_roles_and_sends_no_service_messages()
 def test_old_telegram_draft_is_approved_in_max_and_published_to_both(llm, png):
     t = tgmod.Telegram("123456:ABCDEF", "@chan")
     t.bot = RecBot()
-    mx = FakeAdapter("max", ["5"])
+    mx = FakeAdapter("max", ["5"], admins=["5"])
     core.ADAPTERS.update(tg=t, max=mx)
     did = run(core.submit(mx, "9", "Анна", "Заменили масло и фильтры", png))
     core._set(did, platform="tg")  # черновик, оставшийся до смены режима
@@ -457,6 +457,7 @@ def test_max_paused_or_stopping_rejects_media_before_download(mx, monkeypatch, s
 
 def test_sigterm_cancels_max_worker_and_exits_cleanly(monkeypatch):
     import signal
+
     import main
     stopped = []
 

@@ -1,5 +1,4 @@
 """Фото, видео и альбомы."""
-import core
 import io
 import json
 import re
@@ -7,10 +6,10 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from PIL import Image
-from PIL import ImageOps
-from PIL import ImageDraw
-from PIL import UnidentifiedImageError
+
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
+
+import core
 
 
 def caption_ok(text: str | None) -> bool:
@@ -163,22 +162,32 @@ def save_photo(data: bytes) -> str:
     if len(data) > core.MAX_PHOTO_BYTES:
         raise core.BadImage("Файл слишком большой (больше 25 МБ)")
     try:
-        img = Image.open(io.BytesIO(data))  # читает только заголовок: память пока не тратится
-        w, h = img.size
-        if w * h > core._pixel_limit(img.format):
-            raise core.BadImage(f"Слишком большое разрешение ({w}×{h}). Пришлите фото поменьше")
-        if img.format == "JPEG":
-            img.draft("RGB", (1600, 1600))  # JPEG сразу читается уменьшенным: даже огромный кадр не раздувает память
-        img = ImageOps.exif_transpose(img)  # поворот по EXIF, как снято на телефон
-        img = img.convert("RGB")
+        Image.init()
+        formats = tuple(fmt for fmt in ("JPEG", "PNG", "WEBP", "HEIF", "AVIF", "GIF", "BMP", "TIFF") if fmt in Image.OPEN)
+        with Image.open(io.BytesIO(data), formats=formats) as original:
+            w, h = original.size
+            if w * h > core._pixel_limit(original.format):
+                raise core.BadImage(f"Слишком большое разрешение ({w}×{h}). Пришлите фото поменьше")
+            if original.format in ("JPEG", "MPO"):
+                original.draft("RGB", (1600, 1600))
+            with ImageOps.exif_transpose(original) as rotated:
+                img: Image.Image = rotated.convert("RGB")
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise core.BadImage("Не получилось открыть файл — это не изображение") from e
     img.thumbnail((1600, 1600))
     # sendPhoto Telegram: отношение сторон не должно превышать 20.
     w, h = img.size
     if max(w, h) > 20 * min(w, h):
-        img = ImageOps.pad(img, (max(w, (h + 19) // 20), max(h, (w + 19) // 20)), color="white")
+        padded = ImageOps.pad(img, (max(w, (h + 19) // 20), max(h, (w + 19) // 20)), color="white")
+        img.close()
+        img = padded
     core.PHOTOS.mkdir(parents=True, exist_ok=True)
     path = core.PHOTOS / f"{uuid.uuid4().hex}.jpg"  # уникальное имя: альбомы приходят одновременно
-    img.save(path, "JPEG", quality=88)
+    try:
+        img.save(path, "JPEG", quality=88)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        img.close()
     return str(path)

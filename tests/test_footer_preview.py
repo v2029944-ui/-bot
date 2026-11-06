@@ -1,7 +1,8 @@
-import core
-import post_footer
 from conftest import run
 from test_admin_menu_button import Api, make
+
+import core
+import post_footer
 
 
 def test_preview_contains_link_and_publication_uses_same_snapshot(monkeypatch, png, llm):

@@ -1,8 +1,8 @@
 import pytest
+from conftest import run
 
 import core
 import post_footer
-from conftest import run
 
 
 def settings(**changes):

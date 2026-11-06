@@ -3,11 +3,11 @@ import time
 import types
 
 import pytest
+from conftest import FakeAdapter, draft_id, run
 
 import core
 import main
 import max_
-from conftest import FakeAdapter, draft_id, run
 
 S = types.SimpleNamespace
 
@@ -188,7 +188,7 @@ def test_failed_reminder_is_retried_later(tg, llm, png, window):
 
 # ---------- статус и сообщения о сбоях ----------
 def admin_tg():
-    a = FakeAdapter("tg", ["1", "2"])
+    a = FakeAdapter("tg", ["1", "2"], admins=["1", "2"])
     a.admins = ["1"]
     core.ADAPTERS["tg"] = a
     core.refresh_people(a)
@@ -215,7 +215,7 @@ def test_status_shows_llm_failure(llm):
 
 
 def test_status_for_approver_when_no_admins_configured(llm):
-    a = FakeAdapter("tg", ["1"])
+    a = FakeAdapter("tg", ["1"], admins=["1"])
     core.ADAPTERS["tg"] = a
     run(core.on_text(a, "1", "/status"))
     assert "Бот работает" in a.sent("notify")[-1][2]
@@ -236,7 +236,7 @@ def test_announce_start_goes_to_admins_only():
 
 def test_alert_staff_throttled_and_tries_other_messenger():
     a = admin_tg()
-    m = FakeAdapter("max", ["5"])
+    m = FakeAdapter("max", ["5"], admins=["5"])
     m.admins = ["5"]
     core.ADAPTERS["max"] = m
     run(core.alert_staff(a, "⚠️ tg: сбой"))
@@ -245,7 +245,7 @@ def test_alert_staff_throttled_and_tries_other_messenger():
 
 
 def test_supervise_alerts_admin_on_crash():
-    a = admin_tg()
+    admin_tg()
     calls = {"n": 0}
 
     class Flaky:
