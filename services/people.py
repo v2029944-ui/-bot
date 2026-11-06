@@ -165,7 +165,7 @@ def menu_for(adapter: core.Adapter, uid) -> list:
             rows.append([("🔄 Обновить", "m:upd")])
         rows.append([("📥 Обработка материалов", "m:inbox")])
         rows.append([("🔗 Ссылка в постах", "m:footer")])
-        rows.append([("🧪 Сравнение моделей", "m:compare")])
+        rows.append([("🤖 Модели генерации", "m:compare")])
     return rows
 
 

@@ -16,9 +16,9 @@ def enable():
     ops.set_setting("model_comparison", json.dumps({"enabled": True, "models": MODELS}))
 
 
-def test_catalog_selects_four_vision_models_and_rejects_text_only():
-    assert comparison.select(CATALOG) == MODELS
-    bad = {**CATALOG, "gemini-2.5-flash": {"modalities": {"input": ["text"], "output": ["text"]}}}
+def test_catalog_selects_recommended_pair_and_rejects_text_only():
+    assert comparison.select(CATALOG) == [MODELS[0], MODELS[2]]
+    bad = {name: {"modalities": {"input": ["text"], "output": ["text"]}} for name in MODELS}
     with pytest.raises(ValueError):
         comparison.select(bad)
 
@@ -39,7 +39,10 @@ def test_admin_enable_validates_public_catalog_without_key(mx, monkeypatch):
     assert "только администратору" in run(core.on_menu(mx, "9", "m:compare_set:1"))[0]
     assert not calls
     text, _ = run(core.on_menu(mx, "5", "m:compare_set:1"))
-    assert all(m in text for m in MODELS) and comparison.config()["enabled"]
+    assert all(m in text for m in (MODELS[0], MODELS[2])) and not comparison.config()["enabled"]
+    state = comparison.picker_state()[("max", "5")]
+    run(core.on_menu(mx, "5", f"m:models_save:{state['token']}:{state['revision']}"))
+    assert comparison.config() == {"enabled": True, "models": [MODELS[0], MODELS[2]]}
 
 
 @pytest.mark.parametrize("album", [False, True])
@@ -126,7 +129,7 @@ def test_real_max_shows_labels_and_selection_buttons(monkeypatch, png, llm):
     run(scenario())
 
 
-def test_refresh_adds_grok_to_existing_three_model_configuration(mx, monkeypatch):
+def test_recommended_pair_replaces_old_models_only_after_save(mx, monkeypatch):
     mx.admins = ["5"]
     monkeypatch.setattr(core, "PROVIDER", "openai")
     monkeypatch.setenv("LLM_BASE_URL", "https://api.aitunnel.ru/v1")
@@ -135,7 +138,11 @@ def test_refresh_adds_grok_to_existing_three_model_configuration(mx, monkeypatch
     monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=CATALOG)), **kw))
     text, _ = run(core.on_menu(mx, "5", "m:compare_refresh"))
-    assert comparison.config()["models"] == MODELS and "grok-" in text
+    assert comparison.config()["models"] == MODELS[:3]
+    state = comparison.picker_state()[("max", "5")]
+    assert state["selected"] == [MODELS[0], MODELS[2]]
+    run(core.on_menu(mx, "5", f"m:models_save:{state['token']}:{state['revision']}"))
+    assert comparison.config()["models"] == [MODELS[0], MODELS[2]]
 
 
 def test_failed_refresh_keeps_existing_models_and_allows_retry(mx, monkeypatch):
@@ -146,31 +153,23 @@ def test_failed_refresh_keeps_existing_models_and_allows_retry(mx, monkeypatch):
     ops.set_setting("model_comparison", json.dumps(previous))
     original = httpx.AsyncClient
     monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={m: CATALOG[m] for m in MODELS[:3]})), **kw))
+        transport=httpx.MockTransport(lambda request: httpx.Response(503)), **kw))
     text, rows = run(core.on_menu(mx, "5", "m:compare_refresh"))
-    assert "Grok" in text and comparison.config() == previous
-    assert rows[0][0][1] == "m:compare_refresh"
+    assert "Не удалось" in text and comparison.config() == previous
+    assert rows[0][0][1] == "m:compare_pick"
 
 
-def test_budget_models_use_haiku_and_cheapest_vision_grok_fast():
-    catalog = dict(CATALOG)
-    for name, cost in [("claude-sonnet-4.6", 8), ("claude-haiku-3.5", 1),
-                       ("grok-4", 10), ("grok-4-fast", 0.1), ("grok-4.2-fast", 0.05)]:
-        catalog[name] = {"modalities": {"input": ["image", "text"], "output": ["text"]},
-                         "prompt_cost": cost, "completion_cost": cost}
-    catalog["grok-4.2-fast"]["modalities"]["input"] = ["text"]
-    selected = comparison.select(catalog)
-    assert selected[1] == "claude-haiku-3.5" and selected[3] == "grok-4-fast"
-    assert not any("sonnet" in model for model in selected)
+def test_recommended_pair_prefers_flash_lite_without_requiring_claude_or_grok():
+    catalog = {MODELS[0]: CATALOG[MODELS[0]], "gemini-2.5-flash-lite": CATALOG[MODELS[2]]}
+    assert comparison.select(catalog) == [MODELS[0], "gemini-2.5-flash-lite"]
 
 
 @pytest.mark.parametrize("cost", [None, -1, "NaN", "Infinity", "not-a-price"])
-def test_budget_selection_does_not_fall_back_to_expensive_models_when_price_invalid(cost):
-    catalog = {name: {**info} for name, info in CATALOG.items()}
-    catalog[MODELS[3]]["prompt_cost"] = cost
-    catalog["grok-4"] = CATALOG[MODELS[3]]
-    with pytest.raises(ValueError):
-        comparison.select(catalog)
+def test_fallback_prefers_known_prices_to_invalid_or_unknown_prices(cost):
+    catalog = {MODELS[0]: CATALOG[MODELS[0]],
+               "unknown-vision": {**CATALOG[MODELS[0]], "prompt_cost": cost},
+               "known-vision": {**CATALOG[MODELS[0]], "prompt_cost": 1}}
+    assert comparison.select(catalog) == [MODELS[0], "known-vision"]
 
 
 @pytest.mark.parametrize("enabled", [False, True])

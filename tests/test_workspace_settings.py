@@ -412,3 +412,34 @@ def test_existing_member_becomes_protected_primary_owner_without_global_powers(r
     assert "👑 Будущий владелец" in core.people_view(ad)[0]
     assert "защищённый" in run(core.on_menu(ad, "1", "m:pdel:22"))[0]
     assert not spaces.global_admin("22") and not core.is_global_admin(ad, "22")
+
+
+def test_model_picker_selections_are_independent_and_persist_in_each_workspace(runtime, monkeypatch):
+    import httpx
+    from test_model_picker import INFO, PAIR
+
+    import comparison
+
+    ad, _ = runtime
+    first, second = create(ad), create(ad, 22, -102)
+    a, b = spaces.get(first["id"]), spaces.get(second["id"])
+    monkeypatch.setattr(core, "PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.aitunnel.ru/v1")
+    original = httpx.AsyncClient
+    monkeypatch.setattr(comparison.httpx, "AsyncClient", lambda **kw: original(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={name: INFO for name in PAIR})), **kw))
+    with spaces.enter(a):
+        own = core.ADAPTERS["max"]
+        run(core.on_menu(own, "11", "m:compare_pick"))
+        state = comparison.picker_state()[("max", "11")]
+        save = f"m:models_save:{state['token']}:{state['revision']}"
+        assert "сохранены" in run(core.on_menu(own, "11", save))[0]
+        assert comparison.config()["models"] == PAIR
+    with spaces.enter(b):
+        assert not comparison.config()["enabled"]
+        assert "уже закрыт" in run(core.on_menu(core.ADAPTERS["max"], "22", save))[0]
+        assert not comparison.config()["enabled"]
+    assert not comparison.config()["enabled"]  # root has its own selection
+    run(spaces.close())
+    with spaces.enter(spaces.get(first["id"])):
+        assert comparison.config()["models"] == PAIR

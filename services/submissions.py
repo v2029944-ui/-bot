@@ -131,7 +131,7 @@ async def _submit(adapter: core.Adapter, author_id: str, author_name: str, text:
     core.db.commit()
     did = cur.lastrowid
     if isinstance(post, comparison.Options):
-        core._set(did, candidates=json.dumps(post.options, ensure_ascii=False))
+        core._set(did, **comparison.draft_selection(post))
     d = core.get(did)
     sent, last = await core._send_draft(d, did, post, adapter)
     if not sent:  # иначе черновик-сирота: в базе есть, никто не видел
@@ -181,7 +181,7 @@ async def _submit_album(adapter, author_id, author_name, text, items, source_key
         core.db.commit()
         did = cur.lastrowid
         if isinstance(post, comparison.Options):
-            core._set(did, candidates=json.dumps(post.options, ensure_ascii=False))
+            core._set(did, **comparison.draft_selection(post))
         sent, last = await core._send_draft(core.get(did), did, post, adapter)
         if not sent:
             if source_key:

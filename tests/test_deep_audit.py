@@ -36,7 +36,12 @@ def test_double_comparison_enable_only_fetches_catalog_once(mx, monkeypatch):
     monkeypatch.setattr(comparison.httpx, 'AsyncClient', lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
     for _ in range(2):
         run(core.on_menu(mx, '5', 'm:compare_set:1'))
-    assert comparison.config()['enabled'] and len(requests) == 1
+    assert not comparison.config()['enabled'] and len(requests) == 1
+    state = comparison.picker_state()[('max', '5')]
+    save = f"m:models_save:{state['token']}:{state['revision']}"
+    for _ in range(2):
+        run(core.on_menu(mx, '5', save))
+    assert comparison.config()['enabled'] and len(requests) == 2
     run(core.on_menu(mx, '5', 'm:compare_toggle'))
     assert comparison.config()['enabled']
     for _ in range(2):

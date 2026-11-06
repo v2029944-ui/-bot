@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+import comparison
 import core
 import ops
 import spaces
@@ -176,7 +177,7 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
     lines = [f"🟢 Бот работает {core._ago(now - core.STARTED)}.",
              f"Версия: {await ops.version()}",
              f"Мессенджеры: {', '.join(core.ADAPTERS) or 'нет'}",
-             f"Нейросеть ({core.MODEL}): {llm}", f"Генерация: {last}",
+             f"Нейросеть ({comparison.default_model()}): {llm}", f"Генерация: {last}",
              f"На согласовании: {pend}" + (f" (старейший ждёт {core._ago(now - oldest)})" if pend and oldest else ""),
              f"За сутки получено фото: {day}, опубликовано за неделю: {pub7}"]
     if stuck:

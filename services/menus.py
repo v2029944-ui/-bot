@@ -148,6 +148,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return "⛔ Меню доступно только администратору.", None
     if payload == "m:cancel" or payload.startswith("m:cancel:"):
         return cancel_input(adapter, uid, payload)
+    if not payload.startswith(("m:compare", "m:models_")):
+        comparison.picker_state().pop((adapter.name, uid), None)
     dialog_state.PendingMap(core.db, "input_cancel").pop((adapter.name, uid), None)
     for waiting in (core.WAITING, core.WAITING_EDIT, core.WAITING_REJECT):  # любой переход по меню отменяет ожидание текста
         waiting.pop((adapter.name, uid), None)
@@ -195,19 +197,19 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return "Эта операция доступна главному администратору в основном пространстве.", None
     if act in ("upd", "updgo") and not core.is_global_admin(adapter, uid):
         return "⛔ Обновление запускает только администратор из MAX_ADMINS (главный).", None
-    if act in ("compare", "compare_toggle", "compare_set", "compare_refresh"):
+    if act in ("compare", "compare_toggle", "compare_set", "compare_refresh", "compare_pick") or act.startswith("models_"):
         if not core.is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None
         if act == "compare_refresh":
-            return await comparison.menu(refresh=True)
+            return await comparison.menu(refresh=True, adapter=adapter, uid=uid)
         if act == "compare_toggle":
-            text, rows = await comparison.menu()
+            text, rows = await comparison.menu(adapter=adapter, uid=uid)
             return "Эта кнопка устарела. Используйте новую кнопку ниже.\n\n" + text, rows
         if act == "compare_set":
             if len(parts) != 3 or parts[2] not in ("0", "1"):
                 return "Неизвестное состояние сравнения.", None
-            return await comparison.menu(enabled=parts[2] == "1")
-        return await comparison.menu()
+            return await comparison.menu(enabled=parts[2] == "1", adapter=adapter, uid=uid)
+        return await comparison.menu(adapter=adapter, uid=uid, action=payload)
     if act.startswith("footer"):
         if not core.is_admin(adapter, uid):
             return "⛔ Настройка доступна только администратору.", None

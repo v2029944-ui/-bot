@@ -117,7 +117,8 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
             rows = [[button("🔁 Без изменений", "regen")],
                     [button("📏 Другой размер", "length"), button("✏️ С комментарием", "redoc")],
                     [button("↩️ Назад", "back")]]
-            scope = "все модели сравнения" if comparison.config()["enabled"] else "одна модель"
+            c = comparison.config()
+            scope = "все выбранные модели" if c["enabled"] and len(c["models"]) > 1 else "одна модель"
             text = f"Перегенерировать пост №{did}: {scope}. Выберите способ."
         elif action == "change":
             rows = [[button("🔁 Заново", "redo"), button("✏️ С комментарием", "redoc")],
@@ -302,9 +303,9 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
         core._set(did, status="pending")
         return False, f"⚠️ Не удалось пересоздать: {core.err(e)}"
 
-    options = post.options if isinstance(post, comparison.Options) else []
-    core._set(did, post=post, candidates=json.dumps(options, ensure_ascii=False),
-         selected_model="" if options else d.get("selected_model", ""),
+    selection = comparison.draft_selection(post) if isinstance(post, comparison.Options) else {
+        "candidates": "[]", "selected_model": d.get("selected_model", "")}
+    core._set(did, post=post, **selection,
          footer=None, post_length=length, attempts=d["attempts"] + 1)
     sent, last = await core._send_draft(d, did, post, adapter, actor=str(user_id))
     if not sent:  # откат: иначе в базе attempts=N+1, а сообщения с такими кнопками нет

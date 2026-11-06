@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
+import comparison
 import core
 import dialog_state
 import max_actions
@@ -668,6 +669,8 @@ class Max(core.Adapter):
         payload = cb.get("payload")
         if not isinstance(payload, str):
             return  # payload не обязателен в официальной схеме Callback
+        if not payload.startswith(("m:compare", "m:models_")):
+            comparison.picker_state().pop((self.name, str(uid)), None)
         expected_channels = None
         if not payload.startswith(("m:proleok:", "m:pdelok:")):
             dialog_state.PendingMap(core.db, "people_confirmation").pop((self.name, str(uid)), None)
