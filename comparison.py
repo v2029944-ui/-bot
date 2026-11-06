@@ -10,9 +10,13 @@ import dialog_state
 import resources
 import spaces
 
-MODEL = contextvars.ContextVar("generation_model", default=None)
+MODEL: contextvars.ContextVar[str | None] = contextvars.ContextVar("generation_model", default=None)
 MAX_MODELS = 4
 PAGE_SIZE = 8
+POLICY_VERSION = 1  # Bump when changing the allowlist to expire stored picker snapshots.
+DEFAULT_MODEL = "gpt-4.1-mini"
+BUDGET_MODELS = frozenset({"gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o-mini",
+                           "gemini-2.5-flash-lite", "gemini-3.1-flash-lite"})
 
 
 class Options(str):
@@ -25,13 +29,31 @@ class Options(str):
 
 def config():
     import ops
-    return json.loads(ops.get_setting("model_comparison", '{"enabled":false,"models":[]}'))
+    c = json.loads(ops.get_setting("model_comparison", '{"enabled":false,"models":[]}'))
+    models = list(dict.fromkeys(name for name in c["models"] if name in BUDGET_MODELS))[:MAX_MODELS]
+    if c["enabled"] and not models:
+        models = [DEFAULT_MODEL]
+    if models != c["models"]:
+        c = {**c, "models": models}
+        ops.set_setting("model_comparison", json.dumps(c))
+    return c
 
 
 def default_model():
     import core
     c = config()
-    return c["models"][0] if c["enabled"] and c["models"] else core.MODEL
+    model = c["models"][0] if c["enabled"] and c["models"] else core.MODEL
+    return DEFAULT_MODEL if budget_provider() and model not in BUDGET_MODELS else model
+
+
+def budget_provider():
+    import core
+    return core.PROVIDER == "openai" and core.env("LLM_BASE_URL").rstrip("/") == "https://api.aitunnel.ru/v1"
+
+
+def request_model(model=None):
+    model = model or default_model()
+    return default_model() if budget_provider() and model not in BUDGET_MODELS else model
 
 
 def draft_selection(post):
@@ -47,7 +69,7 @@ def eligible(catalog):
         raise ValueError("Некорректный каталог")
     result = {}
     for name, info in catalog.items():
-        if not isinstance(name, str) or not isinstance(info, dict):
+        if name not in BUDGET_MODELS or not isinstance(info, dict):
             continue
         modalities = info.get("modalities") or {}
         if (not isinstance(modalities, dict) or "text" not in (modalities.get("output") or [])
@@ -72,7 +94,7 @@ def select(catalog):
     usable = eligible(catalog)
     result = []
     for choices in (("gpt-4.1-mini", "gpt-4o-mini"),
-                    ("gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash")):
+                    ("gemini-2.5-flash-lite", "gemini-3.1-flash-lite")):
         found = next((name for name in choices if name in usable), None)
         if found:
             result.append(found)
@@ -105,12 +127,13 @@ def picker_state():
 def view():
     c = config()
     models = c["models"] if c["enabled"] else []
-    text = ("🤖 Модели генерации\n" + ("\n".join(models) if models else f"По настройкам бота: {default_model()}") +
-            f"\n\nОдин материал — {len(models) or 1} запрос(а) генерации. "
+    text = ("🤖 Модели генерации\n" + ("\n".join(models) if models else f"По умолчанию: {default_model()}") +
+            "\n\nДоступны компактные GPT mini/nano и Gemini Flash Lite. " +
+            f"Один материал — {len(models) or 1} запрос(а) генерации. "
             "Одна модель — обычный пост; несколько — варианты для выбора перед публикацией.")
     rows = [[("☑ Выбрать модели", "m:compare_pick")], [("⭐ Рекомендованная пара", "m:compare_refresh")]]
     if models:
-        rows.append([("Модель из настроек бота", "m:compare_set:0")])
+        rows.append([("Модель по умолчанию", "m:compare_set:0")])
     return text, rows
 
 
@@ -149,6 +172,9 @@ async def _menu(toggle=False, enabled=None, refresh=False, *, adapter=None, uid=
     key = (adapter.name, str(uid)) if adapter is not None else ("max", str(uid))
     current = config()
     previous = picker_state().get(key)
+    if previous and previous.get("policy") != POLICY_VERSION:
+        picker_state().pop(key, None)
+        previous = None
     if (enabled is True or action == "m:compare_pick") and previous and previous["before"] == current:
         return picker_view(previous)
     if action and action.startswith("m:models_"):
@@ -210,7 +236,7 @@ async def _menu(toggle=False, enabled=None, refresh=False, *, adapter=None, uid=
         return "Не удалось получить список подходящих моделей AITunnel. Настройки не изменены.", [[("Повторить", "m:compare_pick")]]
     selected = recommended if refresh or not current["models"] else [name for name in current["models"] if name in catalog][:MAX_MODELS]
     ordered = list(dict.fromkeys([*recommended, *selected, *sorted(catalog)]))
-    state = {"token": secrets.token_urlsafe(8), "revision": 0, "names": ordered,
+    state = {"policy": POLICY_VERSION, "token": secrets.token_urlsafe(8), "revision": 0, "names": ordered,
              "selected": selected, "page": 0, "before": current}
     picker_state()[key] = state
     return picker_view(state)

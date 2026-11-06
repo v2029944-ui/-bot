@@ -110,7 +110,7 @@ async def _claude(system: str, text: str, b64: str | None) -> str:
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
-    r = await core._client.messages.create(model=comparison.MODEL.get() or comparison.default_model(), max_tokens=1000, system=system,
+    r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
                                       messages=[{"role": "user", "content": content}])
     # первым блоком может прийти не текст: собираем все текстовые
     out = "".join(getattr(b, "text", "") for b in r.content if getattr(b, "type", "text") == "text").strip()
@@ -127,7 +127,7 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    payload = {"model": comparison.MODEL.get() or comparison.default_model(), "messages": [{"role": "system", "content": system},
+    payload = {"model": comparison.request_model(comparison.MODEL.get()), "messages": [{"role": "system", "content": system},
                                             {"role": "user", "content": content}]}
     headers = {"Authorization": f"Bearer {os.environ['LLM_API_KEY']}"}
     key = "max_tokens"

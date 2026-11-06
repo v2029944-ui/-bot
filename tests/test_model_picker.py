@@ -9,8 +9,8 @@ import core
 import dialog_state
 
 PAIR = ["gpt-4.1-mini", "gemini-2.5-flash-lite"]
-NAMES = [*PAIR, "claude-haiku-4.5", "grok-4.20", "grok-4.3", "deepseek-v4-flash-vision-exp",
-         "qwen3.8-flash", "gemini-3.1-flash-lite", "kimi-k2.5", "glm-4.6v", "mistral-small-3.2-24b-instruct"]
+NAMES = [*PAIR, "gpt-4o-mini", "gpt-4.1-nano", "gemini-3.1-flash-lite",
+         "grok-4.20", "claude-haiku-4.5", "claude-opus-5.5", "gpt-6-astra-pro", "deepseek-v4-flash-vision-exp"]
 CLIENT = httpx.AsyncClient
 INFO = {"modalities": {"input": ["text", "image"], "output": ["text"]}, "prompt_cost": 1, "completion_cost": 2}
 
@@ -53,12 +53,13 @@ def save(mx, uid="5"):
     return payload, run(core.on_menu(mx, uid, payload))
 
 
-def test_picker_shows_recommended_checks_and_full_paginated_catalog_without_generation(mx, catalog, llm):
+def test_picker_shows_recommended_checks_and_full_paginated_catalog_without_generation(mx, catalog, llm, monkeypatch):
+    monkeypatch.setattr(comparison, "PAGE_SIZE", 2)
     text, rows = open_picker(mx)
     assert state()["selected"] == PAIR and "text-only" not in state()["names"]
     assert rows[0][0][0] == "☑ gpt-4.1-mini" and rows[1][0][0] == "☑ gemini-2.5-flash-lite"
     assert any(p.startswith("m:models_page:") for row in rows for _, p in row)
-    assert "grok-4.20" in state()["names"]  # no requirement for retired Grok Fast names
+    assert set(state()["names"]) == comparison.BUDGET_MODELS
     assert not comparison.config()["enabled"] and not llm.calls
     page = next(p for row in rows for _, p in row if p.startswith("m:models_page:"))
     run(core.on_menu(mx, "5", page))
@@ -84,10 +85,10 @@ def test_save_single_model_uses_one_request_no_candidate_selection_and_persists_
 @pytest.mark.parametrize("album", [False, True])
 def test_two_or_more_models_generate_exactly_the_selected_set(mx, catalog, llm, png, album):
     open_picker(mx)
-    check(mx, "grok-4.20", True)
+    check(mx, "gpt-4o-mini", True)
     _, result = save(mx)
     assert "сохранены" in result[0]
-    expected = [*PAIR, "grok-4.20"]
+    expected = [*PAIR, "gpt-4o-mini"]
     llm.reply = lambda system, text: comparison.MODEL.get()
     if album:
         did = run(core.submit_album(mx, "9", "Автор", "Описание", [{"type": "image", "data": png}] * 2))
@@ -100,20 +101,20 @@ def test_two_or_more_models_generate_exactly_the_selected_set(mx, catalog, llm, 
 
 def test_duplicate_and_stale_checks_do_not_toggle_selection_back(mx, catalog):
     open_picker(mx)
-    payload, _ = check(mx, "grok-4.20", True)
+    payload, _ = check(mx, "gpt-4o-mini", True)
     before = state()
     text, _ = run(core.on_menu(mx, "5", payload))
     assert "устарела" in text and state() == before
-    check(mx, "grok-4.20", False)
+    check(mx, "gpt-4o-mini", False)
     run(core.on_menu(mx, "5", payload))
-    assert "grok-4.20" not in state()["selected"]
+    assert "gpt-4o-mini" not in state()["selected"]
 
 
 def test_limits_empty_save_and_cancellation_preserve_saved_configuration(mx, catalog):
     open_picker(mx)
-    check(mx, "grok-4.20", True)
-    check(mx, "claude-haiku-4.5", True)
-    _, result = check(mx, "grok-4.3", True)
+    check(mx, "gpt-4o-mini", True)
+    check(mx, "gpt-4.1-nano", True)
+    _, result = check(mx, "gemini-3.1-flash-lite", True)
     assert "не больше четырёх" in result[0] and len(state()["selected"]) == 4
     for name in list(state()["selected"]):
         check(mx, name, False)
@@ -170,9 +171,11 @@ def test_saved_picker_survives_state_reload_and_navigation_invalidates_old_butto
 
 
 def test_text_only_models_are_available_when_vision_disabled(mx, catalog, monkeypatch):
+    catalog[0]["gpt-4.1-nano"] = {"modalities": {"input": ["text"], "output": ["text"]}}
     monkeypatch.setenv("LLM_VISION", "0")
     open_picker(mx)
-    assert "text-only" in state()["names"]
+    assert "gpt-4.1-nano" in state()["names"]
+    assert "text-only" not in state()["names"]
 
 
 def test_default_model_mode_can_be_restored(mx, catalog):
@@ -190,11 +193,11 @@ def test_general_redo_switches_existing_post_to_new_single_model(mx, catalog, ll
     did = run(core.submit(mx, "9", "Автор", "Описание", png))
     open_picker(mx)
     check(mx, PAIR[0], False)
-    check(mx, "grok-4.20", True)
+    check(mx, "gpt-4o-mini", True)
     save(mx)
     assert run(core.on_action(mx, "5", "regen", did, 1))[0]
-    assert core.get(did)["selected_model"] == "grok-4.20"
-    assert core.get(did)["post"] == "grok-4.20" and core.get(did)["candidates"] == "[]"
+    assert core.get(did)["selected_model"] == "gpt-4o-mini"
+    assert core.get(did)["post"] == "gpt-4o-mini" and core.get(did)["candidates"] == "[]"
 
 
 def test_failed_catalog_validation_does_not_apply_unsaved_changes(mx, catalog, monkeypatch):
@@ -234,11 +237,11 @@ def test_provider_uses_space_selected_model_for_unscoped_requests(mx, catalog, m
 
 
 def test_models_with_unknown_prices_can_still_be_selected_explicitly(mx, catalog):
-    catalog[0]["grok-4.20"] = {"modalities": INFO["modalities"]}
+    catalog[0]["gpt-4o-mini"] = {"modalities": INFO["modalities"]}
     open_picker(mx)
-    check(mx, "grok-4.20", True)
+    check(mx, "gpt-4o-mini", True)
     assert "сохранены" in save(mx)[1][0]
-    assert "grok-4.20" in comparison.config()["models"]
+    assert "gpt-4o-mini" in comparison.config()["models"]
 
 
 def test_real_max_checkboxes_survive_callbacks_and_save_without_generating_posts(monkeypatch, llm):

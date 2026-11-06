@@ -288,7 +288,8 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
     core.WAITING_RULE.discard(key)
     try:
         length = (d.get("post_length") or "") if post_length is None else post_length
-        model_token = comparison.MODEL.set(d.get("selected_model") or None)
+        selected_model = comparison.request_model(d["selected_model"]) if d.get("selected_model") else ""
+        model_token = comparison.MODEL.set(selected_model or None)
         try:
             candidates = json.loads(d.get("candidates") or "[]")
             generate = core.generate_options if compare or candidates else core.generate_post
@@ -304,7 +305,7 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
         return False, f"⚠️ Не удалось пересоздать: {core.err(e)}"
 
     selection = comparison.draft_selection(post) if isinstance(post, comparison.Options) else {
-        "candidates": "[]", "selected_model": d.get("selected_model", "")}
+        "candidates": "[]", "selected_model": selected_model}
     core._set(did, post=post, **selection,
          footer=None, post_length=length, attempts=d["attempts"] + 1)
     sent, last = await core._send_draft(d, did, post, adapter, actor=str(user_id))

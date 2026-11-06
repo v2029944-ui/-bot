@@ -8,7 +8,7 @@ import comparison
 import core
 import ops
 
-MODELS = ["gpt-4.1-mini", "claude-haiku-4.5", "gemini-2.5-flash", "grok-4.1-fast"]
+MODELS = ["gpt-4.1-mini", "gpt-4.1-nano", "gemini-3.1-flash-lite", "gpt-4o-mini"]
 CATALOG = {m: {"modalities": {"input": ["text", "image"], "output": ["text"]}, "prompt_cost": 10, "completion_cost": 20} for m in MODELS}
 
 
@@ -167,9 +167,9 @@ def test_recommended_pair_prefers_flash_lite_without_requiring_claude_or_grok():
 @pytest.mark.parametrize("cost", [None, -1, "NaN", "Infinity", "not-a-price"])
 def test_fallback_prefers_known_prices_to_invalid_or_unknown_prices(cost):
     catalog = {MODELS[0]: CATALOG[MODELS[0]],
-               "unknown-vision": {**CATALOG[MODELS[0]], "prompt_cost": cost},
-               "known-vision": {**CATALOG[MODELS[0]], "prompt_cost": 1}}
-    assert comparison.select(catalog) == [MODELS[0], "known-vision"]
+               "gpt-4.1-nano": {**CATALOG[MODELS[0]], "prompt_cost": cost},
+               "gpt-4o-mini": {**CATALOG[MODELS[0]], "prompt_cost": 1}}
+    assert comparison.select(catalog) == [MODELS[0], "gpt-4o-mini"]
 
 
 @pytest.mark.parametrize("enabled", [False, True])
