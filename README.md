@@ -169,3 +169,9 @@ python3 -m venv .venv
 [Bot API MAX](https://dev.max.ru/docs-api/),
 [OpenAPI MAX](https://github.com/max-messenger/api-schema),
 [Telegram Bot API](https://core.telegram.org/bots/api).
+
+Бот обращается к `https://platform-api2.max.ru`. Корневой сертификат Минцифры
+входит в репозиторий и добавляется только в HTTPS-клиент MAX с проверкой
+закреплённого отпечатка, цепочки и имени сервера. Системное доверие и остальные
+сервисы не меняются. Новые обязательные переменные `.env` не нужны.
+Подробности: [сертификат](certs/README.md), [обновление](INSTALL.md#переход-на-api2-max).

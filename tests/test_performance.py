@@ -88,7 +88,7 @@ def test_explicit_attachment_rejection_refreshes_token_once(monkeypatch, tmp_pat
         async def call(method, url, **kwargs):
             sends.append(kwargs["json"]["attachments"][0]["payload"]["token"])
             if len(sends) == 1:
-                request = httpx.Request(method, "https://platform-api.max.ru/messages")
+                request = httpx.Request(method, "https://platform-api2.max.ru/messages")
                 response = httpx.Response(400, json={"code": "attachment.invalid"}, request=request)
                 raise httpx.HTTPStatusError("invalid", request=request, response=response)
             return {}

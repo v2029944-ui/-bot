@@ -19,13 +19,14 @@ import core
 import dialog_state
 import max_actions
 import max_queue
+import max_tls
 import ops
 import post_footer
 import spaces
 from services import publication
 
 log = logging.getLogger("max")
-API = "https://platform-api.max.ru"
+API = "https://platform-api2.max.ru"
 
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
@@ -66,7 +67,8 @@ class Max(core.Adapter):
     name = "max"
 
     def __init__(self, token, channel, approvers, employees, admins=()):
-        self.http = httpx.AsyncClient(base_url=API, headers={"Authorization": token}, timeout=60)
+        self.http = httpx.AsyncClient(base_url=API, headers={"Authorization": token}, timeout=60,
+                                     verify=max_tls.create_ssl_context())
         self.channel = channel
         self.base_approvers, self.base_employees = list(approvers), list(employees)  # из настроек
         self.admins, self.approvers, self.allowed = [str(a) for a in admins], list(approvers), None

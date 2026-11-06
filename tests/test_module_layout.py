@@ -31,6 +31,9 @@ for module, names in core._SERVICE_EXPORTS.items():
     for name in names:
         assert getattr(core, name) is getattr(service, name)
 assert core.on_action.__module__ == 'services.review'
+import max_tls, ssl
+context = max_tls.create_ssl_context()
+assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
 """
     env = {**os.environ, "DATA_DIR": str(tmp_path / "data"), "PYTHONPATH": str(bundle)}
     subprocess.run([sys.executable, "-c", script], cwd=bundle, env=env, check=True,

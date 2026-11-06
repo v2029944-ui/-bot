@@ -18,6 +18,8 @@ RUN pip install --no-cache-dir pip==26.3 \
 
 COPY core.py ops.py tg.py max_.py max_queue.py max_actions.py post_footer.py comparison.py spaces.py main.py updater.py entrypoint.sh ./
 COPY dialog_state.py resources.py schema.py configuration.py command_context.py editor_rules.py compatibility.json ./
+COPY max_tls.py ./
+COPY certs/ ./certs/
 COPY services/ ./services/
 
 # база и фото лежат в /app/data — эту папку compose выносит на диск сервера

@@ -30,7 +30,7 @@ def test_telegram_failure_classification(bot_tg):
 
 # ---------- MAX ----------
 def http_error(code):
-    req = httpx.Request("POST", "https://platform-api.max.ru/messages")
+    req = httpx.Request("POST", "https://platform-api2.max.ru/messages")
     return httpx.HTTPStatusError("err", request=req, response=httpx.Response(code, request=req))
 
 

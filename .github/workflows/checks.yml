@@ -19,3 +19,7 @@ jobs:
       - run: python -m pytest -ra
       - run: sh -n entrypoint.sh
       - run: docker build -t postbot:test .
+      - name: Check MAX CA in the packaged image
+        run: >-
+          docker run --rm --network none --entrypoint python postbot:test
+          -c 'import ssl, max_tls; context = max_tls.create_ssl_context(); assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname'
