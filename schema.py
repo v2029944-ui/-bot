@@ -21,8 +21,12 @@ def add_columns(db: Connection, table: str, definitions: tuple[str, ...]) -> Non
 
 
 def audit_tables(db: Connection) -> None:
-    add_columns(db, "drafts", ("cleaned INTEGER DEFAULT 0", "closed_at REAL DEFAULT 0"))
+    add_columns(db, "drafts", ("cleaned INTEGER DEFAULT 0", "closed_at REAL DEFAULT 0", "published_at REAL DEFAULT 0"))
     db.execute("CREATE INDEX IF NOT EXISTS drafts_cleanup ON drafts(cleaned,status,id)")
+    db.execute("CREATE INDEX IF NOT EXISTS drafts_pending_order ON drafts(status,created,id)")
+    db.execute("CREATE INDEX IF NOT EXISTS drafts_author_pending ON drafts(status,platform,author_id,created,id)")
+    db.execute("CREATE INDEX IF NOT EXISTS drafts_publication_date ON drafts(status,published_at)")
+    db.execute("CREATE INDEX IF NOT EXISTS people_order ON people(platform,created,uid)")
     db.execute("""CREATE TABLE IF NOT EXISTS command_results (
         event_key TEXT, operation TEXT, result TEXT, created REAL,
         PRIMARY KEY(event_key,operation))""")

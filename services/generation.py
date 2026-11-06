@@ -112,6 +112,8 @@ async def _claude(system: str, text: str, b64: str | None) -> str:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
     r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
                                       messages=[{"role": "user", "content": content}])
+    if getattr(r, "stop_reason", None) in ("max_tokens", "model_context_window_exceeded", "pause_turn"):
+        raise core.IncompleteGeneration("Ответ нейросети оборван до завершения. Повторите генерацию вручную или сократите описание.")
     # первым блоком может прийти не текст: собираем все текстовые
     out = "".join(getattr(b, "text", "") for b in r.content if getattr(b, "type", "text") == "text").strip()
     if not out:
@@ -145,7 +147,10 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
             break
     if r.status_code >= 400:
         raise RuntimeError(f"Нейросеть вернула {r.status_code}: {r.text[:200]}")
-    msg = (r.json().get("choices") or [{}])[0].get("message") or {}
+    choice = (r.json().get("choices") or [{}])[0]
+    if choice.get("finish_reason") == "length":
+        raise core.IncompleteGeneration("Ответ нейросети оборван по лимиту токенов. Повторите генерацию вручную или сократите описание.")
+    msg = choice.get("message") or {}
     out = (msg.get("content") or "").strip()
     if not out:
         raise RuntimeError("Нейросеть вернула пустой ответ (для «рассуждающих» моделей смените MODEL)")
@@ -168,11 +173,13 @@ async def generate_options(*args, previous=None, **kwargs):
                 raise ValueError("Слишком длинный вариант для сравнения")
             return {"model": model, "post": post}
         except Exception as e:
-            return {"model": model, "error": core.err(e)[:120]}
+            return {"model": model, "error": core.err(e)[:120], "incomplete": isinstance(e, core.IncompleteGeneration)}
         finally:
             comparison.MODEL.reset(token)
     options = await asyncio.gather(*(one(model) for model in c["models"]))
     if not any(o.get("post") for o in options):
+        if any(o.get("incomplete") for o in options):
+            raise core.IncompleteGeneration("Нет готового поста: нейросеть оборвала ответ. Повторите обработку вручную или сократите описание.")
         raise RuntimeError("Ни одна модель не подготовила пост. Проверьте баланс и доступность моделей.")
     return comparison.Options(options)
 

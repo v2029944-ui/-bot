@@ -579,7 +579,7 @@ class Max(core.Adapter):
             return await self.notify(uid, "🔄 Бот перезапускается. Пришлите материал через минуту.")
         if not core.caption_ok(body.get("text")):  # единственное, что отвечаем сотруднику в тихом режиме
             return await self.notify(uid, core.CAPTION_ASK)
-        if not quiet:
+        if not quiet and core.confirm_mode() != "off":
             await self.notify(uid, "Принято, готовлю пост…")
         try:
             source_opts = {"source_key": source_key} if source_key else {}
@@ -597,10 +597,8 @@ class Max(core.Adapter):
             else:
                 data = await max_queue.download(self, images[0], core.MAX_PHOTO_BYTES, "image", source_key, 0)
                 await core.submit(self, str(uid), name, body.get("text") or "", data, **source_opts)
-            if not quiet:
-                await self.notify(uid, "Пост готов к редактированию и публикации ✅")
-            elif core.confirm_mode() != "off":  # в MAX вместо реакции короткое сообщение
-                await self.notify(uid, "✅ Принято")
+            if core.confirm_mode() != "off":
+                await self.notify(uid, "✅ Принято" if quiet else "Пост готов к редактированию и публикации ✅")
         except core.RateLimited:
             if source_key:
                 raise

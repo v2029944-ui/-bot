@@ -131,7 +131,8 @@ class Worker:
                             (row["attempts"], now + 3600, "Лимит материалов: повтор через час", key))
             core.db.commit()
         except Exception as exc:
-            state = "failed" if attempt >= 8 else "pending"
+            incomplete = isinstance(exc, core.IncompleteGeneration)
+            state = "failed" if incomplete or attempt >= 8 else "pending"
             changed = core.db.execute("UPDATE max_inbox SET state=?,next_try=?,error=? WHERE event_key=? AND state='processing'",
                                       (state, now + min(30 * 2 ** min(attempt - 1, 7), 3600), core.err(exc)[:300], key)).rowcount
             core.db.commit()
@@ -139,16 +140,18 @@ class Worker:
                 return True  # пост уже полностью опубликован; очищенную очередь не оживляем
             log.warning("материал %s: попытка %s не удалась: %s", key[:8], attempt, core.err(exc))
             if state == "failed":
+                reason = ("⚠️ Нейросеть оборвала ответ. Автоматические платные повторы остановлены.\n" if incomplete else
+                          "⚠️ Материал не обработан после 8 попыток.\n")
                 if spaces.INSTALLED and row["space_id"]:
                     with spaces.enter(spaces.get(row["space_id"])):
                         text, rows = view()
-                        await core._tell_admins(core.ADAPTERS["max"], "⚠️ Материал не обработан после 8 попыток.\n" + text, rows)
+                        await core._tell_admins(core.ADAPTERS["max"], reason + text, rows)
                 else:
                     text, rows = view()
                     if self.adapter.admins:
-                        await core._tell_admins(self.adapter, "⚠️ Материал не обработан после 8 попыток.\n" + text, rows)
+                        await core._tell_admins(self.adapter, reason + text, rows)
                     else:
-                        await core.alert_staff(self.adapter, "⚠️ Материал не обработан после 8 попыток.\n" + text)
+                        await core.alert_staff(self.adapter, reason + text)
         else:
             clear_cache(key, row["space_id"])
             core.db.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (key,))

@@ -11,6 +11,7 @@ from typing import Any
 
 import configuration
 import core
+import resources
 import schema
 
 log = core.log
@@ -56,14 +57,20 @@ def _tz():
         return timezone(timedelta(hours=5))  # Екатеринбург
 
 
+def _parse_hours(raw: str) -> tuple[int, int]:
+    a, b = (int(x) for x in raw.split("-"))
+    if not (0 <= a <= 24 and 0 <= b <= 24 and a != b) or (a, b) == (24, 0):
+        raise ValueError(raw)
+    return a, b
+
+
 def _hours() -> tuple[int, int]:
     """Часы рабочего окна «начало-конец». Если начало больше конца (20-6), окно переходит через полночь.
     Неверное значение = окно весь день (а main при запуске сообщит об ошибке в настройке)."""
     try:
-        a, b = (int(x) for x in core.env("NOTIFY_HOURS", "10-18").split("-"))
+        return _parse_hours(core.env("NOTIFY_HOURS", "10-18"))
     except ValueError:
         return 0, 24
-    return (a, b) if 0 <= a <= 24 and 0 <= b <= 24 and a != b else (0, 24)
 
 
 def _parse_days(raw: str) -> set[int]:
@@ -97,9 +104,7 @@ def config_problem() -> str | None:
         return "MATERIAL_WORKERS: укажите 1 или 2 обработчика материалов."
     raw_h = core.env("NOTIFY_HOURS", "10-18")
     try:
-        a, b = (int(x) for x in raw_h.split("-"))
-        if not (0 <= a <= 24 and 0 <= b <= 24 and a != b):
-            raise ValueError
+        _parse_hours(raw_h)
     except ValueError:
         return f"NOTIFY_HOURS={raw_h}: нужны часы вида 10-18 (числа от 0 до 24, начало не равно концу)."
     raw_d = core.env("NOTIFY_DAYS", "1-5")
@@ -354,6 +359,11 @@ def upd_go(adapter, uid) -> tuple[str, None]:
 
 
 async def announce_update_result():
+    async with resources.slot("update_result_notice", 1):
+        await _announce_update_result()
+
+
+async def _announce_update_result():
     """После запуска сообщаем тому, кто нажал «Обновить», чем закончилось обновление или откат."""
     f = _data_dir() / "update_result.json"
     if not f.exists():
@@ -361,8 +371,16 @@ async def announce_update_result():
     try:
         r = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        r = {}
-    f.unlink(missing_ok=True)
+        log.warning("не удалось прочитать результат обновления", exc_info=True)
+        return
+    if not isinstance(r, dict):
+        log.warning("неверный формат результата обновления")
+        return
+    try:
+        if float(r.get("next_try", 0)) > time.time():
+            return
+    except (ValueError, TypeError):
+        pass
     text = {
         "ok": f"✅ Бот обновлён: {r.get('commit', '')}",
         "nochange": f"✅ Уже последняя версия ({r.get('commit', '')}).",
@@ -371,22 +389,43 @@ async def announce_update_result():
         "failed": f"❌ Обновление не удалось: {r.get('detail', '')}. Работает прежняя версия {r.get('commit', '')}.",
         "rolled_back": ("⚠️ Новая версия не запустилась, бот вернулся к предыдущей "
                         f"({r.get('commit', '')}). Подробности: docker compose logs --tail 80"),
-    }.get(r.get("status"), "")
+    }.get(str(r.get("status") or ""), "")
     if not text:
         return
-    targets = []
-    ad = core.ADAPTERS.get(r.get("platform", ""))
-    if ad and r.get("uid"):
-        targets.append((ad, r["uid"]))
-    else:
-        targets = [(a, u) for a in core.ADAPTERS.values() for u in core.staff(a)]
-    for a, u in targets:
+    remaining = r.get("notice_remaining")
+    if remaining is None:
+        ad = core.ADAPTERS.get(str(r.get("platform") or ""))
+        remaining = ([[ad.name, str(r["uid"])]] if ad and r.get("uid") else
+                     [[a.name, str(u)] for a in core.ADAPTERS.values() for u in core.staff(a)])
+        if not remaining:
+            return
+    r["notice_remaining"] = remaining
+
+    def save():
+        temp = f.with_suffix(".tmp")
+        temp.write_text(json.dumps(r, ensure_ascii=False), encoding="utf-8")
+        temp.replace(f)
+
+    save()  # preserve all destinations before the first network operation
+    for platform, u in list(remaining):
+        a = core.ADAPTERS.get(platform)
+        if a is None:
+            continue
         try:
             import spaces
             with spaces.notification_target(a, u) as target:
                 await target.notify(u, scrub(text)[:1500])
         except Exception:
             log.warning("не удалось сообщить результат обновления %s", u, exc_info=True)
+        else:
+            remaining.remove([platform, u])
+            save()
+    if remaining:
+        attempts = int(r.get("notice_attempts", 0)) + 1
+        r.update(notice_attempts=attempts, next_try=time.time() + min(60 * 2 ** min(attempts - 1, 6), 3600))
+        save()
+    else:
+        f.unlink(missing_ok=True)
 
 
 async def probation_watch(seconds: int | None = None):

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import configuration
 import dialog_state
 import schema
 
@@ -417,15 +418,13 @@ def configured_root(db):
     if row is None:
         return None
     value = json.loads(row[0])
-    import re
 
-    import configuration
     if (not isinstance(value, dict) or any(field not in value for field in FIELDS) or not isinstance(value.get("name"), str)
             or not 1 <= len(value["name"]) <= 80 or not isinstance(value.get("owner"), str)
             or not configuration.user_id(value["owner"])
             or not isinstance(value.get("max_channel"), str)
-            or not re.fullmatch(r"-?[1-9][0-9]{0,18}", value["max_channel"])
-            or value.get("tg_channel") is not None and (not isinstance(value["tg_channel"], str) or not re.fullmatch(r"-?[1-9][0-9]{0,18}|@[A-Za-z][A-Za-z0-9_]{4,31}", value["tg_channel"]))):
+            or not configuration.chat_id(value["max_channel"])
+            or value.get("tg_channel") is not None and (not isinstance(value["tg_channel"], str) or not configuration.telegram_channel(value["tg_channel"]))):
         raise ValueError("Повреждены настройки основного пространства в базе; восстановите их из резервной копии.")
     return value
 
@@ -466,7 +465,6 @@ def settings_state():
 
 
 def parse_settings(text, sid=None):
-    import re
     parts = [line.strip() for line in text.strip().splitlines()]
     if len(parts) == 3:
         parts.append("")
@@ -474,10 +472,9 @@ def parse_settings(text, sid=None):
         raise ValueError(INPUT_HELP)
     if parts[3] == "-":
         parts[3] = ""
-    if (not 1 <= len(parts[0]) <= 80 or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[1])
-            or int(parts[1]) > 2**63 - 1
-            or not re.fullmatch(r"-?[1-9][0-9]{0,18}", parts[2])
-            or parts[3] and not re.fullmatch(r"-?[1-9][0-9]{0,18}|@[A-Za-z][A-Za-z0-9_]{4,31}", parts[3])):
+    if (not 1 <= len(parts[0]) <= 80 or not configuration.user_id(parts[1])
+            or not configuration.chat_id(parts[2])
+            or parts[3] and not configuration.telegram_channel(parts[3])):
         raise ValueError(INPUT_HELP)
     # Canonical IDs prevent alternate spellings from bypassing uniqueness checks.
     parts[1:3] = [str(int(value)) for value in parts[1:3]]
@@ -485,6 +482,11 @@ def parse_settings(text, sid=None):
     import os
     if parts[3] and not os.getenv("TG_TOKEN", "").strip():
         raise ValueError("Для группы Telegram сначала подключите TG_TOKEN в .env. Без Telegram укажите «-».")
+    primary = configured_root(root().db)
+    if sid != 0 and primary and parts[1] == primary["owner"]:
+        raise ValueError("Этот владелец уже привязан к основному пространству. Укажите другого владельца.")
+    if sid == 0 and root().db.execute("SELECT 1 FROM workspaces WHERE owner=? LIMIT 1", (parts[1],)).fetchone():
+        raise ValueError("Этот владелец уже привязан к другому пространству.")
     if sid != 0 and (parts[2] == str(root().adapters["max"].channel)
                      or parts[3] and "tg" in root().adapters and parts[3] == str(root().adapters["tg"].channel).lower()):
         raise ValueError("Эта группа уже используется основным пространством. Укажите отдельные группы.")
@@ -546,13 +548,10 @@ async def settings_input(adapter, uid, text):
 
 
 def settings_busy(space):
-    import core
-    if any(not task.done() for task in core.INFLIGHT):
-        return True
     if root().db.execute("SELECT 1 FROM max_inbox WHERE space_id=? AND state IN ('pending','processing') LIMIT 1", (space.id,)).fetchone():
         return True
     return bool(space.db.execute("SELECT 1 FROM drafts WHERE status IN ('publishing','regenerating') OR "
-                                 "(status='pending' AND (COALESCE(published_to,'')!='' OR COALESCE(publication_channels,'{}')!='{}')) LIMIT 1").fetchone())
+                                 "(status='pending' AND COALESCE(published_to,'')!='') LIMIT 1").fetchone())
 
 
 async def settings_save(adapter, uid, payload):
@@ -736,8 +735,7 @@ async def member_input(adapter, uid, text):
         return True
     parts = [line.strip() for line in text.strip().splitlines()]
     roles = {"участник", "сотрудник", "проверяющий"}
-    import re
-    if len(parts) not in (1, 2) or not re.fullmatch(r"[1-9][0-9]{0,18}", parts[0]) or (len(parts) == 2 and parts[1].lower() not in roles):
+    if len(parts) not in (1, 2) or not configuration.user_id(parts[0]) or (len(parts) == 2 and parts[1].lower() not in roles):
         await adapter.notify(uid, "Отправьте ID человека в MAX. Он будет добавлен как участник.")
         return True
     if core.role_of(adapter, parts[0]) is not None:

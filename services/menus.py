@@ -286,14 +286,29 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
 
 def pending_view(adapter, page=0, uid=None):
     from datetime import datetime
-    drafts = [dict(r) for r in core.db.execute("SELECT * FROM drafts WHERE status='pending' ORDER BY created,id")
-              if core._approval_adapter(dict(r), adapter) is adapter
-              and uid is not None and core.can_manage_draft(adapter, uid, dict(r))]
-    total = len(drafts)
+    clauses = ["status='pending'"]
+    args: list[str | None] = []
+    if uid is None or not core.can_manage_draft(adapter, uid, {"platform": adapter.name, "author_id": str(uid)}):
+        clauses.append("0")
+    elif not core.is_admin(adapter, uid):
+        if core._approval_adapter({"platform": adapter.name}, adapter) is not adapter:
+            clauses.append("0")
+        clauses.extend(("platform=?", "author_id=?"))
+        args.extend((adapter.name, str(uid)))
+    else:
+        platforms = [r[0] for r in core.db.execute("SELECT DISTINCT platform FROM drafts WHERE status='pending'")
+                     if core._approval_adapter({"platform": r[0]}, adapter) is adapter]
+        clauses.append("(" + " OR ".join("platform IS ?" for _ in platforms) + ")" if platforms else "0")
+        args.extend(platforms)
+    where = " AND ".join(clauses)
+    total = core.db.execute("SELECT COUNT(*) FROM drafts WHERE " + where, args).fetchone()[0]
     page = min(max(0, page), max(0, (total - 1) // 8))
+    drafts = core.db.execute("SELECT * FROM drafts WHERE " + where + " ORDER BY created,id LIMIT 8 OFFSET ?",
+                            (*args, page * 8)).fetchall()
     lines = [f"📋 На проверке: {total}. Страница {page + 1}."]
     rows = []
-    for d in drafts[page * 8:(page + 1) * 8]:
+    for row in drafts:
+        d = dict(row)
         date = datetime.fromtimestamp(d["created"], ops._tz()).strftime("%d.%m %H:%M")
         name = (d["author_name"] or "Сотрудник")[:40]
         snippet = " ".join((d["post"] or d["source_text"]).split())[:120]

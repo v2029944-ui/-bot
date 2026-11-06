@@ -239,6 +239,10 @@ class RateLimited(Exception):
     """Сотрудник превысил лимит фото в час."""
 
 
+class IncompleteGeneration(RuntimeError):
+    """The provider stopped before completing the text; automatic paid retry is unsafe."""
+
+
 _HITS: dict[str, list[float]] = {}
 _RL_ALERT: dict[str, float] = {}
 

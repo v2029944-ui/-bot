@@ -60,9 +60,14 @@ def _base(adapter: core.Adapter) -> tuple[list[str], list[str]]:
     return adapter.base_approvers, adapter.base_employees
 
 
+def _normalized_person(adapter, row):
+    return {**dict(row), "role": "adm" if row["uid"] in core._base_admins(adapter) else
+            "member" if row["role"] in ("emp", "apr") else row["role"]}
+
+
 def _db_people(adapter: core.Adapter) -> list[dict]:
     rows = core.db.execute("SELECT * FROM people WHERE platform=? ORDER BY created", (adapter.name,)).fetchall()
-    return [{**dict(r), "role": "adm" if r["uid"] in core._base_admins(adapter) else "member" if r["role"] in ("emp", "apr") else r["role"]} for r in rows]
+    return [_normalized_person(adapter, r) for r in rows]
 
 
 def _base_admins(adapter: core.Adapter) -> list[str]:
@@ -177,8 +182,12 @@ def people_view(adapter: core.Adapter, page: int = 0) -> tuple[str, list]:
     base_adm = core._base_admins(adapter)
     lines = [f"👥 Люди · страница {page + 1} из {max(1, (total + 11) // 12)}", "👑 Администраторы / 👤 Участники"]
     if page == 0:
-        for uid in dict.fromkeys([*base_adm, *base_apr, *base_emp]):
-            if not core.db.execute("SELECT 1 FROM people WHERE platform=? AND uid=?", (adapter.name, uid)).fetchone():
+        initial = list(dict.fromkeys([*base_adm, *base_apr, *base_emp]))
+        placeholders = ",".join("?" for _ in initial)
+        stored = {r[0] for r in core.db.execute(f"SELECT uid FROM people WHERE platform=? AND uid IN ({placeholders})",
+                                               (adapter.name, *initial))} if initial else set()
+        for uid in initial:
+            if uid not in stored:
                 icon = "👑" if uid in base_adm else "👤"
                 lines.append(f"{icon} Без имени (id {uid}) — из настроек")
     for p in people:
@@ -211,7 +220,8 @@ def _people_confirmation(adapter, actor, payload, person):
 
 
 def _person(adapter: core.Adapter, uid: str) -> dict | None:
-    return next((x for x in core._db_people(adapter) if x["uid"] == uid), None)
+    row = core.db.execute("SELECT * FROM people WHERE platform=? AND uid=?", (adapter.name, uid)).fetchone()
+    return _normalized_person(adapter, row) if row else None
 
 
 def reqs_view(adapter: core.Adapter) -> tuple[str, list]:
@@ -301,7 +311,7 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
             core.log.warning("не удалось сообщить %s о новой роли", uid, exc_info=True)
         return f"✅ {who}: теперь {core.ROLE_NAME[role]}.", [[("← К списку", "m:people")]]
     if act == "pdel":
-        p = next((x for x in core._db_people(adapter) if x["uid"] == arg(2)), None)
+        p = core._person(adapter, arg(2))
         if not p:
             return core.people_view(adapter)
         if p["role"] == "adm" and len(adapter.admins) <= 1:
@@ -309,7 +319,7 @@ async def people_menu(adapter: core.Adapter, act: str, parts: list[str], uid: st
         return (f"Убрать {p['name'] or p['uid']} из списка? Он перестанет присылать фото.",
                 [[("Да, убрать", _people_confirmation(adapter, actor, f"m:pdelok:{p['uid']}", p)), ("Отмена", "m:people")]])
     if act == "pdelok":
-        p = next((x for x in core._db_people(adapter) if x["uid"] == arg(2)), None)
+        p = core._person(adapter, arg(2))
         if p and p["role"] == "adm" and len(adapter.admins) <= 1:  # иначе бот остался бы без админа и открылся всем
             return "⛔ Нельзя убрать последнего администратора.", [[("← Назад", f"m:pset:{p['uid']}")]]
         if p:

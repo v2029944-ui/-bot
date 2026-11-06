@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -28,9 +29,22 @@ def scrub(text: str) -> str:
 
 def run(cmd: list[str], cwd: Path, timeout: int = 300, env: dict | None = None) -> tuple[int, str]:
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})})
-        return p.returncode, scrub((p.stdout or "") + (p.stderr or "")).strip()
+        with subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=os.name == "posix",
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})}) as p:
+            try:
+                stdout, stderr = p.communicate(timeout=timeout)
+            except BaseException:
+                try:
+                    if os.name == "posix":
+                        os.killpg(p.pid, signal.SIGKILL)
+                    elif p.poll() is None:
+                        p.kill()
+                except ProcessLookupError:
+                    pass
+                p.communicate()
+                raise
+            return p.returncode, scrub((stdout or "") + (stderr or "")).strip()
     except subprocess.TimeoutExpired:
         return 1, f"команда не завершилась за {timeout} с"
     except OSError as e:

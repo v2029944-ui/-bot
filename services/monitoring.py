@@ -157,7 +157,8 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
     oldest = one("SELECT MIN(COALESCE(NULLIF(last_sent,0), created)) FROM drafts WHERE status='pending'")
     stuck = one("SELECT COUNT(*) FROM drafts WHERE status IN ('publishing','regenerating')")
     day = one("SELECT COUNT(*) FROM drafts WHERE created > ?", now - 86400)
-    pub7 = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND created > ?", now - 7 * 86400)
+    pub7 = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND published_at > ?", now - 7 * 86400)
+    undated = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND COALESCE(published_at,0)=0")
     async def check_llm():
         try:
             await asyncio.wait_for(core._complete("Отвечай одним словом.", "Ответь: ОК"), 30)
@@ -182,6 +183,8 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
              f"За сутки получено фото: {day}, опубликовано за неделю: {pub7}"]
     if stuck:
         lines.append(f"⚠️ Зависших черновиков: {stuck} (после перезапуска вернутся в работу)")
+    if undated:
+        lines.append(f"У {undated} старых публикаций дата отправки неизвестна; они не включены в недельную статистику.")
     if balance:
         lines.append(balance)
     lines.append(f"Свободно на диске: {free}")
@@ -230,6 +233,7 @@ async def reminder_loop():
     last_clean = time.time()
     while True:
         try:
+            await ops.announce_update_result()
             await ops.flush_deferred()  # придержанные черновики уходят, когда началось рабочее время
             await core.remind_once()
             await core.warn_expiring_once()

@@ -17,7 +17,12 @@ def get(did: int):
 
 def _claim(did: int, src: str, dst: str) -> bool:
     """Атомарно меняет статус: защита от двойных нажатий и гонки двух согласующих."""
-    cur = core.db.execute("UPDATE drafts SET status=? WHERE id=? AND status=?", (dst, did, src))
+    fields = "status=?"
+    values: list[str | float] = [dst]
+    if dst in ("deleted", "expired"):
+        fields += ",closed_at=?,cleaned=0"
+        values.append(time.time())
+    cur = core.db.execute(f"UPDATE drafts SET {fields} WHERE id=? AND status=?", (*values, did, src))
     core.db.commit()
     return cur.rowcount == 1
 
@@ -27,6 +32,8 @@ def _set(did: int, **f):
         f.setdefault("cleaned", 0)
         if f["status"] in ("deleted", "expired"):
             f.setdefault("closed_at", time.time())
+        if f["status"] == "published":
+            f.setdefault("published_at", time.time())
     core.db.execute(f"UPDATE drafts SET {', '.join(k + '=?' for k in f)} WHERE id=?", (*f.values(), did))
     core.db.commit()
 
@@ -146,6 +153,10 @@ def _scrub_terminal(d):
 def startup():
     """При старте: возвращаем «зависшие» после сбоя черновики в работу и убираем старое."""
     core.db.execute("UPDATE deferred SET lease_until=0 WHERE lease_until!=0")
+    # The actual closing date of legacy rows is unknown. Give remaining text
+    # a full retention period from this first recovery, without guessing a date.
+    core.db.execute("UPDATE drafts SET closed_at=? WHERE status IN ('deleted','expired') "
+                    "AND COALESCE(closed_at,0)=0 AND cleaned!=2", (time.time(),))
     n = core.db.execute("UPDATE drafts SET status='pending' WHERE status IN ('publishing','regenerating')").rowcount
     core.db.commit()
     if n:

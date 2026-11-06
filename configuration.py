@@ -19,11 +19,19 @@ def user_id(value: str) -> bool:
     return bool(re.fullmatch(r"[1-9][0-9]{0,18}", value)) and int(value) <= 2**63 - 1
 
 
+def chat_id(value: str) -> bool:
+    return bool(re.fullmatch(r"-?[1-9][0-9]{0,18}", value)) and -2**63 <= int(value) < 2**63
+
+
+def telegram_channel(value: str) -> bool:
+    return chat_id(value) or bool(re.fullmatch(r"@[A-Za-z][A-Za-z0-9_]{4,31}", value))
+
+
 def validate() -> str | None:
     limits = (
         ("REMIND_CHECK_SEC", "300", 1, 86400, True),
         ("HOUSEKEEPING_SEC", "21600", 1, 604800, True),
-        ("REMIND_AFTER_MIN", "180", 1, 525600, True),
+        ("REMIND_AFTER_MIN", "180", 0, 525600, True),
         ("RATE_LIMIT_PER_HOUR", "20", 1, 100000, True),
         ("ALERT_THROTTLE_SEC", "3600", 0, 604800, True),
         ("DRAFT_TTL_DAYS", "7", 0, 3650, True),
