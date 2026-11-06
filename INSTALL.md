@@ -369,12 +369,14 @@ ls code/entrypoint.sh code/requirements-dev.lock code/compatibility.json
 stage=$(mktemp -d "$HOME/post_bot-rebuild.XXXXXX")
 cp entrypoint.sh "$stage/entrypoint.sh.old"
 cp Dockerfile "$stage/Dockerfile.old"
-git -c safe.directory=/home/bot/post_bot/code -C code archive --format=tar --output="$stage/source.tar" HEAD
+docker compose exec -T bot git -C /app/code archive --format=tar HEAD > "$stage/source.tar"
 tar -tf "$stage/source.tar" > /dev/null
 tar -xf "$stage/source.tar" -C /home/bot/post_bot
 sh -n entrypoint.sh
 ```
 
+Git запускается внутри уже работающего контейнера, где он установлен; отдельно
+ставить Git на VPS не нужно. Docker-команду по-прежнему выполняет пользователь `bot`.
 Архив содержит только файлы Git: `.env`, `data` и сама рабочая папка `code` в него
 не входят и сохраняются. Это важно: простого копирования одного `entrypoint.sh`
 для этого выпуска недостаточно — Docker должен получить также новые модули,

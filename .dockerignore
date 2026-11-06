@@ -4,3 +4,9 @@ tests/
 __pycache__/
 .pytest_cache/
 *.zip
+
+.git/
+code/
+.venv/
+.mypy_cache/
+.ruff_cache/
