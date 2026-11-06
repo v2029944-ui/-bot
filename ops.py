@@ -382,7 +382,9 @@ async def announce_update_result():
         targets = [(a, u) for a in core.ADAPTERS.values() for u in core.staff(a)]
     for a, u in targets:
         try:
-            await a.notify(u, scrub(text)[:1500])
+            import spaces
+            with spaces.notification_target(a, u) as target:
+                await target.notify(u, scrub(text)[:1500])
         except Exception:
             log.warning("не удалось сообщить результат обновления %s", u, exc_info=True)
 

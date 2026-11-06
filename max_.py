@@ -412,6 +412,14 @@ class Max(core.Adapter):
             return await self.send_menu(user_id, text, rows)
         await self._send({"user_id": user_id}, text)
 
+    async def send_notice_menu(self, user_id, text, rows):
+        # Notices created before on_callback still participate in single-menu cleanup.
+        token = _NAV.set({"uid": str(user_id), "sent_menu": False})
+        try:
+            return await self.send_menu(user_id, text, rows)
+        finally:
+            _NAV.reset(token)
+
     async def send_menu(self, user_id, text, rows, silent=False):
         if spaces.INSTALLED:
             name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name

@@ -75,16 +75,27 @@ async def announce_start():
     """Сообщение «бот запущен» (STARTUP_NOTIFY=0 — не слать)."""
     if core.env("STARTUP_NOTIFY", "1") == "0":
         return
-    n = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status='pending'").fetchone()[0]
-    text = ("🟢 Бот запущен." + (f" Ждут согласования: {n}." if n else "")
-            + (f"\nЗакрыто неразобранных черновиков старше {core.env('DRAFT_TTL_DAYS', '7')} дн.: {core.LAST_EXPIRED}."
-               if core.LAST_EXPIRED else ""))
-    for a in core.ADAPTERS.values():
-        for uid in core.staff(a):
-            try:
-                await a.notify(uid, text)
-            except Exception:
-                core.log.warning("не удалось отправить сообщение о запуске %s", uid, exc_info=True)
+    targets = [(a, uid) for a in core.ADAPTERS.values() for uid in core.staff(a)]
+    seen = set()
+    for a, uid in targets:
+        key = (a.name, str(uid))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            with spaces.notification_target(a, uid) as target:
+                if core.is_admin(target, uid):
+                    n = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status='pending'").fetchone()[0]
+                else:
+                    n = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status='pending' AND platform=? AND author_id=?",
+                                        (target.name, str(uid))).fetchone()[0]
+                text = "🟢 Бот запущен." + (f" Ждут согласования: {n}." if n else "")
+                if not spaces.active_id() and core.LAST_EXPIRED:
+                    text += (f"\nЗакрыто неразобранных черновиков старше {core.env('DRAFT_TTL_DAYS', '7')} дн.: "
+                             f"{core.LAST_EXPIRED}.")
+                await target.notify(uid, text)
+        except Exception:
+            core.log.warning("не удалось отправить сообщение о запуске %s", uid, exc_info=True)
 
 
 def _ago(sec: float) -> str:

@@ -274,6 +274,17 @@ def for_user(uid, continue_input=False):
     return 0
 
 
+@contextmanager
+def notification_target(adapter, uid):
+    """Bind system notices to the recipient's space without changing saved routes."""
+    if INSTALLED and adapter is root().adapters.get("max"):
+        import core
+        with enter(get(for_user(uid, continue_input=True))):
+            yield core.ADAPTERS["max"]
+    else:
+        yield adapter
+
+
 def stamp(update):
     if not INSTALLED or update.get("update_type") != "message_created":
         return update
@@ -346,9 +357,22 @@ async def route_update(adapter, update):
             sid = int(number)
             update = {**update, "callback": {**cb, "payload": payload}}
         if sid == 0:
-            if root().db.execute("SELECT 1 FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone() and not global_admin(cb["user"]["user_id"]) and str(cb["user"]["user_id"]) not in root().adapters["max"].admins:
-                own = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (str(cb["user"]["user_id"]),)).fetchone()
-                await adapter.send_menu(cb["user"]["user_id"], "Эта кнопка относится к основному пространству.", [[("Моё пространство", f"w:{own['id']}:m:menu")]])
+            import core
+            uid = str(cb["user"]["user_id"])
+            home = for_user(uid)
+            if home and not core.is_member(adapter, uid):
+                space = get(home)
+                with enter(space):
+                    own = space.memory["ADAPTERS"]["max"]
+                    if payload in ("m:admin", "m:menu"):
+                        # Only navigation may cross a stale root namespace. Never reinterpret draft IDs.
+                        action = "m:admin" if core.is_admin(own, uid) else "m:menu"
+                        root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, home))
+                        root().db.commit()
+                        await own.handle({**update, "_routed": True, "callback": {**cb, "payload": action}})
+                    else:
+                        await own.send_notice_menu(uid, "Эта кнопка относится к основному пространству. Откройте свой пост заново.",
+                                                   [[("Моё пространство", "m:admin" if core.is_admin(own, uid) else "m:menu")]])
                 return True
             if _root_allows(cb["user"]["user_id"]):
                 root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str(cb["user"]["user_id"]),))
