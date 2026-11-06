@@ -7,6 +7,8 @@ import os
 import re
 import time
 import weakref
+import secrets
+import dialog_state
 from pathlib import Path
 from urllib.parse import quote
 
@@ -72,6 +74,14 @@ class Max(core.Adapter):
         self._send_locks = weakref.WeakValueDictionary()
         self._upload_cache = {}
         self._upload_locks = weakref.WeakValueDictionary()
+
+    CONFIRM_ACTIONS = {"okyes", "okforce", "delyes", "rejectphoto", "rejecttext", "rejectcustom"}
+
+    def _confirmations(self):
+        return dialog_state.PendingMap(core.db, "max_confirmation")
+
+    def _clear_confirmation(self, uid):
+        self._confirmations().pop((self.name, str(uid)), None)
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
@@ -236,8 +246,15 @@ class Max(core.Adapter):
         for path, entry in list(self._upload_cache.items()):
             if time.monotonic() >= entry[2] or not Path(path).exists():
                 self._upload_cache.pop(path, None)
-        for row in core.db.execute("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
-                                   "WHERE d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt LIMIT 20").fetchall():
+        stale = ("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
+                 "WHERE (d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt) ")
+        cursor = getattr(self, "_stale_cursor", "")
+        rows = core.db.execute(stale + "AND u.mid>? ORDER BY u.mid LIMIT 20", (cursor,)).fetchall()
+        if not rows and cursor:
+            rows = core.db.execute(stale + "ORDER BY u.mid LIMIT 20").fetchall()
+        for row in rows:
+            # A permanently uneditable message must not starve all later cleanups.
+            self._stale_cursor = row["mid"]
             if await self._strip_admin_button({"mid": row["mid"]}, draft_buttons=True):
                 core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (row["mid"],))
                 core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (row["mid"],))
@@ -254,7 +271,18 @@ class Max(core.Adapter):
     async def _send_inner(self, target, post, photo=None, buttons=None, silent=False, video=None, media=None, admin_menu=True):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
         with_admin = bool(admin_menu and "user_id" in target and core.is_admin(self, target["user_id"]))
-        base_buttons = [list(row) for row in (buttons or [])]  # без кнопки админа: нужны, чтобы потом её убрать
+        base_buttons = [[dict(button) for button in row] for row in (buttons or [])]  # без кнопки админа: нужны, чтобы потом её убрать
+        if "user_id" in target:
+            issued = []
+            for row in base_buttons:
+                for button in row:
+                    parts = str(button.get("payload", "")).split(":")
+                    if len(parts) == 4 and parts[0] == "d" and parts[1] in self.CONFIRM_ACTIONS:
+                        nonce = secrets.token_urlsafe(12)
+                        button["payload"] += ":" + nonce
+                        issued.append(button["payload"])
+            if issued:
+                self._confirmations()[(self.name, str(target["user_id"]))] = issued
         buttons = [list(row) for row in base_buttons]
         if with_admin and not any(b.get("payload") == "m:admin" for row in buttons for b in row):
             # Кнопка стоит только под последним сообщением: при отправке нового она убирается из прежнего.
@@ -517,6 +545,7 @@ class Max(core.Adapter):
         images = [a for a in atts if a.get("type") == "image"]
         if not images and not videos:
             if body.get("text"):
+                self._clear_confirmation(uid)
                 token = _NAV.set({"uid": str(uid), "sent_menu": False})
                 try:
                     if await core.on_text(self, uid, body["text"]):
@@ -628,6 +657,16 @@ class Max(core.Adapter):
         payload = cb.get("payload")
         if not isinstance(payload, str):
             return  # payload не обязателен в официальной схеме Callback
+        parts = payload.split(":")
+        if len(parts) >= 2 and parts[0] == "d" and parts[1] in self.CONFIRM_ACTIONS:
+            pending = self._confirmations().get((self.name, str(uid)), ())
+            if len(parts) != 5 or payload not in pending:
+                await self.notify(uid, "Это подтверждение больше не действует. Откройте пост и подтвердите действие заново.")
+                return
+            self._clear_confirmation(uid)  # consume before the first await/mutation
+            payload = ":".join(parts[:4])
+        else:
+            self._clear_confirmation(uid)  # cancellation or another menu supersedes the prompt
         pressed = ((cb.get("message") or {}).get("body") or {}).get("mid")  # сообщение, под которым нажали
         ctx = {"uid": str(uid), "sent_menu": False}
         parts = payload.split(":")

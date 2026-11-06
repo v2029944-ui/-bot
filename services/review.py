@@ -35,11 +35,12 @@ async def _apply_edit(adapter: core.Adapter, user_id, did: int, attempt: int, te
         return True, f"Слишком длинно ({length} ед. UTF-16, максимум {limit}). Сократите и пришлите снова."
     if not core._claim(did, "pending", "regenerating"):
         return False, core.BUSY
-    core._set(did, post=text, footer=json.dumps(footer, ensure_ascii=False), attempts=d["attempts"] + 1, status="pending")
+    core._set(did, post=text, footer=json.dumps(footer, ensure_ascii=False), attempts=d["attempts"] + 1, status="regenerating")
     sent, last = await core._send_draft(d, did, text, adapter, actor=str(user_id))
     if not sent:  # откат, как при пересоздании: сообщения с новыми кнопками нет
         core._set(did, post=d["post"], footer=d.get("footer"), attempts=d["attempts"], status="pending")
         return False, f"⚠️ Текст сохранить не удалось: {core.err(last)}"
+    core._set(did, status="pending")
     return False, "✍️ Ваш текст заменил черновик. Проверьте пост выше и нажмите ✅ Опубликовать."
 
 

@@ -104,7 +104,15 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             with spaces.enter(b):
                 assert core.get(1)["status"] == "pending"
 
-            await callback(11, aid, "okyes")
+            await callback(11, aid, "ok")
+            with spaces.enter(a):
+                confirmation = core.ADAPTERS["max"]._confirmations()[("max", "11")][0]
+            # A valid prompt from A cannot authorize publication of the same draft ID in B.
+            await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "foreign-confirm",
+                "user": {"user_id": 11}, "payload": f"w:{bid}:{confirmation}"}})
+            assert not publications
+            await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "own-confirm",
+                "user": {"user_id": 11}, "payload": f"w:{aid}:{confirmation}"}})
             assert publications[0][:2] == (aid, "-201")
             destinations = [(sid, kw.get("params", {}).get("chat_id")) for sid, method, path, kw in calls if method == "POST" and path == "/messages" and "chat_id" in kw.get("params", {})]
             assert destinations == [(aid, -101)]
