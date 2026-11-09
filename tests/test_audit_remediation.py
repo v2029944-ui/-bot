@@ -350,6 +350,37 @@ def test_v2_rollback_migration_converts_handoff_states(tmp_path, monkeypatch):
     assert '"_space":2' in payloads[0] and '"_material_to_inbox":true' in payloads[0]
 
 
+def test_rollback_migration_failure_blocks_git_reset(tmp_path, monkeypatch):
+    updater = load_updater()
+    monkeypatch.setattr(updater, "DATA", tmp_path)
+    updater._write("update_state.json", {
+        "prev": "old-sha", "new": "new-sha", "status": "probation",
+        "prev_data_version": 1, "new_data_version": 2,
+        "platform": "max", "uid": "1",
+    })
+    resets = []
+
+    def broken_migration():
+        raise sqlite3.OperationalError("rollback migration failed")
+
+    def fake_git(*args, **kwargs):
+        if args[:2] == ("reset", "--hard"):
+            resets.append(args)
+        if args[:2] == ("rev-parse", "--short"):
+            return 0, "new-sha"
+        return 0, "ok"
+
+    monkeypatch.setitem(updater.ROLLBACK_DATA_MIGRATIONS, (2, 1), broken_migration)
+    monkeypatch.setattr(updater, "git", fake_git)
+    updater.rollback()
+
+    state = json.loads((tmp_path / "update_state.json").read_text())
+    result = json.loads((tmp_path / "update_result.json").read_text())
+    assert state["status"] == "rollback_failed"
+    assert result["status"] == "failed"
+    assert resets == []
+
+
 def test_repository_declares_handoff_data_version_two():
     meta = json.loads((Path(__file__).resolve().parents[1] / "compatibility.json").read_text())
     assert meta == {"read_versions": [1, 2], "write_version": 2}

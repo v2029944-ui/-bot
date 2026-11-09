@@ -281,6 +281,34 @@ def test_updater_rollback_restores_previous_version(repos, tmp_path):
     assert json.loads((data / "update_state.json").read_text())["status"] == "rolled_back"
 
 
+def test_legacy_updater_executable_rejects_data_v2_before_switch(repos, tmp_path):
+    origin, code = repos
+    data = tmp_path / "data"
+    data.mkdir()
+    sentinel = data / "sentinel.txt"
+    sentinel.write_text("unchanged")
+    (data / "update_request.json").write_text(json.dumps({"platform": "max", "uid": "1"}))
+    old_head = git(code, "rev-parse", "HEAD")
+
+    (origin / "main.py").write_text("print('v2')\n")
+    (origin / "compatibility.json").write_text(json.dumps({"read_versions": [1, 2], "write_version": 2}))
+    git(origin, "add", "."), git(origin, "commit", "-qm", "handoff v2")
+
+    legacy = ROOT / "tests" / "fixtures" / "updater_v1.py"
+    p = subprocess.run(
+        [sys.executable, str(legacy)], capture_output=True, text=True,
+        env={**os.environ, "CODE_DIR": str(code), "DATA_DIR": str(data),
+             "UPDATE_TEST_CMD": "true", "GITHUB_BRANCH": "main"})
+    assert p.returncode == 0, p.stderr
+    result = json.loads((data / "update_result.json").read_text())
+    assert result["status"] == "failed"
+    assert "несовместим" in result["detail"]
+    assert git(code, "rev-parse", "HEAD") == old_head
+    assert json.loads((code / "compatibility.json").read_text()) == {"read_versions": [1], "write_version": 1}
+    assert sentinel.read_text() == "unchanged"
+    assert not (data / "update_state.json").exists()
+
+
 def test_updater_v2_migration_is_bound_to_executable_and_rollback(repos, tmp_path):
     origin, code = repos
     data = tmp_path / "data"
