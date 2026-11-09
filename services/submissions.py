@@ -28,18 +28,22 @@ async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, s
             return  # повтор обработки одного материала не расходует лимит сотрудника
     limit = int(core.env("RATE_LIMIT_PER_HOUR", "20"))
     key, now = f"{adapter.name}:{author_id}", time.time()
-    hits = [t for t in core._HITS.get(key, []) if now - t < 3600]
-    if len(hits) >= limit:
-        core._HITS[key] = hits
+    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - 3600,))
+    used = core.db.execute("SELECT COUNT(*) FROM rate_events WHERE platform=? AND uid=? AND created>=?",
+                           (adapter.name, str(author_id), now - 3600)).fetchone()[0]
+    if used >= limit:
+        core.db.commit()
         if now - core._RL_ALERT.get(key, 0) > 3600:  # администраторам пишем не чаще раза в час
             core._RL_ALERT[key] = now
             await core.alert(adapter, f"⚠️ {author_name} отправил больше {limit} фото за час. Новые фото игнорируются.")
         raise core.RateLimited(key)
-    core._HITS[key] = hits + [now]
+    core.db.execute("INSERT INTO rate_events(platform,uid,created) VALUES(?,?,?)",
+                    (adapter.name, str(author_id), now))
     if source_key:
         queue = spaces.queue_db()
         queue.execute("UPDATE max_inbox SET rate_counted=1 WHERE event_key=?", (source_key,))
         queue.commit()
+    core.db.commit()
 
 
 def _approval_adapter(d: dict, fallback: core.Adapter) -> core.Adapter:
