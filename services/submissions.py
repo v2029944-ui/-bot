@@ -30,7 +30,7 @@ async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, s
             return  # совместимость с материалами, учтёнными до журнала rate_events
     limit = int(core.env("RATE_LIMIT_PER_HOUR", "20"))
     key, now = f"{adapter.name}:{author_id}", time.time()
-    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - 3600,))
+    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - core.RATE_EVENT_TTL,))
     used = core.db.execute("SELECT COUNT(*) FROM rate_events WHERE platform=? AND uid=? AND created>=?",
                            (adapter.name, str(author_id), now - 3600)).fetchone()[0]
     if used >= limit:
