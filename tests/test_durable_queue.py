@@ -233,7 +233,12 @@ def test_expiry_keeps_payload_if_durable_failure_staging_fails(adapter, monkeypa
                     (time.time() - 8 * 86400, key))
     core.db.commit()
 
-    def fail_stage(*args, **kwargs):
+    def fail_stage(_adapter, event_key, uid, source_mid, sid, created, attempts, reason, **kwargs):
+        db = kwargs["db"]
+        db.execute("""INSERT INTO max_handoff_failures
+                      (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                      VALUES(?,?,?,?,?,?,?,?)""",
+                   (event_key, uid, source_mid, sid, created, time.time(), attempts, reason))
         raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(max_actions, "stage_material_failure", fail_stage)
