@@ -17,6 +17,7 @@ core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
 schema.add_columns(core.db, "max_actions", ("created REAL DEFAULT 0", "attempts INTEGER DEFAULT 0", "next_try REAL DEFAULT 0", "space_id INTEGER DEFAULT 0"))
 core.db.execute("UPDATE max_actions SET created=? WHERE created=0", (time.time(),))
 core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_pending ON max_actions(state,uid,id)")
+core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_handoff ON max_actions(state,space_id,id,next_try)")
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_handoff_failures (
     event_key TEXT PRIMARY KEY, uid TEXT, source_mid TEXT, space_id INTEGER DEFAULT 0,
     created REAL, failed_at REAL, attempts INTEGER, reason TEXT)""")
