@@ -134,7 +134,8 @@ class Worker:
         except Exception as exc:
             incomplete = isinstance(exc, core.IncompleteGeneration)
             ambiguous = isinstance(exc, core.AmbiguousGeneration)
-            manual = incomplete or ambiguous
+            permanent = isinstance(exc, core.PermanentGeneration)
+            manual = incomplete or ambiguous or permanent
             state = "failed" if manual or attempt >= 8 else "pending"
             changed = core.db.execute("UPDATE max_inbox SET state=?,next_try=?,error=? WHERE event_key=? AND state='processing'",
                                       (state, now + min(30 * 2 ** min(attempt - 1, 7), 3600), core.err(exc)[:300], key)).rowcount
@@ -144,6 +145,7 @@ class Worker:
             log.warning("материал %s: попытка %s не удалась: %s", key[:8], attempt, core.err(exc))
             if state == "failed":
                 reason = ("⚠️ Результат запроса к нейросети неизвестен; автоматический платный повтор остановлен.\n" if ambiguous else
+                          "⚠️ Нейросеть отклонила запрос; автоматические повторы остановлены.\n" if permanent else
                           "⚠️ Нейросеть оборвала ответ. Автоматические платные повторы остановлены.\n" if incomplete else
                           "⚠️ Материал не обработан после 8 попыток.\n")
                 if spaces.INSTALLED and row["space_id"]:
