@@ -228,6 +228,7 @@ def test_handoff_claim_is_single_and_recovers_after_restart(monkeypatch):
         monkeypatch.setattr(second, "process_handoff", slow)
         first.schedule_handoffs()
         second.schedule_handoffs()
+        await asyncio.sleep(0)
         assert len(first.handoffs) + len(second.handoffs) == 1
         assert core.db.execute("SELECT state FROM max_actions WHERE id=?", (row["id"],)).fetchone()["state"] == "handoff_processing"
         for task in [*first.handoffs.values(), *second.handoffs.values()]:
@@ -245,6 +246,7 @@ def test_terminal_handoff_failure_keeps_diagnostics_and_durable_notices(monkeypa
         api = Api()
         adapter = make(api)
         adapter.admins = ["5"]
+        core.ADAPTERS["max"] = adapter
         max_actions.enqueue(material(mid="expired-material"))
         row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
         core.db.execute("UPDATE max_actions SET state='processing',created=? WHERE id=?",
