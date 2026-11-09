@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 from conftest import FakeAdapter, run
@@ -96,3 +97,18 @@ def test_candidate_tests_do_not_receive_production_secrets(monkeypatch, tmp_path
     assert env["DATA_DIR"] == str(tmp_path)
     for name in ("MAX_TOKEN", "TG_TOKEN", "LLM_API_KEY", "ANTHROPIC_API_KEY"):
         assert name not in env
+
+
+def test_housekeeping_removes_only_old_terminal_queue_history(monkeypatch):
+    monkeypatch.setenv("DRAFT_TTL_DAYS", "0")
+    old = time.time() - 31 * 86400
+    core.db.execute("INSERT INTO max_inbox(event_key,payload,state,created) VALUES('old-done','', 'done',?)", (old,))
+    core.db.execute("INSERT INTO max_inbox(event_key,payload,state,created) VALUES('old-failed','', 'failed',?)", (old,))
+    core.db.execute("INSERT INTO command_results(event_key,operation,result,created) VALUES('e','o','null',?)", (old,))
+    core.db.execute("INSERT INTO max_actions(event_key,uid,payload,state,created) VALUES('a','1','', 'done',?)", (old,))
+    core.db.commit()
+    core.housekeeping()
+    assert core.db.execute("SELECT 1 FROM max_inbox WHERE event_key='old-done'").fetchone() is None
+    assert core.db.execute("SELECT 1 FROM command_results WHERE event_key='e'").fetchone() is None
+    assert core.db.execute("SELECT 1 FROM max_actions WHERE event_key='a'").fetchone() is None
+    assert core.db.execute("SELECT state FROM max_inbox WHERE event_key='old-failed'").fetchone()[0] == "failed"
