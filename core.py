@@ -252,6 +252,10 @@ class AmbiguousGeneration(RuntimeError):
     """The request may have been processed/charged, so automatic retry is unsafe."""
 
 
+class PermanentGeneration(RuntimeError):
+    """The provider rejected the request permanently; automatic retry is useless."""
+
+
 _HITS: dict[str, list[float]] = {}
 _RL_ALERT: dict[str, float] = {}
 RATE_EVENT_TTL = 8 * 86400  # keep source-key idempotency longer than the 7-day material queue
