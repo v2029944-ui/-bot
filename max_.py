@@ -559,7 +559,7 @@ class Max(core.Adapter):
     async def notify(self, user_id, text):
         if rows := core.input_rows(self, user_id):
             return await self.send_menu(user_id, text, rows)
-        await self._send({"user_id": user_id}, text)
+        return await self._send({"user_id": user_id}, text)
 
     async def send_notice_menu(self, user_id, text, rows):
         # Notices created before on_callback still participate in single-menu cleanup.
