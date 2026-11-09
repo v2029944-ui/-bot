@@ -164,7 +164,7 @@ def _scrub_terminal(d):
     """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
     core.db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
                   photo='',video='',media='[]',published_to='',publish_errors='{}',publication_channels='{}',publish_progress='{}',
-                  post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0,cleaned=2
+                  post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,revision_seq=1,last_sent=0,reminded=0,expiry_warned=0,cleaned=2
                   WHERE id=? AND status IN ('published','deleted','expired')""", (d["id"],))
     if core.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_approval_delivery'").fetchone():
         core.db.execute("DELETE FROM max_approval_delivery WHERE did=?", (d["id"],))

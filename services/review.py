@@ -13,6 +13,16 @@ def approval_rows(did: int, attempt: int):
             [("✏️ Изменить", f"d:change:{did}:{attempt}")]]
 
 
+def _next_revision(d: dict) -> int:
+    """Allocate a never-reused UI revision even if delivery later rolls back."""
+    return max(int(d.get("revision_seq") or 1), int(d["attempts"])) + 1
+
+
+def _invalidate_revision(adapter: core.Adapter, did: int, revision: int):
+    if invalidate := getattr(adapter, "invalidate_approval_revision", None):
+        invalidate(did, revision)
+
+
 async def _apply_edit(adapter: core.Adapter, user_id, did: int, attempt: int, text: str) -> tuple[bool, str]:
     """Автор или администратор прислал свой текст: подставляем его как новый вариант
     и доставляем автору и действующему администратору с кнопками. Возвращает (ждать ли текст дальше, сообщение)."""
@@ -37,9 +47,12 @@ async def _apply_edit(adapter: core.Adapter, user_id, did: int, attempt: int, te
         return True, f"Слишком длинно ({length} ед. UTF-16, максимум {limit}). Сократите и пришлите снова."
     if not core._claim(did, "pending", "regenerating"):
         return False, core.BUSY
-    core._set(did, post=text, footer=json.dumps(footer, ensure_ascii=False), attempts=d["attempts"] + 1, status="regenerating")
+    revision = _next_revision(d)
+    core._set(did, post=text, footer=json.dumps(footer, ensure_ascii=False),
+              attempts=revision, revision_seq=revision, status="regenerating")
     sent, last = await core._send_draft(d, did, text, adapter, actor=str(user_id))
-    if not sent:  # откат, как при пересоздании: сообщения с новыми кнопками нет
+    if not sent:  # abandoning this revision: its cards must never become current later
+        _invalidate_revision(adapter, did, revision)
         core._set(did, post=d["post"], footer=d.get("footer"), attempts=d["attempts"], status="pending")
         return False, f"⚠️ Текст сохранить не удалось: {core.err(last)}"
     core._set(did, status="pending")
@@ -72,9 +85,12 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         if not core._claim(did, "pending", "regenerating"):
             return False, core.BUSY
         chosen = options[int(index)]
-        core._set(did, post=chosen["post"], selected_model=chosen["model"], candidates="[]", attempts=attempt + 1)
+        revision = _next_revision(d)
+        core._set(did, post=chosen["post"], selected_model=chosen["model"], candidates="[]",
+                  attempts=revision, revision_seq=revision)
         sent, last = await core._send_draft(core.get(did), did, chosen["post"], adapter, actor=str(user_id))
         if not sent:
+            _invalidate_revision(adapter, did, revision)
             core._set(did, post=d["post"], selected_model=d.get("selected_model", ""), candidates=d["candidates"], attempts=attempt, status="pending")
             return False, "Не удалось отправить выбранный вариант. Повторите выбор."
         core._set(did, status="pending")
@@ -309,10 +325,12 @@ async def _regenerate_inner(adapter: core.Adapter, user_id, did: int, comment: s
 
     selection = comparison.draft_selection(post) if isinstance(post, comparison.Options) else {
         "candidates": "[]", "selected_model": selected_model}
+    revision = _next_revision(d)
     core._set(did, post=post, **selection,
-         footer=None, post_length=length, attempts=d["attempts"] + 1)
+         footer=None, post_length=length, attempts=revision, revision_seq=revision)
     sent, last = await core._send_draft(d, did, post, adapter, actor=str(user_id))
-    if not sent:  # откат: иначе в базе attempts=N+1, а сообщения с такими кнопками нет
+    if not sent:
+        _invalidate_revision(adapter, did, revision)
         core._set(did, post=d["post"], candidates=d.get("candidates") or "[]", selected_model=d.get("selected_model", ""),
              footer=d.get("footer"), post_length=d.get("post_length") or "", attempts=d["attempts"], status="pending")
         return False, f"⚠️ Новый вариант готов, но не отправился: {core.err(last)}"
