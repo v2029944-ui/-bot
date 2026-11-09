@@ -7,12 +7,12 @@ import time
 
 import command_context
 import core
+import schema
 import spaces
 
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, uid TEXT,
     payload TEXT, state TEXT DEFAULT 'pending', created REAL DEFAULT 0)""")
-import schema
 schema.add_columns(core.db, "max_actions", ("created REAL DEFAULT 0",))
 core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_pending ON max_actions(state,uid,id)")
 core.db.commit()
