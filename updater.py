@@ -141,12 +141,51 @@ def compatibility(folder: Path) -> dict | None:
     return value
 
 
-def check_compatibility(current: Path, candidate: Path) -> None:
-    old, new = compatibility(current), compatibility(candidate)
-    if old is not None and (new is None or old["write_version"] not in new["read_versions"]
-                            or new["write_version"] not in old["read_versions"]):
-        raise ValueError("Версии формата данных несовместимы с обновлением и откатом; требуется отдельная миграция.")
+def _rollback_v2_to_v1():
+    """Convert data written by handoff-lifecycle v2 into states understood by v1."""
+    db_path = DATA / "drafts.db"
+    if not db_path.exists():
+        return
+    with sqlite3.connect(db_path) as db:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone():
+            db.execute("UPDATE max_actions SET state='pending' WHERE state IN ('handoff','handoff_processing')")
+            db.commit()
 
+
+# This registry belongs to the updater executable from the Docker image, not to
+# candidate Git code. A legacy image without (2, 1) must reject data-v2 before reset.
+ROLLBACK_DATA_MIGRATIONS = {(2, 1): _rollback_v2_to_v1}
+
+
+def check_compatibility(current: Path, candidate: Path) -> tuple[int, int] | None:
+    old, new = compatibility(current), compatibility(candidate)
+    if old is None:
+        return None
+    if new is None or old["write_version"] not in new["read_versions"]:
+        raise ValueError("Версии формата данных несовместимы с обновлением; требуется отдельная миграция.")
+    pair = (new["write_version"], old["write_version"])
+    if new["write_version"] not in old["read_versions"] and pair not in ROLLBACK_DATA_MIGRATIONS:
+        raise ValueError(
+            "Новая версия меняет формат данных, а этот updater не умеет безопасно откатить его. "
+            "Сначала пересоберите Docker-образ на актуальной версии.")
+    return pair
+
+
+def rollback_data(from_version: int | None, to_version: int | None):
+    if from_version is None and to_version is None:
+        # Probation state created by PR #9 predates version fields. The only new
+        # persistent states from that release are handoff/handoff_processing, and
+        # this executable knows their safe legacy conversion.
+        _rollback_v2_to_v1()
+        return
+    if from_version is None or to_version is None:
+        raise ValueError("Неполная информация о версии данных для безопасного отката")
+    if from_version == to_version:
+        return
+    migration = ROLLBACK_DATA_MIGRATIONS.get((from_version, to_version))
+    if migration is None:
+        raise ValueError(f"Нет миграции отката данных {from_version} -> {to_version}")
+    migration()
 
 def update():
     who = _read("update_request.json")
@@ -186,8 +225,11 @@ def update():
         if rc:
             return finish("tests_failed", who, detail=summarize_failure(out)[-900:], commit=short())
         subject = git("log", "-1", "--format=%s", new)[1][:100]
+        old_compat, new_compat = compatibility(CODE), compatibility(wt)
         _write("update_state.json", {"prev": head, "new": new, "ts": time.time(), "status": "probation",
-                                     "platform": who.get("platform"), "uid": who.get("uid")})
+                                     "platform": who.get("platform"), "uid": who.get("uid"),
+                                     "prev_data_version": old_compat["write_version"] if old_compat else None,
+                                     "new_data_version": new_compat["write_version"] if new_compat else None})
         rc, out = git("reset", "--hard", new)
         if rc:
             return finish("failed", who, detail="не удалось переключиться: " + out[-300:], commit=short())
@@ -204,16 +246,12 @@ def rollback():
     who = {"platform": state.get("platform"), "uid": state.get("uid")}
     if not prev:
         return print("[updater] откатываться некуда", flush=True)
-    # New releases may use a handoff state unknown to the previous code. The payload
-    # already contains frozen _space and no _route_on_process, so converting it back
-    # to pending makes rollback safe: the old worker can finish max_actions -> max_inbox
-    # without re-routing the material.
-    db_path = DATA / "drafts.db"
-    if db_path.exists():
-        with sqlite3.connect(db_path) as db:
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone():
-                db.execute("UPDATE max_actions SET state='pending' WHERE state IN ('handoff','handoff_processing')")
-                db.commit()
+    try:
+        rollback_data(state.get("new_data_version"), state.get("prev_data_version"))
+    except Exception as exc:
+        state["status"] = "rollback_failed"
+        _write("update_state.json", state)
+        return finish("failed", who, detail="не удалось подготовить данные к откату: " + scrub(str(exc)), commit=short())
     rc, out = git("reset", "--hard", prev)
     state["status"] = "rolled_back" if not rc else "rollback_failed"
     _write("update_state.json", state)

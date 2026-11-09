@@ -296,21 +296,94 @@ def load_updater():
     return module
 
 
-def test_update_requires_bidirectional_data_compatibility(tmp_path):
+def test_update_compatibility_requires_old_read_or_explicit_rollback_migration(tmp_path):
     old, new = tmp_path / "old", tmp_path / "new"
     old.mkdir()
     new.mkdir()
     old.joinpath("compatibility.json").write_text(json.dumps({"read_versions":[1], "write_version":1}))
     new.joinpath("compatibility.json").write_text(json.dumps({"read_versions":[1], "write_version":1}))
     updater = load_updater()
-    updater.check_compatibility(old, new)
-    # New release can read old data, but the old release cannot read its writes.
+    assert updater.check_compatibility(old, new) == (1, 1)
+
+    # Handoff lifecycle writes v2. A legacy updater requires strict bidirectional
+    # readability and therefore rejects this manifest before switching Git code.
     new.joinpath("compatibility.json").write_text(json.dumps({"read_versions":[1,2], "write_version":2}))
-    with pytest.raises(ValueError, match="несовместимы"):
+    old_meta = updater.compatibility(old)
+    new_meta = updater.compatibility(new)
+    assert old_meta["write_version"] in new_meta["read_versions"]
+    assert new_meta["write_version"] not in old_meta["read_versions"]
+    # The new updater may cross this boundary only because its own executable
+    # contains a concrete v2 -> v1 rollback migration.
+    assert (2, 1) in updater.ROLLBACK_DATA_MIGRATIONS
+    assert updater.check_compatibility(old, new) == (2, 1)
+
+    # A future incompatible version without a migration remains blocked.
+    new.joinpath("compatibility.json").write_text(json.dumps({"read_versions":[1,2,3], "write_version":3}))
+    with pytest.raises(ValueError, match="пересоберите Docker"):
         updater.check_compatibility(old, new)
+
     new.joinpath("compatibility.json").unlink()
     with pytest.raises(ValueError):
         updater.check_compatibility(old, new)
+
+
+def test_v2_rollback_migration_converts_handoff_states(tmp_path, monkeypatch):
+    updater = load_updater()
+    monkeypatch.setattr(updater, "DATA", tmp_path)
+    db = sqlite3.connect(tmp_path / "drafts.db")
+    db.execute("CREATE TABLE max_actions(id INTEGER PRIMARY KEY,state TEXT,payload TEXT)")
+    db.executemany("INSERT INTO max_actions(id,state,payload) VALUES(?,?,?)", [
+        (1, "handoff", '{"message":{"_space":2},"_material_to_inbox":true}'),
+        (2, "handoff_processing", '{"message":{"_space":2},"_material_to_inbox":true}'),
+        (3, "pending", '{}'),
+    ])
+    db.commit()
+    db.close()
+
+    updater.rollback_data(2, 1)
+
+    db = sqlite3.connect(tmp_path / "drafts.db")
+    states = [row[0] for row in db.execute("SELECT state FROM max_actions ORDER BY id")]
+    payloads = [row[0] for row in db.execute("SELECT payload FROM max_actions ORDER BY id")]
+    db.close()
+    assert states == ["pending", "pending", "pending"]
+    assert '"_space":2' in payloads[0] and '"_material_to_inbox":true' in payloads[0]
+
+
+def test_rollback_migration_failure_blocks_git_reset(tmp_path, monkeypatch):
+    updater = load_updater()
+    monkeypatch.setattr(updater, "DATA", tmp_path)
+    updater._write("update_state.json", {
+        "prev": "old-sha", "new": "new-sha", "status": "probation",
+        "prev_data_version": 1, "new_data_version": 2,
+        "platform": "max", "uid": "1",
+    })
+    resets = []
+
+    def broken_migration():
+        raise sqlite3.OperationalError("rollback migration failed")
+
+    def fake_git(*args, **kwargs):
+        if args[:2] == ("reset", "--hard"):
+            resets.append(args)
+        if args[:2] == ("rev-parse", "--short"):
+            return 0, "new-sha"
+        return 0, "ok"
+
+    monkeypatch.setitem(updater.ROLLBACK_DATA_MIGRATIONS, (2, 1), broken_migration)
+    monkeypatch.setattr(updater, "git", fake_git)
+    updater.rollback()
+
+    state = json.loads((tmp_path / "update_state.json").read_text())
+    result = json.loads((tmp_path / "update_result.json").read_text())
+    assert state["status"] == "rollback_failed"
+    assert result["status"] == "failed"
+    assert resets == []
+
+
+def test_repository_declares_handoff_data_version_two():
+    meta = json.loads((Path(__file__).resolve().parents[1] / "compatibility.json").read_text())
+    assert meta == {"read_versions": [1, 2], "write_version": 2}
 
 
 def test_repository_locks_match_direct_and_runtime_dependencies():
