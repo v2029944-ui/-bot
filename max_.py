@@ -347,18 +347,18 @@ class Max(core.Adapter):
             else:
                 ok = True
             if ok is True:
+                if op == "strip_draft":
+                    core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (mid,))
+                    core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (mid,))
+                    core.db.execute("DELETE FROM max_draft_recipient WHERE mid=?", (mid,))
                 core.db.execute("DELETE FROM max_ui_cleanup WHERE op=? AND mid=?", (op, mid))
                 core.db.commit()
                 continue
             attempts = row["attempts"] + 1
-            if attempts >= 8:
-                log.warning("UI cleanup abandoned op=%s mid=%s after %s attempts", op, mid, attempts)
-                core.db.execute("DELETE FROM max_ui_cleanup WHERE op=? AND mid=?", (op, mid))
-            else:
-                core.db.execute("""UPDATE max_ui_cleanup SET attempts=?,next_try=?,last_error=?
-                                   WHERE op=? AND mid=?""",
-                                (attempts, now + min(30 * 2 ** (attempts - 1), 3600),
-                                 "MAX UI operation failed", op, mid))
+            delay = min(30 * 2 ** (attempts - 1), 3600) if attempts < 8 else 6 * 3600
+            core.db.execute("""UPDATE max_ui_cleanup SET attempts=?,next_try=?,last_error=?
+                               WHERE op=? AND mid=?""",
+                            (attempts, now + delay, "MAX UI operation failed", op, mid))
             core.db.commit()
 
     async def cleanup_stale_buttons(self):
