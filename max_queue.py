@@ -133,7 +133,9 @@ class Worker:
             core.db.commit()
         except Exception as exc:
             incomplete = isinstance(exc, core.IncompleteGeneration)
-            state = "failed" if incomplete or attempt >= 8 else "pending"
+            ambiguous = isinstance(exc, core.AmbiguousGeneration)
+            manual = incomplete or ambiguous
+            state = "failed" if manual or attempt >= 8 else "pending"
             changed = core.db.execute("UPDATE max_inbox SET state=?,next_try=?,error=? WHERE event_key=? AND state='processing'",
                                       (state, now + min(30 * 2 ** min(attempt - 1, 7), 3600), core.err(exc)[:300], key)).rowcount
             core.db.commit()
@@ -141,7 +143,8 @@ class Worker:
                 return True  # пост уже полностью опубликован; очищенную очередь не оживляем
             log.warning("материал %s: попытка %s не удалась: %s", key[:8], attempt, core.err(exc))
             if state == "failed":
-                reason = ("⚠️ Нейросеть оборвала ответ. Автоматические платные повторы остановлены.\n" if incomplete else
+                reason = ("⚠️ Результат запроса к нейросети неизвестен; автоматический платный повтор остановлен.\n" if ambiguous else
+                          "⚠️ Нейросеть оборвала ответ. Автоматические платные повторы остановлены.\n" if incomplete else
                           "⚠️ Материал не обработан после 8 попыток.\n")
                 if spaces.INSTALLED and row["space_id"]:
                     with spaces.enter(spaces.get(row["space_id"])):
