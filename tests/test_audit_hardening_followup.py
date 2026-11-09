@@ -1,10 +1,12 @@
 import json
 import time
 
+import httpx
 import pytest
 from conftest import FakeAdapter, run
 
 import core
+import max_queue
 import updater
 from tg import Telegram
 
@@ -112,3 +114,40 @@ def test_housekeeping_removes_only_old_terminal_queue_history(monkeypatch):
     assert core.db.execute("SELECT 1 FROM command_results WHERE event_key='e'").fetchone() is None
     assert core.db.execute("SELECT 1 FROM max_actions WHERE event_key='a'").fetchone() is None
     assert core.db.execute("SELECT state FROM max_inbox WHERE event_key='old-failed'").fetchone()[0] == "failed"
+
+
+def test_openai_read_timeout_is_ambiguous_and_not_retried(monkeypatch):
+    real = httpx.AsyncClient
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("reply lost", request=request)
+
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(core, "PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.test/v1")
+    with pytest.raises(core.AmbiguousGeneration):
+        run(core._openai("sys", "text", None))
+    assert len(calls) == 1
+
+
+def test_ambiguous_generation_stops_durable_queue_after_first_attempt():
+    class Adapter:
+        admins = []
+
+        async def on_message(self, message, source_key=None):
+            raise core.AmbiguousGeneration("unknown result")
+
+        async def notify(self, uid, text):
+            pass
+
+    core.db.execute("INSERT INTO max_inbox(event_key,payload,created) VALUES(?,?,?)",
+                    ("ambiguous", json.dumps({"message": {}}), time.time()))
+    core.db.commit()
+    assert run(max_queue.Worker(Adapter()).process_once())
+    row = core.db.execute("SELECT state,attempts,error FROM max_inbox WHERE event_key='ambiguous'").fetchone()
+    assert row["state"] == "failed" and row["attempts"] == 1
+    assert "unknown result" in row["error"]
