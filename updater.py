@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -203,6 +204,16 @@ def rollback():
     who = {"platform": state.get("platform"), "uid": state.get("uid")}
     if not prev:
         return print("[updater] откатываться некуда", flush=True)
+    # New releases may use a handoff state unknown to the previous code. The payload
+    # already contains frozen _space and no _route_on_process, so converting it back
+    # to pending makes rollback safe: the old worker can finish max_actions -> max_inbox
+    # without re-routing the material.
+    db_path = DATA / "drafts.db"
+    if db_path.exists():
+        with sqlite3.connect(db_path) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone():
+                db.execute("UPDATE max_actions SET state='pending' WHERE state IN ('handoff','handoff_processing')")
+                db.commit()
     rc, out = git("reset", "--hard", prev)
     state["status"] = "rolled_back" if not rc else "rollback_failed"
     _write("update_state.json", state)
