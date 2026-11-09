@@ -599,7 +599,7 @@ class Max(core.Adapter):
     async def on_message(self, m: dict, source_key=None):
         if await spaces.route_message(self, m, source_key):
             return
-        if m.get("recipient", {}).get("chat_type", "dialog") != "dialog":
+        if (m.get("recipient") or {}).get("chat_type", "dialog") != "dialog":
             return  # отвечаем только в личке
         sender = m["sender"]
         uid = sender["user_id"]
