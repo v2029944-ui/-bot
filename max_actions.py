@@ -65,9 +65,22 @@ def stage_notice(db, event_key, kind, uid, sid, text, now=None):
                (event_key, kind, str(uid or ""), int(sid or 0), text[:500], now))
 
 
+def material_failure_recipients(adapter, sid):
+    """Resolve notice recipients before the terminal SQLite transaction starts."""
+    try:
+        with spaces.enter(spaces.get(sid) if spaces.INSTALLED and sid else None):
+            return "staff", list(core.staff(core.ADAPTERS["max"]))
+    except Exception:
+        logging.getLogger("max_actions").warning(
+            "не удалось определить администраторов для terminal material space=%s", sid, exc_info=True)
+        root = spaces.root().adapters["max"] if spaces.INSTALLED else adapter
+        return "global_staff", list(getattr(root, "global_admins", core._base_admins(root)))
+
+
 def stage_material_failure(adapter, event_key, uid, source_mid, sid, created, attempts, reason,
-                           user_text=None, staff_text=None, now=None, db=None):
-    """Stage minimal failure diagnostics/notices; caller commits with its terminal state change."""
+                           user_text=None, staff_text=None, staff_kind=None, staff_uids=(),
+                           now=None, db=None):
+    """Stage only SQLite writes; caller resolves recipients and commits with the terminal state change."""
     now = time.time() if now is None else now
     db = db or spaces.queue_db()
     safe_reason = (reason or "Материал не обработан")[:240]
@@ -78,21 +91,9 @@ def stage_material_failure(adapter, event_key, uid, source_mid, sid, created, at
                 created, now, int(attempts or 0), safe_reason))
     if user_text and uid:
         stage_notice(db, event_key, "user", uid, sid, user_text, now)
-    if not staff_text:
-        return
-    try:
-        with spaces.enter(spaces.get(sid) if spaces.INSTALLED and sid else None):
-            admins = list(core.staff(core.ADAPTERS["max"]))
-    except Exception:
-        logging.getLogger("max_actions").warning(
-            "не удалось определить администраторов для terminal material space=%s", sid, exc_info=True)
-        root = spaces.root().adapters["max"] if spaces.INSTALLED else adapter
-        admins = list(getattr(root, "global_admins", core._base_admins(root)))
-        for admin_uid in admins:
-            stage_notice(db, event_key, "global_staff", admin_uid, sid, staff_text, now)
-    else:
-        for admin_uid in admins:
-            stage_notice(db, event_key, "staff", admin_uid, sid, staff_text, now)
+    if staff_text and staff_kind:
+        for admin_uid in staff_uids:
+            stage_notice(db, event_key, staff_kind, admin_uid, sid, staff_text, now)
 
 
 class Worker:
@@ -205,16 +206,21 @@ class Worker:
         message = update.get("message") or {}
         mid = ((message.get("body") or {}).get("mid") or "")
         sid = int(row["space_id"] or message.get("_space") or 0)
+        staff_kind, staff_uids = material_failure_recipients(self.adapter, sid)
         db = spaces.queue_db()
-        stage_material_failure(
-            self.adapter, row["event_key"], row["uid"], mid, sid, row["created"], attempt, reason,
-            user_text="⚠️ Материал не удалось поставить в очередь обработки. Отправьте его заново.",
-            staff_text=(f"⚠️ Материал пользователя {row['uid']} не удалось передать в очередь за 7 дней. "
-                        f"mid={mid or 'неизвестен'}, попыток={attempt}. Попросите отправить материал заново."),
-            now=now, db=db)
-        db.execute("""UPDATE max_actions SET state='failed',payload='',attempts=?,next_try=0,space_id=?
-                      WHERE id=?""", (attempt, sid, row["id"]))
-        db.commit()
+        try:
+            stage_material_failure(
+                self.adapter, row["event_key"], row["uid"], mid, sid, row["created"], attempt, reason,
+                user_text="⚠️ Материал не удалось поставить в очередь обработки. Отправьте его заново.",
+                staff_text=(f"⚠️ Материал пользователя {row['uid']} не удалось передать в очередь за 7 дней. "
+                            f"mid={mid or 'неизвестен'}, попыток={attempt}. Попросите отправить материал заново."),
+                staff_kind=staff_kind, staff_uids=staff_uids, now=now, db=db)
+            db.execute("""UPDATE max_actions SET state='failed',payload='',attempts=?,next_try=0,space_id=?
+                          WHERE id=?""", (attempt, sid, row["id"]))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         logging.getLogger("max_actions").error("terminal handoff failure event=%s space=%s", row["event_key"][:8], sid)
 
     async def process_notice(self, row):
