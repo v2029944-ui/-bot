@@ -142,111 +142,141 @@ def test_old_post_keyboard_removed_but_post_preserved():
     run(scenario())
 
 
-def test_material_handoff_failure_keeps_payload_and_retries(monkeypatch):
+def material(uid=1, mid="material-1"):
+    return {
+        "update_type": "message_created",
+        "message": {
+            "sender": {"user_id": uid},
+            "recipient": {"chat_type": "dialog"},
+            "body": {"mid": mid, "text": "Описание", "attachments": [
+                {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
+            ]},
+        },
+        "_route_on_process": True,
+        "_material_to_inbox": True,
+    }
+
+
+def test_material_routes_atomically_to_independent_handoff():
+    async def scenario():
+        adapter = make(Api())
+        max_actions.enqueue(material())
+        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+        core.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (row["id"],))
+        core.db.commit()
+        await max_actions.Worker(adapter).process(dict(row))
+        kept = core.db.execute("SELECT state,payload,space_id,attempts,next_try FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        payload = __import__("json").loads(kept["payload"])
+        assert kept["state"] == "handoff" and kept["attempts"] == 0 and kept["next_try"] == 0
+        assert "_route_on_process" not in payload
+        assert payload["_material_to_inbox"] is True
+        await adapter.http.aclose()
+
+    run(scenario())
+
+
+def test_material_handoff_failure_retries_without_blocking_later_command(monkeypatch):
     async def scenario():
         api = Api()
         adapter = make(api)
-        update = {
-            "update_type": "message_created",
-            "message": {
-                "sender": {"user_id": 1},
-                "recipient": {"chat_type": "dialog"},
-                "body": {"mid": "material-1", "text": "Описание", "attachments": [
-                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
-                ]},
-            },
-            "_route_on_process": True,
-            "_material_to_inbox": True,
-        }
-        max_actions.enqueue(update)
-        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
-        original = max_queue.enqueue
+        max_actions.enqueue(material())
+        max_actions.enqueue(event(1, "after-material"))
+        first = core.db.execute("SELECT * FROM max_actions ORDER BY id LIMIT 1").fetchone()
+        core.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (first["id"],))
+        core.db.commit()
+        worker = max_actions.Worker(adapter)
+        await worker.process(dict(first))
+        handoff = core.db.execute("SELECT * FROM max_actions WHERE id=?", (first["id"],)).fetchone()
+        assert handoff["state"] == "handoff"
 
         def fail(_update):
             raise RuntimeError("sqlite temporarily unavailable")
 
         monkeypatch.setattr(max_queue, "enqueue", fail)
-        await max_actions.Worker(adapter).process(row)
-        kept = core.db.execute("SELECT state,payload,attempts,next_try FROM max_actions WHERE id=?", (row["id"],)).fetchone()
-        assert kept["state"] == "pending" and kept["payload"] and kept["attempts"] == 1 and kept["next_try"] > 0
-
-        monkeypatch.setattr(max_queue, "enqueue", original)
-        core.db.execute("UPDATE max_actions SET next_try=0 WHERE id=?", (row["id"],))
+        core.db.execute("UPDATE max_actions SET state='handoff_processing' WHERE id=?", (first["id"],))
         core.db.commit()
-        row = core.db.execute("SELECT * FROM max_actions WHERE id=?", (row["id"],)).fetchone()
-        await max_actions.Worker(adapter).process(row)
-        done = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
-        assert tuple(done) == ("done", "")
-        assert core.db.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
+        await worker.process_handoff(dict(handoff))
+        kept = core.db.execute("SELECT state,payload,attempts,next_try FROM max_actions WHERE id=?", (first["id"],)).fetchone()
+        assert kept["state"] == "handoff" and kept["payload"] and kept["attempts"] == 1 and kept["next_try"] > 0
+
+        worker.schedule()
+        assert "1" in worker.active  # later command is no longer blocked by the material retry
+        await asyncio.gather(*worker.active.values())
+        assert core.db.execute("SELECT state FROM max_actions WHERE event_key=?", (
+            event(1, "after-material")["callback"]["callback_id"],)).fetchone()["state"] == "done"
         await adapter.http.aclose()
 
     run(scenario())
 
 
-def test_material_backoff_blocks_later_same_user_command(monkeypatch):
+def test_handoff_claim_is_single_and_recovers_after_restart(monkeypatch):
     async def scenario():
         adapter = make(Api())
-        material = {
-            "update_type": "message_created",
-            "message": {
-                "sender": {"user_id": 1},
-                "recipient": {"chat_type": "dialog"},
-                "body": {"mid": "material-backoff", "text": "Описание", "attachments": [
-                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
-                ]},
-            },
-            "_route_on_process": True,
-            "_material_to_inbox": True,
-        }
-        max_actions.enqueue(material)
-        max_actions.enqueue(event(1, "after-material"))
-        first = core.db.execute("SELECT * FROM max_actions ORDER BY id LIMIT 1").fetchone()
+        max_actions.enqueue(material(mid="single-claim"))
+        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+        core.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (row["id"],))
+        core.db.commit()
+        first = max_actions.Worker(adapter)
+        await first.process(dict(row))
+        gate = asyncio.Event()
 
-        def fail(_update):
-            raise RuntimeError("temporary")
+        async def slow(_row):
+            await gate.wait()
 
-        monkeypatch.setattr(max_queue, "enqueue", fail)
-        await max_actions.Worker(adapter).process(first)
-
-        worker = max_actions.Worker(adapter)
-        worker.schedule()
-        assert not worker.active  # later callback cannot overtake backoff material
+        monkeypatch.setattr(first, "process_handoff", slow)
+        second = max_actions.Worker(adapter)
+        monkeypatch.setattr(second, "process_handoff", slow)
+        first.schedule_handoffs()
+        second.schedule_handoffs()
+        assert len(first.handoffs) + len(second.handoffs) == 1
+        assert core.db.execute("SELECT state FROM max_actions WHERE id=?", (row["id"],)).fetchone()["state"] == "handoff_processing"
+        for task in [*first.handoffs.values(), *second.handoffs.values()]:
+            task.cancel()
+        await asyncio.gather(*first.handoffs.values(), *second.handoffs.values(), return_exceptions=True)
+        max_actions.recover()
+        assert core.db.execute("SELECT state FROM max_actions WHERE id=?", (row["id"],)).fetchone()["state"] == "handoff"
         await adapter.http.aclose()
 
     run(scenario())
 
 
-def test_material_handoff_expires_after_seven_days(monkeypatch):
+def test_terminal_handoff_failure_keeps_diagnostics_and_durable_notices(monkeypatch):
     async def scenario():
         api = Api()
         adapter = make(api)
-        update = {
-            "update_type": "message_created",
-            "message": {
-                "sender": {"user_id": 1},
-                "recipient": {"chat_type": "dialog"},
-                "body": {"mid": "expired-material", "text": "Описание", "attachments": [
-                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
-                ]},
-            },
-            "_route_on_process": True,
-            "_material_to_inbox": True,
-        }
-        max_actions.enqueue(update)
-        core.db.execute("UPDATE max_actions SET created=? WHERE event_key=(SELECT event_key FROM max_actions LIMIT 1)",
-                        (__import__("time").time() - 8 * 86400,))
+        adapter.admins = ["5"]
+        max_actions.enqueue(material(mid="expired-material"))
+        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+        core.db.execute("UPDATE max_actions SET state='processing',created=? WHERE id=?",
+                        (__import__("time").time() - 8 * 86400, row["id"]))
         core.db.commit()
-        row = core.db.execute("SELECT * FROM max_actions LIMIT 1").fetchone()
+        worker = max_actions.Worker(adapter)
+        await worker.process(dict(core.db.execute("SELECT * FROM max_actions WHERE id=?", (row["id"],)).fetchone()))
+        handoff = core.db.execute("SELECT * FROM max_actions WHERE id=?", (row["id"],)).fetchone()
 
         def fail(_update):
             raise RuntimeError("still unavailable")
 
         monkeypatch.setattr(max_queue, "enqueue", fail)
-        await max_actions.Worker(adapter).process(row)
+        core.db.execute("UPDATE max_actions SET state='handoff_processing' WHERE id=?", (row["id"],))
+        core.db.commit()
+        await worker.process_handoff(dict(handoff))
         result = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
         assert tuple(result) == ("failed", "")
-        assert any("Материал не удалось поставить" in call[3].get("text", "")
-                   for call in api.of("POST"))
+        failure = core.db.execute("SELECT * FROM max_handoff_failures").fetchone()
+        assert failure["uid"] == "1" and failure["source_mid"] == "expired-material" and failure["attempts"] == 1
+        notices = core.db.execute("SELECT kind,uid,state FROM max_handoff_notices ORDER BY id").fetchall()
+        assert [tuple(r) for r in notices] == [("user", "1", "pending"), ("staff", "5", "pending")]
         await adapter.http.aclose()
 
     run(scenario())
+
+
+def test_interrupted_notice_becomes_unknown_not_automatic_retry():
+    core.db.execute("""INSERT INTO max_handoff_notices
+                       (event_key,kind,uid,text,state,created) VALUES('e','user','1','x','sending',?)""",
+                    (__import__("time").time(),))
+    core.db.commit()
+    max_actions.recover()
+    row = core.db.execute("SELECT state,last_error FROM max_handoff_notices").fetchone()
+    assert row["state"] == "unknown" and "результат неизвестен" in row["last_error"]
