@@ -290,7 +290,7 @@ def stamp(update):
     if not INSTALLED or update.get("update_type") != "message_created":
         return update
     message = update.get("message") or {}
-    if message.get("recipient", {}).get("chat_type", "dialog") != "dialog":
+    if (message.get("recipient") or {}).get("chat_type", "dialog") != "dialog":
         return update  # сообщение в группе не должно отменять личную правку или настройку
     body = message.get("body") or {}
     text = (body.get("text") or "").strip()
