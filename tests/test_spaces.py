@@ -136,6 +136,46 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 "SELECT 1 FROM max_handoff_notices WHERE event_key='fallback-global' AND uid='22'").fetchone()
             monkeypatch.setattr(spaces, "get", original_get)
 
+            # Preparation failures happen before Max.notify(), so they are safe to
+            # retry. Once the workspace is available again the notice is sent once.
+            root.db.execute("""INSERT INTO max_handoff_notices
+                               (event_key,kind,uid,space_id,text,state,created)
+                               VALUES('prepare-retry','user','33',?,'retry-me','sending',?)""",
+                            (bid, time.time()))
+            root.db.commit()
+            original_get = spaces.get
+
+            def fail_prepare(value):
+                if value == bid:
+                    raise RuntimeError("workspace temporarily unavailable")
+                return original_get(value)
+
+            monkeypatch.setattr(spaces, "get", fail_prepare)
+            notice = dict(root.db.execute(
+                "SELECT * FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone())
+            before = len(calls)
+            notice_worker = max_actions.Worker(root_max)
+            await notice_worker.process_notice(notice)
+            pending = root.db.execute(
+                "SELECT state,attempts,next_try FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone()
+            assert pending["state"] == "pending" and pending["attempts"] == 1 and pending["next_try"] > time.time()
+            assert len(calls) == before
+
+            monkeypatch.setattr(spaces, "get", original_get)
+            root.db.execute(
+                "UPDATE max_handoff_notices SET state='sending',next_try=0 WHERE event_key='prepare-retry'")
+            root.db.commit()
+            notice = dict(root.db.execute(
+                "SELECT * FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone())
+            await notice_worker.process_notice(notice)
+            done = root.db.execute(
+                "SELECT state,attempts FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone()
+            assert done["state"] == "done" and done["attempts"] == 1
+            sent_retry = [kw for _, method, path, kw in calls[before:]
+                          if method == "POST" and path == "/messages"
+                          and kw.get("json", {}).get("text") == "retry-me"]
+            assert len(sent_retry) == 1
+
             for space, rule in [(a, "ТОЛЬКО_ПРАВИЛО_А"), (b, "ТОЛЬКО_ПРАВИЛО_Б")]:
                 with spaces.enter(space):
                     ad = core.ADAPTERS["max"]
