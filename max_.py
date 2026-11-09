@@ -379,6 +379,7 @@ class Max(core.Adapter):
             if await self._strip_admin_button({"mid": row["mid"]}, draft_buttons=True):
                 core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (row["mid"],))
                 core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (row["mid"],))
+                core.db.execute("DELETE FROM max_draft_recipient WHERE mid=?", (row["mid"],))
                 core.db.commit()
 
     async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None,
