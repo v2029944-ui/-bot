@@ -781,6 +781,10 @@ class Max(core.Adapter):
             if show_progress:
                 try:
                     progress_mid = _mid(await self.notify(uid, "Принято, готовлю пост…"))
+                    if progress_mid:
+                        # Crash safety: штатный путь удалит сообщение сразу, а после аварии
+                        # оно всё равно исчезнет позднее через durable UI cleanup.
+                        self._queue_ui_cleanup("delete", progress_mid, uid, delay=1800)
                 except Exception:
                     log.warning("не удалось показать служебное сообщение о начале обработки", exc_info=True)
         try:
