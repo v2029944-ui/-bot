@@ -84,8 +84,8 @@ class Worker:
                 # Keep the original payload until the durable handoff succeeds, but
                 # back off and respect the same 7-day retention as max_inbox.
                 now = time.time()
-                attempt = int(row.get("attempts") or 0) + 1
-                if now - float(row.get("created") or now) >= 7 * 86400:
+                attempt = int(row["attempts"] or 0) + 1
+                if now - float(row["created"] or now) >= 7 * 86400:
                     core.db.execute("UPDATE max_actions SET state='failed',payload='',attempts=? WHERE id=?",
                                     (attempt, row["id"]))
                     core.db.commit()
