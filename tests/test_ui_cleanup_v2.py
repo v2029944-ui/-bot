@@ -305,3 +305,80 @@ def test_delete_success_false_is_not_treated_as_cleaned():
         await ad.http.aclose()
 
     run(scenario())
+
+
+def test_failed_edit_does_not_reuse_partial_delivery_revision(monkeypatch, png, llm):
+    async def scenario():
+        api = Api()
+        ad = make(api)
+        core.ADAPTERS["max"] = ad
+        ad.allowed = {"9"}
+        ad.admins = ["5"]
+
+        async def upload(path):
+            return "photo-token"
+
+        monkeypatch.setattr(ad, "_upload_image", upload)
+        did = await core.submit(ad, "9", "Author", "Description", png)
+        assert core.get(did)["attempts"] == 1
+        assert core.get(did)["revision_seq"] == 1
+
+        original = ad.send_for_approval
+
+        async def partial(approver, draft_id, photo, post, **kwargs):
+            core.db.execute("""INSERT OR REPLACE INTO max_approval_delivery
+                               (did,attempt,uid,slot,mid,created) VALUES(?,?,?,?,?,?)""",
+                            (draft_id, 2, str(approver), -1, "partial-v2", 1))
+            core.db.commit()
+            raise RuntimeError("delivery failed after send")
+
+        monkeypatch.setattr(ad, "send_for_approval", partial)
+        ok, _ = await core._apply_edit(ad, "5", did, 1, "Edit v2")
+        assert not ok
+        rolled = core.get(did)
+        assert rolled["attempts"] == 1
+        assert rolled["revision_seq"] == 2
+
+        monkeypatch.setattr(ad, "send_for_approval", original)
+        ok, _ = await core._apply_edit(ad, "5", did, 1, "Edit v3")
+        assert not ok  # _apply_edit returns whether input should stay open, not operation success
+        current = core.get(did)
+        assert current["attempts"] == 3
+        assert current["revision_seq"] == 3
+        assert current["post"] == "Edit v3"
+        stale_ok, stale_text = await core.on_action(ad, "5", "ok", did, 2)
+        assert stale_ok and "устаревший" in stale_text
+        await ad.http.aclose()
+
+    run(scenario())
+
+
+def test_resume_resends_when_saved_max_message_is_confirmed_missing(monkeypatch, png, llm):
+    async def scenario():
+        api = Api()
+        ad = make(api)
+        core.ADAPTERS["max"] = ad
+        ad.allowed = {"9"}
+
+        async def upload(path):
+            return "photo-token"
+
+        monkeypatch.setattr(ad, "_upload_image", upload)
+        did = await core.submit(ad, "9", "Author", "Description", png)
+        row = core.db.execute("""SELECT mid FROM max_approval_delivery
+                                 WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()
+        assert row
+        old_mid = row["mid"]
+        api.messages.pop(old_mid)
+
+        before = len(api.of("POST"))
+        d = core.get(did)
+        await ad.send_for_approval("9", did, d["photo"], d["post"], resume=True)
+        assert len(api.of("POST")) == before + 1
+        new_mid = core.db.execute("""SELECT mid FROM max_approval_delivery
+                                     WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()["mid"]
+        assert new_mid != old_mid
+        assert core.db.execute("SELECT 1 FROM max_draft_ui WHERE mid=?", (old_mid,)).fetchone() is None
+        await ad.http.aclose()
+
+    run(scenario())
