@@ -150,20 +150,27 @@ class Worker:
         mid = ((message.get("body") or {}).get("mid") or "")
         sid = int(row["space_id"] or message.get("_space") or 0)
         safe_reason = (reason or "Не удалось передать материал в очередь")[:240]
-        core.db.execute("""INSERT OR REPLACE INTO max_handoff_failures
-                           (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
-                           VALUES(?,?,?,?,?,?,?,?)""",
-                        (row["event_key"], row["uid"], str(mid), sid, row["created"], now, attempt, safe_reason))
-        core.db.execute("""UPDATE max_actions SET state='failed',payload='',attempts=?,next_try=0,space_id=?
-                           WHERE id=?""", (attempt, sid, row["id"]))
+        db = spaces.queue_db()
+        db.execute("""INSERT OR REPLACE INTO max_handoff_failures
+                      (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                      VALUES(?,?,?,?,?,?,?,?)""",
+                   (row["event_key"], row["uid"], str(mid), sid, row["created"], now, attempt, safe_reason))
+        db.execute("""UPDATE max_actions SET state='failed',payload='',attempts=?,next_try=0,space_id=?
+                      WHERE id=?""", (attempt, sid, row["id"]))
         user_text = "⚠️ Материал не удалось поставить в очередь обработки. Отправьте его заново."
         staff_text = (f"⚠️ Материал пользователя {row['uid']} не удалось передать в очередь за 7 дней. "
                       f"mid={mid or 'неизвестен'}, попыток={attempt}. Попросите отправить материал заново.")
         self._queue_notice(row["event_key"], "user", row["uid"], sid, user_text, now)
-        with spaces.enter(spaces.get(sid) if spaces.INSTALLED and sid else None):
-            for admin_uid in core.staff(core.ADAPTERS["max"]):
-                self._queue_notice(row["event_key"], "staff", admin_uid, sid, staff_text, now)
-        core.db.commit()
+        try:
+            with spaces.enter(spaces.get(sid) if spaces.INSTALLED and sid else None):
+                admins = list(core.staff(core.ADAPTERS["max"]))
+        except Exception:
+            admins = []
+            logging.getLogger("max_actions").warning(
+                "не удалось определить администраторов для terminal handoff space=%s", sid, exc_info=True)
+        for admin_uid in admins:
+            self._queue_notice(row["event_key"], "staff", admin_uid, sid, staff_text, now)
+        db.commit()
         logging.getLogger("max_actions").error("terminal handoff failure event=%s space=%s", row["event_key"][:8], sid)
 
     def _queue_notice(self, event_key, kind, uid, sid, text, now=None):
