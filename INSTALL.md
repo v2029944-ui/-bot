@@ -389,7 +389,7 @@ docker compose up -d --force-recreate bot
 
 ```sh
 docker compose exec -T bot \
-  python -c "import updater; assert (2, 1) in updater.ROLLBACK_DATA_MIGRATIONS"
+  python -c "ns={'__name__':'not_main'}; exec(compile(open('/app/updater.py').read(),'/app/updater.py','exec'),ns); assert (2, 1) in ns['ROLLBACK_DATA_MIGRATIONS']"
 ```
 
 Если проверка не прошла, остановите контейнер и верните предыдущий образ/исходники.
