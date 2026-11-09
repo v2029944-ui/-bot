@@ -103,7 +103,9 @@ db.execute("""CREATE TABLE IF NOT EXISTS requests (
     platform TEXT, uid TEXT, name TEXT, username TEXT, status TEXT, created REAL, PRIMARY KEY (platform, uid))""")
 schema.add_columns(db, "drafts", ("published_to TEXT DEFAULT ''", "last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
              "publication_channels TEXT DEFAULT '{}'", "publish_progress TEXT DEFAULT '{}'", "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
-             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''"))
+             "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''",
+             "revision_seq INTEGER DEFAULT 1"))
+db.execute("UPDATE drafts SET revision_seq=attempts WHERE COALESCE(revision_seq,0)<attempts")
 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS drafts_source_key ON drafts(source_key)")
 db.execute("""CREATE TABLE IF NOT EXISTS max_inbox (
     event_key TEXT PRIMARY KEY, payload TEXT, state TEXT DEFAULT 'pending',
