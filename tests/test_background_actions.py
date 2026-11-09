@@ -144,7 +144,8 @@ def test_old_post_keyboard_removed_but_post_preserved():
 
 def test_material_handoff_failure_keeps_payload_and_retries(monkeypatch):
     async def scenario():
-        adapter = make(Api())
+        api = Api()
+        adapter = make(api)
         update = {
             "update_type": "message_created",
             "message": {
@@ -243,11 +244,8 @@ def test_material_handoff_expires_after_seven_days(monkeypatch):
         await max_actions.Worker(adapter).process(row)
         result = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
         assert tuple(result) == ("failed", "")
-        assert any("Материал не удалось поставить" in body.get("text", "") for _, _, _, body in api_calls(adapter))
+        assert any("Материал не удалось поставить" in call[3].get("text", "")
+                   for call in api.of("POST"))
         await adapter.http.aclose()
-
-    def api_calls(adapter):
-        # make(Api()) keeps the mock transport but not the Api object; inspect notifications via max_ui is not reliable.
-        return []
 
     run(scenario())
