@@ -53,6 +53,7 @@ def test_new_draft_attempt_queues_only_older_version_for_same_recipient(monkeypa
         api = Api()
         ad = make(api)
         core.ADAPTERS["max"] = ad
+        ad.allowed = {"9"}
 
         async def upload(path):
             return "photo-token"
@@ -86,6 +87,7 @@ def test_cleanup_deletes_old_draft_after_new_delivery(monkeypatch, png, llm):
         api = Api()
         ad = make(api)
         core.ADAPTERS["max"] = ad
+        ad.allowed = {"9"}
 
         async def upload(path):
             return "photo-token"
