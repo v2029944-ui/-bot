@@ -177,3 +177,44 @@ def test_housekeeping_keeps_command_result_for_pending_replay(monkeypatch):
     core.housekeeping()
     assert core.db.execute(
         "SELECT 1 FROM command_results WHERE event_key='pending-old' AND operation='mutation'").fetchone()
+
+
+@pytest.mark.parametrize("status, exc_type", [
+    (401, core.PermanentGeneration),
+    (503, core.AmbiguousGeneration),
+])
+def test_openai_status_classification_stops_unsafe_retries(monkeypatch, status, exc_type):
+    real = httpx.AsyncClient
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, text="provider error")
+
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(core, "PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "test")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.test/v1")
+    with pytest.raises(exc_type):
+        run(core._openai("sys", "text", None))
+    assert len(calls) == 1
+
+
+def test_permanent_generation_stops_durable_queue_after_first_attempt():
+    class Adapter:
+        admins = []
+
+        async def on_message(self, message, source_key=None):
+            raise core.PermanentGeneration("bad key")
+
+        async def notify(self, uid, text):
+            pass
+
+    core.db.execute("INSERT INTO max_inbox(event_key,payload,created) VALUES(?,?,?)",
+                    ("permanent", json.dumps({"message": {}}), time.time()))
+    core.db.commit()
+    assert run(max_queue.Worker(Adapter()).process_once())
+    row = core.db.execute("SELECT state,attempts,error FROM max_inbox WHERE event_key='permanent'").fetchone()
+    assert row["state"] == "failed" and row["attempts"] == 1
+    assert "bad key" in row["error"]
