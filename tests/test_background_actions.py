@@ -282,3 +282,34 @@ def test_interrupted_notice_becomes_unknown_not_automatic_retry():
     max_actions.recover()
     row = core.db.execute("SELECT state,last_error FROM max_handoff_notices").fetchone()
     assert row["state"] == "unknown" and "результат неизвестен" in row["last_error"]
+
+
+def test_handoff_backoff_preserves_workspace_material_order(monkeypatch):
+    async def scenario():
+        adapter = make(Api())
+        now = __import__("time").time()
+        payload = __import__("json").dumps({"message": {"_space": 1}, "_material_to_inbox": True})
+        core.db.executemany("""INSERT INTO max_actions
+            (event_key,uid,payload,state,created,next_try,space_id) VALUES(?,?,?,?,?,?,?)""", [
+            ("space1-old", "1", payload, "handoff", now - 2, now + 3600, 1),
+            ("space1-new", "2", payload, "handoff", now - 1, 0, 1),
+            ("space2", "3", payload, "handoff", now, 0, 2),
+        ])
+        core.db.commit()
+        worker = max_actions.Worker(adapter)
+        gate = asyncio.Event()
+        started = []
+
+        async def slow(row):
+            started.append(row["event_key"])
+            await gate.wait()
+
+        monkeypatch.setattr(worker, "process_handoff", slow)
+        worker.schedule_handoffs()
+        await asyncio.sleep(0)
+        assert started == ["space2"]  # newer space1 material cannot overtake the older backoff row
+        gate.set()
+        await asyncio.gather(*worker.handoffs.values())
+        await adapter.http.aclose()
+
+    run(scenario())
