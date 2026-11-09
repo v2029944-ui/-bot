@@ -65,9 +65,16 @@ def housekeeping() -> int:
     now = time.time()
     core.db.execute("DELETE FROM requests WHERE created<?", (now - core.REQ_TTL,))
     core.db.execute("DELETE FROM rate_events WHERE created<?", (now - core.RATE_EVENT_TTL,))
-    core.db.execute("DELETE FROM command_results WHERE created<?", (now - QUEUE_HISTORY_TTL,))
+    has_actions = core.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone()
+    if has_actions:
+        core.db.execute("""DELETE FROM command_results WHERE created<? AND NOT EXISTS (
+            SELECT 1 FROM max_actions a WHERE a.event_key=command_results.event_key
+            AND a.state IN ('pending','processing'))""", (now - QUEUE_HISTORY_TTL,))
+    else:
+        core.db.execute("DELETE FROM command_results WHERE created<?", (now - QUEUE_HISTORY_TTL,))
     core.db.execute("DELETE FROM max_inbox WHERE state IN ('done','expired') AND created<?", (now - QUEUE_HISTORY_TTL,))
-    if core.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone():
+    if has_actions:
         core.db.execute("DELETE FROM max_actions WHERE state IN ('done','failed') AND created>0 AND created<?",
                         (now - QUEUE_HISTORY_TTL,))
     core.db.commit()
