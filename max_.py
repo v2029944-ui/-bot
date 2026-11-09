@@ -29,6 +29,25 @@ log = logging.getLogger("max")
 API = "https://platform-api2.max.ru"
 
 
+class _RateGate:
+    """Simple sliding-window limiter for documented MAX API request caps."""
+
+    def __init__(self, limit: int, period: float = 1.0):
+        self.limit, self.period = limit, period
+        self._times: list[float] = []
+        self._lock = asyncio.Lock()
+
+    async def wait(self):
+        async with self._lock:
+            while True:
+                now = time.monotonic()
+                self._times = [t for t in self._times if now - t < self.period]
+                if len(self._times) < self.limit:
+                    self._times.append(now)
+                    return
+                await asyncio.sleep(max(0.001, self.period - (now - self._times[0])))
+
+
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_notices (mid TEXT PRIMARY KEY, uid TEXT, remaining INTEGER)")
@@ -78,6 +97,10 @@ class Max(core.Adapter):
         self._send_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._upload_cache = {}
         self._upload_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._api_gate = _RateGate(30)
+        self._answer_gate = _RateGate(2)
+        self._message_mutation_gate = _RateGate(2)
+        self._message_gates: dict[str, _RateGate] = {}
 
     CONFIRM_ACTIONS = {"okyes", "okforce", "delyes", "rejectphoto", "rejecttext", "rejectcustom"}
 
@@ -90,10 +113,23 @@ class Max(core.Adapter):
 
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
-        return (isinstance(e, httpx.HTTPStatusError)
-                and 400 <= e.response.status_code < 500 and e.response.status_code != 408)
+        return (bool(getattr(e, "max_not_sent", False))
+                or (isinstance(e, httpx.HTTPStatusError)
+                    and 400 <= e.response.status_code < 500 and e.response.status_code != 408))
 
     async def call(self, method, path, **kw):
+        await self._api_gate.wait()
+        if path == "/answers":
+            await self._answer_gate.wait()
+        elif path == "/messages":
+            if method == "POST":
+                params = kw.get("params") or {}
+                target = next((f"{k}:{params[k]}" for k in ("user_id", "chat_id") if k in params), "unknown")
+                await self._message_gates.setdefault(target, _RateGate(2)).wait()
+            elif method in ("PUT", "DELETE"):
+                # The edit/delete API has the same documented 2 rps cap. message_id
+                # does not identify its chat locally, so use a conservative shared gate.
+                await self._message_mutation_gate.wait()
         started = time.monotonic()
         try:
             r = await self.http.request(method, path, **kw)
@@ -303,13 +339,18 @@ class Max(core.Adapter):
             buttons.append([{"type": "callback", "text": "⚙️ Меню админа", "payload": "m:admin"}])
         attachments = []
         upload_items = media or ([{"type": "video", "path": video}] if video else [{"type": "image", "path": photo}] if photo else [])
-        if media:
-            for item in media:
-                attachments.append({"type": item["type"], "payload": {"token": await self._cached_upload(item["path"], item["type"])}})
-        elif video:  # само видео; картинка-превью из кадров здесь не нужна
-            attachments.append({"type": "video", "payload": {"token": await self._cached_upload(video, "video")}})
-        elif photo:
-            attachments.append({"type": "image", "payload": {"token": await self._cached_upload(photo, "image")}})
+        try:
+            if media:
+                for item in media:
+                    attachments.append({"type": item["type"], "payload": {"token": await self._cached_upload(item["path"], item["type"])}})
+            elif video:  # само видео; картинка-превью из кадров здесь не нужна
+                attachments.append({"type": "video", "payload": {"token": await self._cached_upload(video, "video")}})
+            elif photo:
+                attachments.append({"type": "image", "payload": {"token": await self._cached_upload(photo, "image")}})
+        except Exception as exc:
+            # No POST /messages has happened yet: publication retry is definitely safe.
+            setattr(exc, "max_not_sent", True)
+            raise
         if buttons:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": spaces.namespace(buttons, getattr(self, "workspace_id", None))}})
         body = {"text": post, "attachments": attachments}
@@ -325,7 +366,7 @@ class Max(core.Adapter):
                 break
             except httpx.HTTPStatusError as e:
                 if "not.ready" in e.response.text and i < tries - 1:
-                    await asyncio.sleep(pause)
+                    await asyncio.sleep(min(pause * (1.6 ** i), 15.0))
                     continue
                 if not refreshed and i < tries - 1 and e.response.status_code in (400, 404, 422) and "attachment" in e.response.text.lower() and "not.ready" not in e.response.text and upload_items:
                     refreshed = True
@@ -495,11 +536,17 @@ class Max(core.Adapter):
     async def _handle_limited(self, update):
         async with self._processing:
             if os.getenv("MAX_LOG_UPDATES") == "1":
-                log.info("MAX update: %s", core.redact(json.dumps(update, ensure_ascii=False))[:1000])
+                message = update.get("message") or {}
+                body = message.get("body") or {}
+                callback = update.get("callback") or {}
+                sender = message.get("sender") or callback.get("user") or update.get("user") or {}
+                log.info("MAX update type=%s uid=%s mid=%s attachments=%s",
+                         update.get("update_type"), sender.get("user_id"), body.get("mid"),
+                         [a.get("type") for a in (body.get("attachments") or [])])
             if max_queue.is_material(update):
                 update = spaces.stamp(update)
                 max_queue.enqueue(update)
-            elif update.get("update_type") == "message_callback" or (update.get("message") or {}).get("body", {}).get("text"):
+            elif update.get("update_type") == "message_callback" or ((update.get("message") or {}).get("body") or {}).get("text"):
                 # Текст маршрутизируем после предыдущих команд этого человека:
                 # нажатие «Править» могло ещё не успеть открыть ожидание ввода.
                 max_actions.enqueue({**update, "_route_on_process": True})
@@ -553,7 +600,7 @@ class Max(core.Adapter):
             return
         if source_key and await core.resume_submission(self, source_key) is not None:
             return  # готовый черновик уже есть: повтор события не создаёт ещё один
-        body = m.get("body", {})
+        body = m.get("body") or {}
         atts = body.get("attachments") or []
         videos = [a for a in atts if a.get("type") == "video"]
         images = [a for a in atts if a.get("type") == "image"]
