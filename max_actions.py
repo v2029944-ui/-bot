@@ -63,9 +63,18 @@ class Worker:
         try:
             update = json.loads(row["payload"])
             material_transfer = bool(update.pop("_material_to_inbox", False))
-            if update.pop("_route_on_process", False):
+            route_now = bool(update.pop("_route_on_process", False))
+            if route_now:
                 update = spaces.stamp(update)
             if material_transfer:
+                if route_now:
+                    # Freeze the workspace selected at this exact position in the
+                    # per-user command stream. A crash before max_inbox handoff must
+                    # not re-route the same material using later state.
+                    payload = json.dumps({**update, "_material_to_inbox": True},
+                                         ensure_ascii=False, sort_keys=True)
+                    core.db.execute("UPDATE max_actions SET payload=? WHERE id=?", (payload, row["id"]))
+                    core.db.commit()
                 import max_queue
                 max_queue.enqueue(update)
             else:
