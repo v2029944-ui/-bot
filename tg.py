@@ -65,7 +65,7 @@ class Telegram(core.Adapter):
         elif self.channel.lstrip("-").isdigit():   # id пользователя, группы или канала
             ch = int(ch)
         resume = resume or {}
-        progress = progress or (lambda stage: None)
+        progress = progress or (lambda stage, value=True: None)
         formatting: dict[str, Any] = {"parse_mode": "HTML"} if isinstance(post, post_footer.LinkedPost) else {}
         short = _tg_len(post) <= CAPTION_LIMIT
 
@@ -81,10 +81,14 @@ class Telegram(core.Adapter):
             if not resume.get("media"):
                 await self.bot.send_media_group(chat_id=ch, media=group)
                 progress("media")
+            progress("text_started")
             try:
                 await self.bot.send_message(ch, post, **formatting)
                 progress("text")
             except Exception as e:
+                if isinstance(e, (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound,
+                                  TelegramUnauthorizedError, TelegramRetryAfter, TelegramEntityTooLarge)):
+                    progress("text_started", False)
                 setattr(e, "partial", True)
                 raise
             return
@@ -98,9 +102,13 @@ class Telegram(core.Adapter):
         if not resume.get("media"):
             await send(ch, FSInputFile(video or photo), **extra)
             progress("media")
+        progress("text_started")
         try:
             await self.bot.send_message(ch, post, **formatting)
             progress("text")
         except Exception as e:
+            if isinstance(e, (TelegramBadRequest, TelegramForbiddenError, TelegramNotFound,
+                              TelegramUnauthorizedError, TelegramRetryAfter, TelegramEntityTooLarge)):
+                progress("text_started", False)
             setattr(e, "partial", True)
             raise
