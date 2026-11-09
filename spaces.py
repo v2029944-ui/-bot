@@ -548,8 +548,25 @@ async def settings_input(adapter, uid, text):
 
 
 def settings_busy(space):
-    if root().db.execute("SELECT 1 FROM max_inbox WHERE space_id=? AND state IN ('pending','processing') LIMIT 1", (space.id,)).fetchone():
+    queue = root().db
+    if queue.execute("SELECT 1 FROM max_inbox WHERE space_id=? AND state IN ('pending','processing') LIMIT 1",
+                     (space.id,)).fetchone():
         return True
+    if queue.execute("""SELECT 1 FROM max_actions
+                        WHERE state IN ('handoff','handoff_processing') AND space_id=? LIMIT 1""",
+                     (space.id,)).fetchone():
+        return True
+    # Before routing is frozen the final workspace depends on preceding callbacks in
+    # the same per-user queue. It is unsafe to attribute such a material to one space,
+    # so configuration changes wait until that short ordered phase completes.
+    for row in queue.execute("""SELECT payload FROM max_actions
+                                WHERE state IN ('pending','processing')""").fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if payload.get("_material_to_inbox"):
+            return True
     return bool(space.db.execute("SELECT 1 FROM drafts WHERE status IN ('publishing','regenerating') OR "
                                  "(status='pending' AND COALESCE(published_to,'')!='') LIMIT 1").fetchone())
 
