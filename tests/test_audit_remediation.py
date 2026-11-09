@@ -269,7 +269,7 @@ def test_removed_message_does_not_stay_in_cleanup_queue(monkeypatch):
         ad = max_.Max("token", "-100", [], [], ["1"])
         await ad.http.aclose()
         ad.http = httpx.AsyncClient(base_url=max_.API, transport=httpx.MockTransport(lambda req: httpx.Response(404, json={"code":"message.not.found"})))
-        core.db.execute("INSERT INTO max_draft_ui VALUES('gone',999,1)")
+        core.db.execute("INSERT INTO max_draft_ui(mid,did,attempt) VALUES('gone',999,1)")
         core.db.commit()
         try:
             await ad.cleanup_stale_buttons()
