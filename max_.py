@@ -614,7 +614,9 @@ class Max(core.Adapter):
             return
         if (m.get("recipient") or {}).get("chat_type", "dialog") != "dialog":
             return  # отвечаем только в личке
-        sender = m["sender"]
+        sender = m.get("sender") or {}
+        if not sender.get("user_id"):
+            return
         uid = sender["user_id"]
         quiet = core.quiet(self, uid)
         if await self._stranger(uid, sender.get("name") or sender.get("first_name"), sender.get("username")):
