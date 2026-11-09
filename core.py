@@ -111,6 +111,9 @@ db.execute("""CREATE TABLE IF NOT EXISTS max_inbox (
     error TEXT DEFAULT '')""")
 schema.add_columns(db, "max_inbox", ("rate_counted INTEGER DEFAULT 0", "space_id INTEGER DEFAULT 0"))
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_work ON max_inbox(state,next_try,created)")
+db.execute("""CREATE TABLE IF NOT EXISTS rate_events (
+    platform TEXT, uid TEXT, created REAL)""")
+db.execute("CREATE INDEX IF NOT EXISTS rate_events_lookup ON rate_events(platform,uid,created)")
 db.commit()
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_space_state ON max_inbox(space_id,state)")
 db.commit()
