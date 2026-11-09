@@ -8,6 +8,7 @@ from conftest import run
 
 import core
 import max_
+import max_actions
 import max_queue
 
 
@@ -59,13 +60,19 @@ def test_durable_enqueue_before_marker_and_duplicate_delivery(adapter, llm, monk
             return {"marker": 42, "updates": [event()]}
         assert kwargs["params"]["marker"] == 42
         with sqlite3.connect(core.DATA / "drafts.db") as reader:
-            assert reader.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
+            # The batch may be committed while the material is still in max_actions:
+            # this queue is durable and preserves per-user ordering before max_inbox routing.
+            assert reader.execute("SELECT COUNT(*) FROM max_actions WHERE state='pending'").fetchone()[0] == 1
+            assert reader.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 0
         assert not adapter.downloads
         raise asyncio.CancelledError
 
     monkeypatch.setattr(adapter, "call", call)
     with pytest.raises(asyncio.CancelledError):
         run(adapter.run())
+    action = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+    run(max_actions.Worker(adapter).process(action))
+    assert core.db.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
     repeated = event()
     repeated["timestamp"] = 999
     key = max_queue.enqueue(repeated)
@@ -180,3 +187,26 @@ def test_worker_restart_recovers_interrupted_job(adapter, monkeypatch):
 
     monkeypatch.setattr(worker, "process_once", process)
     run(worker.run())
+
+
+def test_polling_persists_callback_before_following_material(adapter, monkeypatch):
+    callback = {"update_type": "message_callback", "timestamp": 1,
+                "callback": {"callback_id": "switch-first", "user": {"user_id": 9}, "payload": "m:menu"}}
+    material = event(mid="photo-after-switch")
+    calls = 0
+
+    async def call(method, path, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"marker": 55, "updates": [callback, material]}
+        rows = core.db.execute("SELECT payload FROM max_actions ORDER BY id").fetchall()
+        assert len(rows) == 2
+        assert "switch-first" in rows[0]["payload"]
+        assert "photo-after-switch" in rows[1]["payload"]
+        assert core.db.execute("SELECT COUNT(*) FROM max_inbox").fetchone()[0] == 0
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(adapter, "call", call)
+    with pytest.raises(asyncio.CancelledError):
+        run(adapter.run())

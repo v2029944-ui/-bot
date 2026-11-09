@@ -5,6 +5,7 @@ from test_admin_menu_button import Api, make
 
 import core
 import max_actions
+import max_queue
 
 
 def event(uid, cid):
@@ -138,4 +139,114 @@ def test_old_post_keyboard_removed_but_post_preserved():
         assert all(not b["payload"].startswith("d:") for a in edit["attachments"] if a["type"] == "inline_keyboard" for row in a["payload"]["buttons"] for b in row)
         assert not api.of("DELETE")
         await adapter.http.aclose()
+    run(scenario())
+
+
+def test_material_handoff_failure_keeps_payload_and_retries(monkeypatch):
+    async def scenario():
+        api = Api()
+        adapter = make(api)
+        update = {
+            "update_type": "message_created",
+            "message": {
+                "sender": {"user_id": 1},
+                "recipient": {"chat_type": "dialog"},
+                "body": {"mid": "material-1", "text": "Описание", "attachments": [
+                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
+                ]},
+            },
+            "_route_on_process": True,
+            "_material_to_inbox": True,
+        }
+        max_actions.enqueue(update)
+        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+        original = max_queue.enqueue
+
+        def fail(_update):
+            raise RuntimeError("sqlite temporarily unavailable")
+
+        monkeypatch.setattr(max_queue, "enqueue", fail)
+        await max_actions.Worker(adapter).process(row)
+        kept = core.db.execute("SELECT state,payload,attempts,next_try FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        assert kept["state"] == "pending" and kept["payload"] and kept["attempts"] == 1 and kept["next_try"] > 0
+
+        monkeypatch.setattr(max_queue, "enqueue", original)
+        core.db.execute("UPDATE max_actions SET next_try=0 WHERE id=?", (row["id"],))
+        core.db.commit()
+        row = core.db.execute("SELECT * FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        await max_actions.Worker(adapter).process(row)
+        done = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        assert tuple(done) == ("done", "")
+        assert core.db.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
+        await adapter.http.aclose()
+
+    run(scenario())
+
+
+def test_material_backoff_blocks_later_same_user_command(monkeypatch):
+    async def scenario():
+        adapter = make(Api())
+        material = {
+            "update_type": "message_created",
+            "message": {
+                "sender": {"user_id": 1},
+                "recipient": {"chat_type": "dialog"},
+                "body": {"mid": "material-backoff", "text": "Описание", "attachments": [
+                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
+                ]},
+            },
+            "_route_on_process": True,
+            "_material_to_inbox": True,
+        }
+        max_actions.enqueue(material)
+        max_actions.enqueue(event(1, "after-material"))
+        first = core.db.execute("SELECT * FROM max_actions ORDER BY id LIMIT 1").fetchone()
+
+        def fail(_update):
+            raise RuntimeError("temporary")
+
+        monkeypatch.setattr(max_queue, "enqueue", fail)
+        await max_actions.Worker(adapter).process(first)
+
+        worker = max_actions.Worker(adapter)
+        worker.schedule()
+        assert not worker.active  # later callback cannot overtake backoff material
+        await adapter.http.aclose()
+
+    run(scenario())
+
+
+def test_material_handoff_expires_after_seven_days(monkeypatch):
+    async def scenario():
+        api = Api()
+        adapter = make(api)
+        update = {
+            "update_type": "message_created",
+            "message": {
+                "sender": {"user_id": 1},
+                "recipient": {"chat_type": "dialog"},
+                "body": {"mid": "expired-material", "text": "Описание", "attachments": [
+                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
+                ]},
+            },
+            "_route_on_process": True,
+            "_material_to_inbox": True,
+        }
+        max_actions.enqueue(update)
+        core.db.execute("UPDATE max_actions SET created=? WHERE event_key=(SELECT event_key FROM max_actions LIMIT 1)",
+                        (__import__("time").time() - 8 * 86400,))
+        core.db.commit()
+        row = core.db.execute("SELECT * FROM max_actions LIMIT 1").fetchone()
+
+        def fail(_update):
+            raise RuntimeError("still unavailable")
+
+        monkeypatch.setattr(max_queue, "enqueue", fail)
+        await max_actions.Worker(adapter).process(row)
+        result = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        assert tuple(result) == ("failed", "")
+        assert any("Материал не удалось поставить" in call[3].get("text", "")
+                   for call in api.of("POST"))
+        await adapter.http.aclose()
+
     run(scenario())
