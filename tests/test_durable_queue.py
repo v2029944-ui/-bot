@@ -71,7 +71,15 @@ def test_durable_enqueue_before_marker_and_duplicate_delivery(adapter, llm, monk
     with pytest.raises(asyncio.CancelledError):
         run(adapter.run())
     action = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
-    run(max_actions.Worker(adapter).process(action))
+    core.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (action["id"],))
+    core.db.commit()
+    actions = max_actions.Worker(adapter)
+    run(actions.process(dict(action)))
+    handoff = core.db.execute("SELECT * FROM max_actions WHERE id=?", (action["id"],)).fetchone()
+    assert handoff["state"] == "handoff"
+    core.db.execute("UPDATE max_actions SET state='handoff_processing' WHERE id=?", (action["id"],))
+    core.db.commit()
+    run(actions.process_handoff(dict(handoff)))
     assert core.db.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
     repeated = event()
     repeated["timestamp"] = 999
