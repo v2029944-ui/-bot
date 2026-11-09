@@ -23,7 +23,6 @@ import max_actions
 import max_queue
 import max_tls
 import post_footer
-import schema
 import spaces
 from services import publication
 
@@ -62,8 +61,8 @@ _RATE_LOOPS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _Rat
 
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
-core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER, uid TEXT DEFAULT '')")
-schema.add_columns(core.db, "max_draft_ui", ("uid TEXT DEFAULT ''",))
+core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
+core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_recipient (mid TEXT PRIMARY KEY, uid TEXT)")
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_ui_cleanup (
     op TEXT, mid TEXT, uid TEXT DEFAULT '', attempts INTEGER DEFAULT 0,
     next_try REAL DEFAULT 0, created REAL, last_error TEXT DEFAULT '',
@@ -266,6 +265,7 @@ class Max(core.Adapter):
                 self._ui_set(uid, btn=None)
         core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (mid,))
         core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (mid,))
+        core.db.execute("DELETE FROM max_draft_recipient WHERE mid=?", (mid,))
         core.db.execute("DELETE FROM max_notices WHERE mid=?", (mid,))
         core.db.execute("DELETE FROM max_ui_cleanup WHERE mid=?", (mid,))
         core.db.commit()
@@ -463,11 +463,12 @@ class Max(core.Adapter):
                 if mid and len(parts) == 4 and parts[0] == "d" and parts[2].isdigit() and parts[3].isdigit():
                     did, attempt = int(parts[2]), int(parts[3])
                     uid = str(target.get("user_id") or "")
-                    core.db.execute("""INSERT OR REPLACE INTO max_draft_ui(mid,did,attempt,uid)
-                                       VALUES(?,?,?,?)""", (mid, did, attempt, uid))
+                    core.db.execute("INSERT OR REPLACE INTO max_draft_ui VALUES(?,?,?)", (mid, did, attempt))
                     if uid:
-                        for old in core.db.execute("""SELECT mid FROM max_draft_ui
-                                                     WHERE did=? AND uid=? AND attempt<? AND mid!=?""",
+                        core.db.execute("INSERT OR REPLACE INTO max_draft_recipient(mid,uid) VALUES(?,?)", (mid, uid))
+                        for old in core.db.execute("""SELECT u.mid FROM max_draft_ui u
+                                                     JOIN max_draft_recipient r ON r.mid=u.mid
+                                                     WHERE u.did=? AND r.uid=? AND u.attempt<? AND u.mid!=?""",
                                                    (did, uid, attempt, mid)).fetchall():
                             self._queue_ui_cleanup("delete", old["mid"], uid)
                     current = core.get(did)
