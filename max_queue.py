@@ -52,7 +52,7 @@ def enqueue(update):
     payload = json.dumps(update, ensure_ascii=False, sort_keys=True)
     message = update["message"]
     mid = (message.get("body") or {}).get("mid")
-    identity = f"{message.get('sender', {}).get('user_id')}:{mid}" if mid else payload
+    identity = f"{(message.get('sender') or {}).get('user_id')}:{mid}" if mid else payload
     key = hashlib.sha256(identity.encode()).hexdigest()
     core.db.execute("INSERT OR IGNORE INTO max_inbox(event_key,payload,created,space_id) VALUES(?,?,?,?)",
                     (key, payload, time.time(), message.get("_space", 0)))
