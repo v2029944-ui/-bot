@@ -87,11 +87,15 @@ def finish(status: str, who: dict, **kw):
 
 
 def candidate_test_env(pypath: str, data_dir: Path) -> dict[str, str]:
-    """Minimal environment for untrusted candidate tests; production secrets stay out."""
-    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
-            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE")
+    """Minimal environment for candidate tests; production secrets and HOME stay out."""
+    keep = ("PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE")
     env = {name: os.environ[name] for name in keep if os.environ.get(name)}
-    env.update({"PYTHONPATH": pypath, "DATA_DIR": str(data_dir)})
+    base = data_dir.parent
+    home, temp = base / "candidate-home", base / "candidate-tmp"
+    home.mkdir(parents=True, exist_ok=True)
+    temp.mkdir(parents=True, exist_ok=True)
+    env.update({"HOME": str(home), "TMPDIR": str(temp), "TMP": str(temp), "TEMP": str(temp),
+                "PYTHONPATH": pypath, "DATA_DIR": str(data_dir)})
     return env
 
 
