@@ -110,6 +110,54 @@ def test_send_draft_rechecks_stale_recipient_list_before_delivery(monkeypatch, p
     run(scenario())
 
 
+
+
+def test_max_rechecks_draft_rights_after_rate_limit_before_http(monkeypatch, png, llm):
+    async def scenario():
+        seed = FakeAdapter("max", ["9"], admins=[])
+        core.ADAPTERS["max"] = seed
+        did = await core.submit(seed, "9", "Author", "Description", png)
+        d = core.get(did)
+
+        ad = max_.Max("token", "-1", [], ["9"], [])
+        core.ADAPTERS["max"] = ad
+        core.refresh_people(ad)
+        core._add_person(ad, "5", "Admin", "adm")
+        assert core.can_manage_draft(ad, "5", core.get(did))
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingGate:
+            async def wait(self):
+                entered.set()
+                await release.wait()
+
+        rates = ad._rates()
+        rates.messages["user_id:5"] = BlockingGate()
+        http_calls = []
+
+        async def unexpected_request(method, path, **kwargs):
+            http_calls.append((method, path))
+            raise AssertionError("HTTP request must not happen after access revocation")
+
+        monkeypatch.setattr(ad.http, "request", unexpected_request)
+        try:
+            task = asyncio.create_task(ad.send_for_approval("5", did, None, d["post"]))
+            await entered.wait()
+            core._remove_person(ad, "5", "Admin")
+            release.set()
+            with pytest.raises(PermissionError, match="больше не имеет доступа") as exc:
+                await task
+            assert ad.not_sent(exc.value)
+            assert http_calls == []
+            assert not core.can_manage_draft(ad, "5", core.get(did))
+        finally:
+            release.set()
+            await ad.http.aclose()
+
+    run(scenario())
+
 def test_max_rechecks_draft_rights_after_media_upload_before_post(monkeypatch, png, llm):
     async def scenario():
         seed = FakeAdapter("max", ["9"], admins=[])

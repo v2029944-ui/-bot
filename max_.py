@@ -142,6 +142,7 @@ class Max(core.Adapter):
                     and 400 <= e.response.status_code < 500 and e.response.status_code != 408))
 
     async def call(self, method, path, **kw):
+        preflight = kw.pop("_preflight", None)
         rate_key = str(kw.pop("_rate_key", "global"))
         rates = self._rates()
         await rates.api.wait()
@@ -156,6 +157,8 @@ class Max(core.Adapter):
                 # The edit/delete API has the same documented 2 rps cap. message_id
                 # does not identify its chat locally, so use a conservative shared gate.
                 await rates.message_mutation.wait()
+        if preflight is not None:
+            preflight()
         started = time.monotonic()
         try:
             r = await self.http.request(method, path, **kw)
@@ -450,7 +453,7 @@ class Max(core.Adapter):
             try:
                 if preflight is not None:
                     preflight()
-                resp = await self.call("POST", "/messages", params=target, json=body)
+                resp = await self.call("POST", "/messages", params=target, json=body, _preflight=preflight)
                 break
             except httpx.HTTPStatusError as e:
                 if "not.ready" in e.response.text and i < tries - 1:
