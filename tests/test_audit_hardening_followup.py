@@ -33,11 +33,11 @@ def test_telegram_long_post_resumes_text_without_resending_media(tmp_path):
         stages = []
         with pytest.raises(RuntimeError):
             await adapter.publish(str(photo), "x" * 1200, progress=stages.append)
-        assert stages == ["media"]
-        await adapter.publish(str(photo), "x" * 1200, resume={"media": True}, progress=stages.append)
+        assert stages == ["media", "text_started"]
+        await adapter.publish(str(photo), "x" * 1200, resume={"media": True, "text_started": True}, progress=stages.append)
         assert adapter.bot.photos == 1
         assert adapter.bot.messages == 2
-        assert stages == ["media", "text"]
+        assert stages == ["media", "text_started", "text_started", "text"]
 
     run(scenario())
 
