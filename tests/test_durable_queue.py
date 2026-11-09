@@ -8,6 +8,7 @@ from conftest import run
 
 import core
 import max_
+import max_actions
 import max_queue
 
 
@@ -59,13 +60,19 @@ def test_durable_enqueue_before_marker_and_duplicate_delivery(adapter, llm, monk
             return {"marker": 42, "updates": [event()]}
         assert kwargs["params"]["marker"] == 42
         with sqlite3.connect(core.DATA / "drafts.db") as reader:
-            assert reader.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
+            # The batch may be committed while the material is still in max_actions:
+            # this queue is durable and preserves per-user ordering before max_inbox routing.
+            assert reader.execute("SELECT COUNT(*) FROM max_actions WHERE state='pending'").fetchone()[0] == 1
+            assert reader.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 0
         assert not adapter.downloads
         raise asyncio.CancelledError
 
     monkeypatch.setattr(adapter, "call", call)
     with pytest.raises(asyncio.CancelledError):
         run(adapter.run())
+    action = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+    run(max_actions.Worker(adapter).process(action))
+    assert core.db.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
     repeated = event()
     repeated["timestamp"] = 999
     key = max_queue.enqueue(repeated)
