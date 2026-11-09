@@ -145,3 +145,17 @@ def test_long_polling_without_marker_keeps_official_uncommitted_semantics(monkey
         await adapter.http.aclose()
 
     run(scenario())
+
+
+def test_rate_registry_is_shared_by_workspaces_using_same_token():
+    async def scenario():
+        first = max_.Max("same-token", "-1", [], [], admins=[])
+        second = max_.Max("same-token", "-2", [], [], admins=[])
+        other = max_.Max("other-token", "-3", [], [], admins=[])
+        assert first._rates() is second._rates()
+        assert first._rates() is not other._rates()
+        await first.http.aclose()
+        await second.http.aclose()
+        await other.http.aclose()
+
+    run(scenario())
