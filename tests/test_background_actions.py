@@ -218,7 +218,8 @@ def test_material_backoff_blocks_later_same_user_command(monkeypatch):
 
 def test_material_handoff_expires_after_seven_days(monkeypatch):
     async def scenario():
-        adapter = make(Api())
+        api = Api()
+        adapter = make(api)
         update = {
             "update_type": "message_created",
             "message": {
