@@ -678,8 +678,9 @@ class Max(core.Adapter):
                     params["marker"] = marker
                 data = await self.call("GET", "/updates", params=params)
                 # MAX считает события подтверждёнными при следующем запросе с marker.
-                # Медиа сначала фиксируются в постоянной очереди; остальные события
-                # обрабатываются здесь. Ошибка записи в БД не подтверждает пакет.
+                # Callback/text/media сначала фиксируются в max_actions в порядке MAX;
+                # media затем idempotently переносится в max_inbox после выбора workspace.
+                # Ошибка любой durable-записи не подтверждает пакет.
                 batch = []
                 for update in data.get("updates", []):
                     if self._durable_user_update(update):
