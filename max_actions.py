@@ -158,7 +158,9 @@ class Worker:
         staff_text = (f"⚠️ Материал пользователя {row['uid']} не удалось передать в очередь за 7 дней. "
                       f"mid={mid or 'неизвестен'}, попыток={attempt}. Попросите отправить материал заново.")
         self._queue_notice(row["event_key"], "user", row["uid"], sid, user_text, now)
-        self._queue_notice(row["event_key"], "staff", "", sid, staff_text, now)
+        with spaces.enter(spaces.get(sid) if spaces.INSTALLED and sid else None):
+            for admin_uid in core.staff(core.ADAPTERS["max"]):
+                self._queue_notice(row["event_key"], "staff", admin_uid, sid, staff_text, now)
         core.db.commit()
         logging.getLogger("max_actions").error("terminal handoff failure event=%s space=%s", row["event_key"][:8], sid)
 
@@ -173,17 +175,7 @@ class Worker:
         try:
             with spaces.enter(spaces.get(row["space_id"]) if spaces.INSTALLED and row["space_id"] else None):
                 adapter = core.ADAPTERS["max"]
-                if row["kind"] == "user":
-                    await adapter.notify(row["uid"], row["text"])
-                else:
-                    targets = list(core.staff(adapter))
-                    if not targets:
-                        core.db.execute("UPDATE max_handoff_notices SET state='failed',last_error=? WHERE id=?",
-                                        ("Нет администраторов пространства", row["id"]))
-                        core.db.commit()
-                        return
-                    for uid in targets:
-                        await adapter.notify(uid, row["text"])
+                await adapter.notify(row["uid"], row["text"])
         except asyncio.CancelledError:
             core.db.execute("UPDATE max_handoff_notices SET state='pending' WHERE id=? AND state='sending'", (row["id"],))
             core.db.commit()
@@ -198,12 +190,14 @@ class Worker:
         import httpx
         attempts = int(row["attempts"] or 0) + 1
         status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-        if status == 429:
+        safe_network = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+        if status == 429 or safe_network:
             state, delay = "pending", min(30 * 2 ** min(attempts - 1, 7), 3600)
         elif status is not None and 400 <= status < 500 and status != 408:
             state, delay = "failed", 0
         else:
-            # POST /messages may have reached MAX. Do not retry an ambiguous result.
+            # The request may have reached MAX (408/5xx/read-write failure). Do not
+            # automatically retry an ambiguous notification and risk duplicates.
             state, delay = "unknown", 0
         core.db.execute("""UPDATE max_handoff_notices SET state=?,attempts=?,next_try=?,last_error=?
                            WHERE id=?""",
