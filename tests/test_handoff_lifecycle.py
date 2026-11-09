@@ -95,3 +95,109 @@ def test_notice_failure_classification_distinguishes_safe_retry_and_unknown():
                           httpx.ReadTimeout("reply lost", request=request))
     row = core.db.execute("SELECT state,next_try FROM max_handoff_notices WHERE id=1").fetchone()
     assert row["state"] == "unknown" and row["next_try"] == 0
+
+
+def test_staff_notice_rechecks_workspace_rights_before_send(monkeypatch):
+    async def scenario():
+        import max_
+        import spaces
+        import tg
+
+        root_max = max_.Max("token", "-100", ["1"], [], ["1"])
+        root_tg = tg.Telegram("123456:ABCDEF", "-200")
+        core.ADAPTERS.update(max=root_max, tg=root_tg)
+        monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+        spaces.install()
+        root = spaces.ROOT
+        root.db.execute("INSERT INTO workspaces(name,owner,max_channel,tg_channel) VALUES('B','22','-102',NULL)")
+        sid = root.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        root.db.commit()
+        space = spaces.get(sid)
+        with spaces.enter(space):
+            adapter = core.ADAPTERS["max"]
+            core._add_person(adapter, "55", "Admin", "adm")
+            assert "55" in core.staff(adapter)
+
+        root.db.execute("""INSERT INTO max_handoff_notices
+                           (event_key,kind,uid,space_id,text,state,created)
+                           VALUES('e','staff','55',?,'secret','sending',?)""",
+                        (sid, __import__("time").time()))
+        root.db.commit()
+
+        with spaces.enter(space):
+            adapter = core.ADAPTERS["max"]
+            core._remove_person(adapter, "55", "Admin")
+            assert "55" not in core.staff(adapter)
+
+        sent = []
+
+        async def notify(self, uid, text):
+            sent.append((str(uid), text))
+
+        monkeypatch.setattr(max_.Max, "notify", notify)
+        row = dict(root.db.execute("SELECT * FROM max_handoff_notices WHERE event_key='e'").fetchone())
+        await max_actions.Worker(root_max).process_notice(row)
+
+        result = root.db.execute("SELECT state,last_error FROM max_handoff_notices WHERE event_key='e'").fetchone()
+        assert result["state"] == "skipped"
+        assert "отозваны" in result["last_error"]
+        assert sent == []
+
+    run(scenario())
+
+
+def test_terminal_handoff_falls_back_only_to_global_admins_when_space_unavailable(monkeypatch):
+    async def scenario():
+        import max_
+        import spaces
+        import tg
+
+        root_max = max_.Max("token", "-100", ["1", "2"], [], ["1", "2"])
+        root_tg = tg.Telegram("123456:ABCDEF", "-200")
+        core.ADAPTERS.update(max=root_max, tg=root_tg)
+        monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+        spaces.install()
+        root = spaces.ROOT
+        root_max.global_admins = ["1", "2"]
+
+        root.db.execute("INSERT INTO workspaces(name,owner,max_channel,tg_channel) VALUES('B','22','-102',NULL)")
+        sid = root.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        root.db.commit()
+
+        original_get = spaces.get
+
+        def broken_get(value):
+            if value == sid:
+                raise RuntimeError("workspace db unavailable")
+            return original_get(value)
+
+        monkeypatch.setattr(spaces, "get", broken_get)
+
+        now = __import__("time").time()
+        row = {
+            "id": 1, "event_key": "fallback", "uid": "9", "space_id": sid,
+            "created": now - 8 * 86400, "attempts": 6,
+        }
+        root.db.execute("""INSERT INTO max_actions
+            (id,event_key,uid,payload,state,created,attempts,next_try,space_id)
+            VALUES(1,'fallback','9','{}','handoff_processing',?,6,0,?)""", (row["created"], sid))
+        root.db.commit()
+
+        max_actions.Worker(root_max)._terminal_handoff(
+            row, {"message": {"_space": sid, "body": {"mid": "m-fallback"}}}, 7, now, "boom")
+
+        notices = root.db.execute(
+            "SELECT kind,uid,space_id,state FROM max_handoff_notices WHERE event_key='fallback' ORDER BY kind,uid"
+        ).fetchall()
+        assert [tuple(r) for r in notices] == [
+            ("global_staff", "1", sid, "pending"),
+            ("global_staff", "2", sid, "pending"),
+            ("user", "9", sid, "pending"),
+        ]
+
+        # A non-global workspace administrator must never receive the fallback.
+        assert not root.db.execute(
+            "SELECT 1 FROM max_handoff_notices WHERE event_key='fallback' AND uid='22'"
+        ).fetchone()
+
+    run(scenario())
