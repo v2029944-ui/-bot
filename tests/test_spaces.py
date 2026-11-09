@@ -415,7 +415,11 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 core.WAITING_EDIT.clear()
 
             # Истёкшие материалы уведомляют только свою команду.
-            root.db.execute("INSERT INTO max_inbox(event_key,state,created,space_id) VALUES('expired-a','pending',?,?)", (time.time() - 8 * 86400, aid))
+            expired_payload = __import__("json").dumps({"message": {"_space": aid, "sender": {"user_id": 11},
+                "body": {"mid": "expired-a-mid"}}})
+            root.db.execute(
+                "INSERT INTO max_inbox(event_key,payload,state,created,space_id) VALUES('expired-a',?,'pending',?,?)",
+                (expired_payload, time.time() - 8 * 86400, aid))
             root.db.commit()
             calls.clear()
             await worker.process_once()
