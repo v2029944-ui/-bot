@@ -154,3 +154,15 @@ def test_ambiguous_generation_stops_durable_queue_after_first_attempt():
     row = core.db.execute("SELECT state,attempts,error FROM max_inbox WHERE event_key='ambiguous'").fetchone()
     assert row["state"] == "failed" and row["attempts"] == 1
     assert "unknown result" in row["error"]
+
+
+def test_stale_seen_button_cannot_complete_known_partial_publication(mx, llm, png):
+    mx.channel = "-100"
+    tg = FakeAdapter("tg", admins=())
+    tg.publish_only, tg.channel = True, "-200"
+    core.ADAPTERS["tg"] = tg
+    did = run(core.submit(mx, "9", "Author", "Caption", png))
+    core._set(did, published_to="tg?", publish_progress=json.dumps({"tg": {"media": True}}))
+    ok, text = run(core.on_action(mx, "5", "seen_tg", did, 1))
+    assert not ok and "текст точно не отправлен" in text
+    assert core._parse_marks(core.get(did)["published_to"])["tg"] == "unknown"
