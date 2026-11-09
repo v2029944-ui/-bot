@@ -406,9 +406,15 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             root.db.commit()
             calls.clear()
             await worker.process_once()
-            expiry_notices = [(sid, kw["params"]["user_id"]) for sid, method, path, kw in calls
-                              if method == "POST" and path == "/messages" and "Истёк срок обработки" in kw["json"]["text"]]
-            assert expiry_notices == [(aid, 11)]
+            expiry_notices = root.db.execute(
+                """SELECT kind,uid,space_id,state,text FROM max_handoff_notices
+                   WHERE event_key='expired-a' ORDER BY kind,uid""").fetchall()
+            assert [(r["kind"], r["uid"], r["space_id"], r["state"]) for r in expiry_notices] == [
+                ("staff", "11", aid, "pending")]
+            assert "Истёк срок обработки" in expiry_notices[0]["text"]
+            assert not root.db.execute(
+                "SELECT 1 FROM max_handoff_notices WHERE event_key='expired-a' AND uid='22'").fetchone()
+            assert not [x for x in calls if x[1] == "POST" and x[2] == "/messages"]
 
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-a','failed','ОШИБКА_А',?)", (aid,))
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-b','failed','ОШИБКА_Б',?)", (bid,))
