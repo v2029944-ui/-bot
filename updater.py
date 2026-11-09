@@ -152,6 +152,8 @@ def _rollback_v2_to_v1():
             db.commit()
 
 
+# This registry belongs to the updater executable from the Docker image, not to
+# candidate Git code. A legacy image without (2, 1) must reject data-v2 before reset.
 ROLLBACK_DATA_MIGRATIONS = {(2, 1): _rollback_v2_to_v1}
 
 
