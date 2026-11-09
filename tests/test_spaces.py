@@ -248,9 +248,18 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             waiting = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
             assert waiting["state"] == "handoff" and waiting["next_try"] > 0
 
-            # Later commands may proceed while handoff retries, but this material
-            # remains bound to the workspace selected at its ordered position.
-            root.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", ("33", aid))
+            # A later real callback may switch the user back to A while B's material
+            # is waiting for handoff. It must not be blocked and must not re-route the photo.
+            switch_back = {"update_type": "message_callback", "callback": {
+                "callback_id": "rapid-switch-back", "user": {"user_id": 33}, "payload": f"w:{aid}:m:menu"}}
+            await root_max._handle_limited(switch_back)
+            back_row = root.db.execute(
+                "SELECT * FROM max_actions WHERE state='pending' AND payload LIKE '%rapid-switch-back%'").fetchone()
+            root.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (back_row["id"],))
+            root.db.commit()
+            await actions.process(dict(back_row))
+            assert spaces.for_user("33") == aid
+
             root.db.execute("UPDATE max_actions SET next_try=0,state='handoff_processing' WHERE id=?", (material_row["id"],))
             root.db.commit()
             monkeypatch.setattr(max_queue, "enqueue", original_enqueue)
