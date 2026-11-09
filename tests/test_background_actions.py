@@ -5,6 +5,7 @@ from test_admin_menu_button import Api, make
 
 import core
 import max_actions
+import max_queue
 
 
 def event(uid, cid):
@@ -138,4 +139,42 @@ def test_old_post_keyboard_removed_but_post_preserved():
         assert all(not b["payload"].startswith("d:") for a in edit["attachments"] if a["type"] == "inline_keyboard" for row in a["payload"]["buttons"] for b in row)
         assert not api.of("DELETE")
         await adapter.http.aclose()
+    run(scenario())
+
+
+def test_material_handoff_failure_keeps_payload_and_retries(monkeypatch):
+    async def scenario():
+        adapter = make(Api())
+        update = {
+            "update_type": "message_created",
+            "message": {
+                "sender": {"user_id": 1},
+                "recipient": {"chat_type": "dialog"},
+                "body": {"mid": "material-1", "text": "Описание", "attachments": [
+                    {"type": "image", "payload": {"url": "https://example.invalid/photo"}}
+                ]},
+            },
+            "_route_on_process": True,
+            "_material_to_inbox": True,
+        }
+        max_actions.enqueue(update)
+        row = core.db.execute("SELECT * FROM max_actions WHERE state='pending'").fetchone()
+        original = max_queue.enqueue
+
+        def fail(_update):
+            raise RuntimeError("sqlite temporarily unavailable")
+
+        monkeypatch.setattr(max_queue, "enqueue", fail)
+        await max_actions.Worker(adapter).process(row)
+        kept = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        assert kept["state"] == "pending" and kept["payload"]
+
+        monkeypatch.setattr(max_queue, "enqueue", original)
+        row = core.db.execute("SELECT * FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        await max_actions.Worker(adapter).process(row)
+        done = core.db.execute("SELECT state,payload FROM max_actions WHERE id=?", (row["id"],)).fetchone()
+        assert tuple(done) == ("done", "")
+        assert core.db.execute("SELECT COUNT(*) FROM max_inbox WHERE state='pending'").fetchone()[0] == 1
+        await adapter.http.aclose()
+
     run(scenario())
