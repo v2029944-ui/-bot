@@ -8,8 +8,8 @@ from conftest import FakeAdapter, run
 import core
 import max_
 import ops
-from services import submissions
 import spaces
+from services import submissions
 
 
 def test_promoting_root_admin_does_not_grant_global_process_control():
