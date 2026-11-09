@@ -288,3 +288,19 @@ def test_comparison_retry_sends_only_missing_option(monkeypatch, png, llm):
         await ad.http.aclose()
 
     run(scenario())
+
+
+def test_delete_success_false_is_not_treated_as_cleaned():
+    async def scenario():
+        async def handler(request):
+            return httpx.Response(200, request=request, json={"success": False, "message": "denied"})
+
+        ad = max_.Max("token", "-1", [], [], admins=["1"])
+        await ad.http.aclose()
+        ad.http = httpx.AsyncClient(base_url=max_.API, transport=httpx.MockTransport(handler))
+        assert not await ad._delete("m1", "1")
+        assert core.db.execute(
+            "SELECT 1 FROM max_ui_cleanup WHERE op='delete' AND mid='m1'").fetchone()
+        await ad.http.aclose()
+
+    run(scenario())
