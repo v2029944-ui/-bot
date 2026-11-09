@@ -106,7 +106,7 @@ async def _complete(system: str, text: str, b64: str | None = None) -> str:
 
 async def _claude(system: str, text: str, b64: str | None) -> str:
     from anthropic import AsyncAnthropic
-    core._client = core._client or AsyncAnthropic()  # ключ из ANTHROPIC_API_KEY
+    core._client = core._client or AsyncAnthropic(max_retries=0)  # durable queue owns automatic retries
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
@@ -133,17 +133,14 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
                                             {"role": "user", "content": content}]}
     headers = {"Authorization": f"Bearer {os.environ['LLM_API_KEY']}"}
     key = "max_tokens"
-    retries = 0
     async with httpx.AsyncClient(timeout=120) as c:
         while True:
             r = await c.post(f"{base}/chat/completions", headers=headers, json={**payload, key: 1000})
             if r.status_code == 400 and key == "max_tokens" and "max_tokens" in r.text:
-                key = "max_completion_tokens"  # новые модели требуют другое имя параметра (это не «попытка»)
+                key = "max_completion_tokens"  # compatibility retry: rejected request was not generated/billed
                 continue
-            if r.status_code in (429, 500, 502, 503, 504) and retries < 3:
-                retries += 1
-                await asyncio.sleep(2 * retries)  # временная ошибка сервиса: повторяем
-                continue
+            # Do not retry transient provider failures here. The durable material
+            # queue owns backoff/retry, avoiding multiplicative paid requests.
             break
     if r.status_code >= 400:
         raise RuntimeError(f"Нейросеть вернула {r.status_code}: {r.text[:200]}")
