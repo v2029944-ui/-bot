@@ -313,3 +313,37 @@ def test_handoff_backoff_preserves_workspace_material_order(monkeypatch):
         await adapter.http.aclose()
 
     run(scenario())
+
+
+def test_material_routing_failure_keeps_order_until_space_is_frozen(monkeypatch):
+    async def scenario():
+        adapter = make(Api())
+        max_actions.enqueue(material(mid="route-fail"))
+        max_actions.enqueue(event(1, "after-route-fail"))
+        first = core.db.execute("SELECT * FROM max_actions ORDER BY id LIMIT 1").fetchone()
+        core.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (first["id"],))
+        core.db.commit()
+        original_stamp = max_actions.spaces.stamp
+
+        def fail(_update):
+            raise RuntimeError("routing db unavailable")
+
+        monkeypatch.setattr(max_actions.spaces, "stamp", fail)
+        worker = max_actions.Worker(adapter)
+        await worker.process(dict(first))
+        kept = core.db.execute("SELECT state,payload,attempts,next_try FROM max_actions WHERE id=?", (first["id"],)).fetchone()
+        assert kept["state"] == "pending" and kept["payload"] and kept["attempts"] == 1 and kept["next_try"] > 0
+        worker.schedule()
+        assert not worker.active  # later same-user command cannot pass before workspace is known
+
+        monkeypatch.setattr(max_actions.spaces, "stamp", original_stamp)
+        core.db.execute("UPDATE max_actions SET next_try=0,state='processing' WHERE id=?", (first["id"],))
+        core.db.commit()
+        await worker.process(dict(core.db.execute("SELECT * FROM max_actions WHERE id=?", (first["id"],)).fetchone()))
+        assert core.db.execute("SELECT state FROM max_actions WHERE id=?", (first["id"],)).fetchone()["state"] == "handoff"
+        worker.schedule()
+        assert "1" in worker.active
+        await asyncio.gather(*worker.active.values())
+        await adapter.http.aclose()
+
+    run(scenario())
