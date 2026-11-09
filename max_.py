@@ -514,6 +514,23 @@ class Max(core.Adapter):
         core.db.commit()
         return None
 
+    def invalidate_approval_revision(self, did, attempt):
+        """Abandon a rolled-back UI revision without ever making its buttons current again."""
+        rows = core.db.execute("""SELECT u.mid, COALESCE(r.uid,'') AS uid
+                                  FROM max_draft_ui u
+                                  LEFT JOIN max_draft_recipient r ON r.mid=u.mid
+                                  WHERE u.did=? AND u.attempt=?""", (did, attempt)).fetchall()
+        known = {row["mid"] for row in rows}
+        extra = core.db.execute("""SELECT mid,uid FROM max_approval_delivery
+                                   WHERE did=? AND attempt=?""", (did, attempt)).fetchall()
+        for row in [*rows, *extra]:
+            if row["mid"] in known and row not in extra:
+                pass
+            self._queue_ui_cleanup("delete", row["mid"], row["uid"] or None)
+            known.add(row["mid"])
+        core.db.execute("DELETE FROM max_approval_delivery WHERE did=? AND attempt=?", (did, attempt))
+        core.db.commit()
+
     def _save_approval_delivery(self, did, attempt, uid, slot, mid):
         if mid:
             core.db.execute("""INSERT OR REPLACE INTO max_approval_delivery
