@@ -4,8 +4,6 @@ import hashlib
 import json
 import logging
 import time
-from collections import Counter
-
 import core
 import spaces
 
@@ -91,19 +89,35 @@ class Worker:
     async def process_once(self, now=None):
         now = time.time() if now is None else now
         # Ссылки и подписи не храним бесконечно даже при недоступной нейросети.
-        expired_keys = list(core.db.execute(
-            "SELECT event_key,space_id FROM max_inbox WHERE state IN ('pending','failed') AND created<?", (now - 7 * 86400,)))
-        expired = core.db.execute(
-            "UPDATE max_inbox SET state='expired',payload='',error='Истёк срок обработки' "
-            "WHERE state IN ('pending','failed') AND created<?", (now - 7 * 86400,)).rowcount
-        core.db.commit()
-        for key, sid in expired_keys:
-            clear_cache(key, sid)
-        if expired:
-            for sid, count in Counter(sid for _, sid in expired_keys).items():
-                with spaces.enter(spaces.get(sid) if spaces.INSTALLED else None):
-                    adapter = core.ADAPTERS["max"] if spaces.INSTALLED else self.adapter
-                    await core.alert_staff(adapter, f"⚠️ Истёк срок обработки {count} материалов в очереди. Попросите сотрудников отправить их заново.")
+        # До очистки payload атомарно сохраняем minimal diagnostics + durable notices.
+        expired_rows = core.db.execute(
+            """SELECT event_key,space_id,payload,created,attempts FROM max_inbox
+               WHERE state IN ('pending','failed') AND created<? ORDER BY created""",
+            (now - 7 * 86400,)).fetchall()
+        if expired_rows:
+            import max_actions
+            for row in expired_rows:
+                payload = json.loads(row["payload"] or "{}")
+                message = payload.get("message") or {}
+                uid = str((message.get("sender") or {}).get("user_id") or "")
+                mid = str((message.get("body") or {}).get("mid") or "")
+                sid = int(row["space_id"] or message.get("_space") or 0)
+                reason = "Истёк семидневный срок обработки в max_inbox"
+                db = spaces.queue_db()
+                max_actions.stage_material_failure(
+                    self.adapter, row["event_key"], uid, mid, sid, row["created"], row["attempts"], reason,
+                    user_text=("⚠️ Материал не удалось обработать за 7 дней. Отправьте его заново." if uid else None),
+                    staff_text=(f"⚠️ Истёк срок обработки материала {row['event_key'][:8]}"
+                                f"{f' пользователя {uid}' if uid else ''}. "
+                                "Попросите отправить материал заново."),
+                    now=now, db=db)
+                changed = db.execute(
+                    """UPDATE max_inbox SET state='expired',payload='',error=?
+                       WHERE event_key=? AND state IN ('pending','failed')""",
+                    (reason, row["event_key"])).rowcount
+                db.commit()
+                if changed:
+                    clear_cache(row["event_key"], sid)
         if core.SHUTTING_DOWN:
             return False
         row = core.db.execute("SELECT a.* FROM max_inbox a WHERE a.state='pending' AND a.next_try<=? "
