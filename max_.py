@@ -57,7 +57,7 @@ class _RateRegistry:
         self.messages: dict[str, _RateGate] = {}
 
 
-_RATE_LOOPS = weakref.WeakKeyDictionary()
+_RATE_LOOPS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _RateRegistry]] = weakref.WeakKeyDictionary()
 
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
