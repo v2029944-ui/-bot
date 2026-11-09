@@ -299,16 +299,19 @@ def test_handoff_backoff_preserves_workspace_material_order(monkeypatch):
         core.db.commit()
         worker = max_actions.Worker(adapter)
         gate = asyncio.Event()
-        started = []
 
-        async def slow(row):
-            started.append(row["event_key"])
+        async def slow(_row):
             await gate.wait()
 
         monkeypatch.setattr(worker, "process_handoff", slow)
         worker.schedule_handoffs()
+        assert len(worker.handoffs) == 1
+        claimed_id = next(iter(worker.handoffs))
+        claimed = core.db.execute("SELECT event_key,state FROM max_actions WHERE id=?", (claimed_id,)).fetchone()
+        assert tuple(claimed) == ("space2", "handoff_processing")
+        assert core.db.execute("SELECT state FROM max_actions WHERE event_key='space1-old'").fetchone()[0] == "handoff"
+        assert core.db.execute("SELECT state FROM max_actions WHERE event_key='space1-new'").fetchone()[0] == "handoff"
         await asyncio.sleep(0)
-        assert started == ["space2"]  # newer space1 material cannot overtake the older backoff row
         gate.set()
         await asyncio.gather(*worker.handoffs.values())
         await adapter.http.aclose()
