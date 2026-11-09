@@ -727,7 +727,10 @@ class Max(core.Adapter):
                 row = spaces.queue_db().execute("SELECT attempts FROM max_inbox WHERE event_key=?", (source_key,)).fetchone()
                 show_progress = not row or row["attempts"] <= 1
             if show_progress:
-                progress_mid = _mid(await self.notify(uid, "Принято, готовлю пост…"))
+                try:
+                    progress_mid = _mid(await self.notify(uid, "Принято, готовлю пост…"))
+                except Exception:
+                    log.warning("не удалось показать служебное сообщение о начале обработки", exc_info=True)
         try:
             source_opts = {"source_key": source_key} if source_key else {}
             if len(media_atts) > 1:
