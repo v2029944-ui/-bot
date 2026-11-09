@@ -1,5 +1,3 @@
-import json
-
 import httpx
 from conftest import run
 from test_admin_menu_button import Api, make
