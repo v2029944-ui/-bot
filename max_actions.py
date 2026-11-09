@@ -121,9 +121,9 @@ class Worker:
         # Только первая команда каждого пользователя; тела всей очереди не нужны.
         now = time.time()
         rows = core.db.execute("""SELECT a.* FROM max_actions a JOIN (
-            SELECT MIN(id) AS id FROM max_actions
-            WHERE state='pending' AND next_try<=? GROUP BY uid
-            ) first ON first.id=a.id ORDER BY a.id LIMIT 8""", (now,)).fetchall()
+            SELECT MIN(id) AS id FROM max_actions WHERE state='pending' GROUP BY uid
+            ) first ON first.id=a.id
+            WHERE a.next_try<=? ORDER BY a.id LIMIT 8""", (now,)).fetchall()
         for row in rows:
             if len(self.active) >= 4 or core.SHUTTING_DOWN:
                 break
