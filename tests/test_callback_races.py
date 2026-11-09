@@ -100,7 +100,7 @@ def test_uneditable_old_buttons_do_not_starve_later_cleanup(monkeypatch):
     async def scenario():
         ad = make(Api())
         for i in range(21):
-            core.db.execute('INSERT INTO max_draft_ui VALUES(?,?,?)', (f'z{i:02}', 999999, 1))
+            core.db.execute('INSERT INTO max_draft_ui(mid,did,attempt) VALUES(?,?,?)', (f'z{i:02}', 999999, 1))
         core.db.commit()
         visited = []
 
