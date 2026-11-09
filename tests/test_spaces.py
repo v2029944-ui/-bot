@@ -342,6 +342,19 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             await actions.process_handoff(dict(frozen))
             waiting = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
             assert waiting["state"] == "handoff" and waiting["next_try"] > 0
+            assert spaces.settings_busy(b)
+            assert not spaces.settings_busy(a)
+
+            # Before workspace routing is frozen, the destination is not provable:
+            # settings of any workspace must wait until this ordered phase completes.
+            root.db.execute("""INSERT INTO max_actions(event_key,uid,payload,state,created)
+                               VALUES('unrouted-settings','44',?,'pending',?)""",
+                            (__import__("json").dumps({"_material_to_inbox": True, "_route_on_process": True,
+                                                       "message": {"sender": {"user_id": 44}}}), time.time()))
+            root.db.commit()
+            assert spaces.settings_busy(a) and spaces.settings_busy(b)
+            root.db.execute("DELETE FROM max_actions WHERE event_key='unrouted-settings'")
+            root.db.commit()
 
             # A later real callback may switch the user back to A while B's material
             # is waiting for handoff. It must not be blocked and must not re-route the photo.
