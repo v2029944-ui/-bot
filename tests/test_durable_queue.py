@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import core
 import max_
 import max_actions
 import max_queue
+import spaces
 
 
 def event(mid="message-1", count=1):
@@ -157,6 +159,12 @@ def test_failure_limit_admin_retry_and_seven_day_cleanup(adapter, llm):
     assert inbox(key)["state"] == "pending" and inbox(key)["attempts"] == 0
     run(worker.process_once(now + 8 * 86400))
     assert inbox(key)["state"] == "expired" and not inbox(key)["payload"]
+    failure = core.db.execute("SELECT * FROM max_handoff_failures WHERE event_key=?", (key,)).fetchone()
+    assert failure["uid"] == "9" and failure["source_mid"] == "message-1"
+    assert "max_inbox" in failure["reason"]
+    notices = core.db.execute(
+        "SELECT kind,uid,state FROM max_handoff_notices WHERE event_key=? ORDER BY kind,uid", (key,)).fetchall()
+    assert [tuple(row) for row in notices] == [("staff", "5", "pending"), ("user", "9", "pending")]
     assert not max_queue.cache_dir(key).exists()
 
 
@@ -218,3 +226,93 @@ def test_polling_persists_callback_before_following_material(adapter, monkeypatc
     monkeypatch.setattr(adapter, "call", call)
     with pytest.raises(asyncio.CancelledError):
         run(adapter.run())
+
+
+def test_expiry_keeps_payload_if_durable_failure_staging_fails(adapter, monkeypatch):
+    key = max_queue.enqueue(event(mid="expiry-atomic"))
+    original = inbox(key)["payload"]
+    core.db.execute("UPDATE max_inbox SET created=?,state='failed' WHERE event_key=?",
+                    (time.time() - 8 * 86400, key))
+    core.db.commit()
+
+    def fail_stage(_adapter, event_key, uid, source_mid, sid, created, attempts, reason, **kwargs):
+        db = kwargs["db"]
+        db.execute("""INSERT INTO max_handoff_failures
+                      (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                      VALUES(?,?,?,?,?,?,?,?)""",
+                   (event_key, uid, source_mid, sid, created, time.time(), attempts, reason))
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(max_actions, "stage_material_failure", fail_stage)
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        run(max_queue.Worker(adapter).process_once())
+    row = inbox(key)
+    assert row["state"] == "failed" and row["payload"] == original
+    assert not core.db.execute("SELECT 1 FROM max_handoff_failures WHERE event_key=?", (key,)).fetchone()
+
+
+def test_corrupt_payload_is_quarantined_without_blocking_next_material(adapter, llm):
+    bad = max_queue.enqueue(event(mid="corrupt"))
+    good = max_queue.enqueue(event(mid="good"))
+    created = time.time()
+    core.db.execute("UPDATE max_inbox SET payload=?,created=? WHERE event_key=?",
+                    ("{broken-json", created - 1, bad))
+    core.db.execute("UPDATE max_inbox SET created=? WHERE event_key=?", (created, good))
+    core.db.commit()
+
+    worker = max_queue.Worker(adapter)
+    assert run(worker.process_once(created))
+    bad_row = inbox(bad)
+    assert bad_row["state"] == "quarantined"
+    assert bad_row["payload"] == "{broken-json"
+    assert "Повреждён payload" in bad_row["error"]
+
+    assert run(worker.process_once(created + 1))
+    assert inbox(good)["state"] == "done"
+    assert core.db.execute(
+        "SELECT COUNT(*) FROM max_handoff_notices WHERE event_key=? AND state='pending'", (bad,)
+    ).fetchone()[0] == 1
+
+    run(worker.process_once(created + max_queue.QUARANTINE_RETENTION_SEC + 2))
+    assert inbox(bad)["state"] == "quarantined"
+    assert inbox(bad)["payload"] == ""
+
+
+def test_terminal_handoff_rolls_back_if_notice_write_fails(adapter, monkeypatch):
+    now = time.time()
+    payload = '{"message":{"_space":0,"body":{"mid":"terminal-mid"}},"_material_to_inbox":true}'
+    core.db.execute("""INSERT INTO max_actions(event_key,uid,payload,state,created,attempts,space_id)
+                       VALUES('terminal-rollback','9',?,'handoff_processing',?,6,0)""",
+                    (payload, now - 8 * 86400))
+    core.db.commit()
+    row = dict(core.db.execute("SELECT * FROM max_actions WHERE event_key='terminal-rollback'").fetchone())
+
+    def fail_notice(*args, **kwargs):
+        raise sqlite3.OperationalError("notice write failed")
+
+    monkeypatch.setattr(max_actions, "stage_notice", fail_notice)
+    worker = max_actions.Worker(adapter)
+    with pytest.raises(sqlite3.OperationalError, match="notice write failed"):
+        worker._terminal_handoff(
+            row, {"message": {"_space": 0, "body": {"mid": "terminal-mid"}}},
+            7, now, "terminal failure")
+    after = core.db.execute(
+        "SELECT state,payload,attempts FROM max_actions WHERE event_key='terminal-rollback'").fetchone()
+    assert tuple(after) == ("handoff_processing", payload, 6)
+    assert not core.db.execute(
+        "SELECT 1 FROM max_handoff_failures WHERE event_key='terminal-rollback'").fetchone()
+
+
+def test_material_failure_recipient_resolution_falls_back_before_transaction(adapter, monkeypatch):
+    adapter.global_admins = ["5"]
+
+    def broken_space(_sid):
+        assert not core.db.in_transaction
+        raise sqlite3.OperationalError("workspace unavailable")
+
+    monkeypatch.setattr(spaces, "INSTALLED", True)
+    monkeypatch.setattr(spaces, "get", broken_space)
+    monkeypatch.setattr(spaces, "root", lambda: types.SimpleNamespace(adapters={"max": adapter}))
+    kind, recipients = max_actions.material_failure_recipients(adapter, 77)
+    assert kind == "global_staff"
+    assert recipients == ["5"]

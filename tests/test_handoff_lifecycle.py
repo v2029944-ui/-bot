@@ -66,7 +66,7 @@ def test_status_shows_handoff_failures_and_notice_problems(monkeypatch):
         core.db.commit()
 
         text = await core.status_text(adapter, include_global=False)
-        assert "Материалов потеряно до очереди обработки: 1" in text
+        assert "Материалов с terminal failure/истечением: 1" in text
         assert "пользователь 9" in text and "mid m9" in text
         assert "Не завершены предупреждения" in text
 
