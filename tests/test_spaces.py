@@ -198,11 +198,32 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             root.db.commit()
             max_actions.recover()
             actions = max_actions.Worker(root_max)
-            for row in root.db.execute("SELECT * FROM max_actions WHERE state='pending' ORDER BY id").fetchall():
-                await actions.process(row)
+            ordered = root.db.execute("SELECT * FROM max_actions WHERE state='pending' ORDER BY id").fetchall()
+            callback_row = next(row for row in ordered if "rapid-switch" in row["payload"])
+            material_row = next(row for row in ordered if "rapid-photo" in row["payload"])
+            await actions.process(callback_row)
+            assert spaces.for_user("33") == bid
+
+            original_enqueue = max_queue.enqueue
+
+            def fail_handoff(_update):
+                raise RuntimeError("temporary inbox failure")
+
+            monkeypatch.setattr(max_queue, "enqueue", fail_handoff)
+            await actions.process(material_row)
+            frozen = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
+            assert __import__("json").loads(frozen["payload"])["message"]["_space"] == bid
+            assert frozen["state"] == "pending" and frozen["next_try"] > 0
+
+            # Even if routing changes while the material waits, retry must use the
+            # workspace frozen at its ordered position before the crash/failure.
+            root.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", ("33", aid))
+            root.db.execute("UPDATE max_actions SET next_try=0 WHERE id=?", (material_row["id"],))
+            root.db.commit()
+            monkeypatch.setattr(max_queue, "enqueue", original_enqueue)
+            await actions.process(root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone())
             routed = root.db.execute("SELECT space_id FROM max_inbox WHERE payload LIKE '%rapid-photo%'").fetchone()
             assert routed and routed["space_id"] == bid
-            assert spaces.for_user("33") == bid
 
             await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "edit", "user": {"user_id": 33},
                                   "payload": f"w:{bid}:d:edit:2:1"}})
