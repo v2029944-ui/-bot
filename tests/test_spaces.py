@@ -209,19 +209,27 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             def fail_handoff(_update):
                 raise RuntimeError("temporary inbox failure")
 
-            monkeypatch.setattr(max_queue, "enqueue", fail_handoff)
-            await actions.process(material_row)
+            root.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (material_row["id"],))
+            root.db.commit()
+            await actions.process(dict(material_row))
             frozen = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
             assert __import__("json").loads(frozen["payload"])["message"]["_space"] == bid
-            assert frozen["state"] == "pending" and frozen["next_try"] > 0
+            assert frozen["state"] == "handoff" and frozen["space_id"] == bid
 
-            # Even if routing changes while the material waits, retry must use the
-            # workspace frozen at its ordered position before the crash/failure.
+            monkeypatch.setattr(max_queue, "enqueue", fail_handoff)
+            root.db.execute("UPDATE max_actions SET state='handoff_processing' WHERE id=?", (material_row["id"],))
+            root.db.commit()
+            await actions.process_handoff(dict(frozen))
+            waiting = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
+            assert waiting["state"] == "handoff" and waiting["next_try"] > 0
+
+            # Later commands may proceed while handoff retries, but this material
+            # remains bound to the workspace selected at its ordered position.
             root.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", ("33", aid))
-            root.db.execute("UPDATE max_actions SET next_try=0 WHERE id=?", (material_row["id"],))
+            root.db.execute("UPDATE max_actions SET next_try=0,state='handoff_processing' WHERE id=?", (material_row["id"],))
             root.db.commit()
             monkeypatch.setattr(max_queue, "enqueue", original_enqueue)
-            await actions.process(root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone())
+            await actions.process_handoff(dict(root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()))
             routed = root.db.execute("SELECT space_id FROM max_inbox WHERE payload LIKE '%rapid-photo%'").fetchone()
             assert routed and routed["space_id"] == bid
 
