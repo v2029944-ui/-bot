@@ -105,7 +105,7 @@ async def _complete(system: str, text: str, b64: str | None = None) -> str:
 
 
 async def _claude(system: str, text: str, b64: str | None) -> str:
-    from anthropic import AsyncAnthropic
+    from anthropic import APITimeoutError, AsyncAnthropic
     core._client = core._client or AsyncAnthropic(max_retries=0)  # durable queue owns automatic retries
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
@@ -113,14 +113,8 @@ async def _claude(system: str, text: str, b64: str | None) -> str:
     try:
         r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
                                           messages=[{"role": "user", "content": content}])
-    except Exception as exc:
-        try:
-            from anthropic import APITimeoutError
-        except ImportError:
-            APITimeoutError = ()  # type: ignore[assignment,misc]
-        if APITimeoutError and isinstance(exc, APITimeoutError):
-            raise core.AmbiguousGeneration("Таймаут нейросети: результат запроса неизвестен. Автоматический повтор остановлен.") from exc
-        raise
+    except APITimeoutError as exc:
+        raise core.AmbiguousGeneration("Таймаут нейросети: результат запроса неизвестен. Автоматический повтор остановлен.") from exc
     if getattr(r, "stop_reason", None) in ("max_tokens", "model_context_window_exceeded", "pause_turn"):
         raise core.IncompleteGeneration("Ответ нейросети оборван до завершения. Повторите генерацию вручную или сократите описание.")
     # первым блоком может прийти не текст: собираем все текстовые
