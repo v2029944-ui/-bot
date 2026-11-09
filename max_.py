@@ -680,11 +680,18 @@ class Max(core.Adapter):
                 # MAX считает события подтверждёнными при следующем запросе с marker.
                 # Медиа сначала фиксируются в постоянной очереди; остальные события
                 # обрабатываются здесь. Ошибка записи в БД не подтверждает пакет.
-                batch = [asyncio.create_task(core._guard(self._handle_limited(u)))
-                         for u in data.get("updates", [])]
+                batch = []
+                for update in data.get("updates", []):
+                    if self._durable_user_update(update):
+                        # Preserve MAX order before acknowledging the batch. These calls only
+                        # persist events; expensive work happens later in durable workers.
+                        await self._handle_limited(update)
+                    else:
+                        batch.append(asyncio.create_task(core._guard(self._handle_limited(update))))
                 self._tasks.update(batch)
                 try:
-                    await asyncio.gather(*batch)
+                    if batch:
+                        await asyncio.gather(*batch)
                 finally:
                     self._tasks.difference_update(batch)
                 marker = data.get("marker", marker)
@@ -710,6 +717,12 @@ class Max(core.Adapter):
                 log.exception("polling error")
                 await asyncio.sleep(3)
 
+    @staticmethod
+    def _durable_user_update(update):
+        return (max_queue.is_material(update)
+                or update.get("update_type") == "message_callback"
+                or bool(((update.get("message") or {}).get("body") or {}).get("text")))
+
     async def _handle_limited(self, update):
         async with self._processing:
             if os.getenv("MAX_LOG_UPDATES") == "1":
@@ -721,8 +734,10 @@ class Max(core.Adapter):
                          update.get("update_type"), bool(sender.get("user_id")), bool(body.get("text")),
                          [a.get("type") for a in (body.get("attachments") or [])])
             if max_queue.is_material(update):
-                update = spaces.stamp(update)
-                max_queue.enqueue(update)
+                # Material must observe preceding workspace/navigation callbacks from the
+                # same user before choosing _space. Persist it in the same per-user queue
+                # first, then transfer to max_inbox after routing is resolved.
+                max_actions.enqueue({**update, "_route_on_process": True, "_material_to_inbox": True})
             elif update.get("update_type") == "message_callback" or ((update.get("message") or {}).get("body") or {}).get("text"):
                 # Текст маршрутизируем после предыдущих команд этого человека:
                 # нажатие «Править» могло ещё не успеть открыть ожидание ввода.
