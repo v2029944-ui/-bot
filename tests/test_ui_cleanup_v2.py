@@ -188,3 +188,50 @@ def test_stale_scan_respects_cleanup_backoff(monkeypatch):
         await ad.http.aclose()
 
     run(scenario())
+
+
+def test_partial_comparison_delivery_does_not_retire_previous_version(monkeypatch, png, llm):
+    async def scenario():
+        api = Api()
+        ad = make(api)
+        core.ADAPTERS["max"] = ad
+        ad.allowed = {"9"}
+
+        async def upload(path):
+            return "photo-token"
+
+        monkeypatch.setattr(ad, "_upload_image", upload)
+        did = await core.submit(ad, "9", "Author", "Description", png)
+        first_mid = f"m{api.n}"
+
+        options = [
+            {"model": "one", "post": "Option one"},
+            {"model": "two", "post": "Option two"},
+        ]
+        core._set(did, attempts=2, candidates=__import__("json").dumps(options), post="Option one")
+
+        original_send = ad._send
+        calls = 0
+
+        async def flaky_send(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second option failed")
+            return await original_send(*args, **kwargs)
+
+        monkeypatch.setattr(ad, "_send", flaky_send)
+        try:
+            await ad.send_for_approval("9", did, core.get(did)["photo"], core.get(did)["post"])
+        except RuntimeError as exc:
+            assert "second option failed" in str(exc)
+        else:
+            raise AssertionError("comparison delivery must fail")
+
+        assert core.db.execute(
+            "SELECT 1 FROM max_draft_recipient WHERE mid=? AND uid='9'", (first_mid,)).fetchone()
+        assert not core.db.execute(
+            "SELECT 1 FROM max_ui_cleanup WHERE op='delete' AND mid=?", (first_mid,)).fetchone()
+        await ad.http.aclose()
+
+    run(scenario())
