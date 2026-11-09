@@ -27,6 +27,7 @@ def _tg_len(s: str) -> int:
 class Telegram(core.Adapter):
     name = "tg"
     publish_only = True
+    supports_publish_resume = True
 
     def __init__(self, token, channel):
         self.bot = Bot(token)
@@ -57,26 +58,49 @@ class Telegram(core.Adapter):
                    TelegramUnauthorizedError, TelegramRetryAfter, TelegramEntityTooLarge)
         return isinstance(e, refused) and not getattr(e, "partial", False)
 
-    async def publish(self, photo, post, video=None, media=None):
+    async def publish(self, photo, post, video=None, media=None, resume=None, progress=None):
         ch: str | int = self.channel
         if self.channel.startswith("user:"):       # пост в личку конкретному человеку
             ch = int(self.channel.split(":", 1)[1])
         elif self.channel.lstrip("-").isdigit():   # id пользователя, группы или канала
             ch = int(ch)
+        resume = resume or {}
+        progress = progress or (lambda stage: None)
+        formatting: dict[str, Any] = {"parse_mode": "HTML"} if isinstance(post, post_footer.LinkedPost) else {}
+        short = _tg_len(post) <= CAPTION_LIMIT
+
         if media:
-            formatting: dict[str, Any] = {"parse_mode": "HTML"} if isinstance(post, post_footer.LinkedPost) else {}
             group: list[Any] = []
-            short = _tg_len(post) <= CAPTION_LIMIT
             for i, item in enumerate(media):
                 cls = InputMediaVideo if item["type"] == "video" else InputMediaPhoto
                 kw: dict[str, Any] = {"supports_streaming": True} if item["type"] == "video" else {}
                 group.append(cls(media=FSInputFile(item["path"]), caption=post if i == 0 and short else None, **kw, **formatting))
-            await self.bot.send_media_group(chat_id=ch, media=group)
-            if not short:
-                try:
-                    await self.bot.send_message(ch, post, **formatting)
-                except Exception as e:
-                    setattr(e, "partial", True)
-                    raise
-        else:
+            if short:
+                await self.bot.send_media_group(chat_id=ch, media=group)
+                return
+            if not resume.get("media"):
+                await self.bot.send_media_group(chat_id=ch, media=group)
+                progress("media")
+            try:
+                await self.bot.send_message(ch, post, **formatting)
+                progress("text")
+            except Exception as e:
+                setattr(e, "partial", True)
+                raise
+            return
+
+        if short:
             await self._send(ch, photo, post, track=True, video=video)
+            return
+
+        send = self.bot.send_video if video else self.bot.send_photo
+        extra: dict[str, Any] = {"supports_streaming": True} if video else {}
+        if not resume.get("media"):
+            await send(ch, FSInputFile(video or photo), **extra)
+            progress("media")
+        try:
+            await self.bot.send_message(ch, post, **formatting)
+            progress("text")
+        except Exception as e:
+            setattr(e, "partial", True)
+            raise
