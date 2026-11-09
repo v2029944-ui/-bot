@@ -213,6 +213,7 @@ def repos(tmp_path):
     git(origin, "init", "-q", "-b", "main")
     (origin / "main.py").write_text("print('v1')\n")
     (origin / "requirements.txt").write_text("httpx\n")
+    (origin / "compatibility.json").write_text(json.dumps({"read_versions": [1], "write_version": 1}))
     git(origin, "add", "."), git(origin, "commit", "-qm", "первая версия")
     code = tmp_path / "code"
     git(tmp_path, "clone", "-q", str(origin), str(code))
@@ -277,6 +278,47 @@ def test_updater_rollback_restores_previous_version(repos, tmp_path):
     r = run_updater(code, data, "true", "--rollback")
     assert r["status"] == "rolled_back" and (code / "main.py").read_text() == "print('v1')\n"
     assert json.loads((data / "update_state.json").read_text())["status"] == "rolled_back"
+
+
+def test_updater_v2_migration_is_bound_to_executable_and_rollback(repos, tmp_path):
+    origin, code = repos
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "update_request.json").write_text(json.dumps({"platform": "max", "uid": "1"}))
+
+    # Candidate writes v2. The legacy updater contract from the previous image
+    # required strict bidirectional readability and therefore must reject it.
+    (origin / "main.py").write_text("print('v2')\n")
+    (origin / "compatibility.json").write_text(json.dumps({"read_versions": [1, 2], "write_version": 2}))
+    git(origin, "add", "."), git(origin, "commit", "-qm", "handoff v2")
+    old_meta = json.loads((code / "compatibility.json").read_text())
+    new_meta = json.loads((origin / "compatibility.json").read_text())
+    legacy_accepts = (old_meta["write_version"] in new_meta["read_versions"]
+                      and new_meta["write_version"] in old_meta["read_versions"])
+    assert not legacy_accepts
+
+    # Current updater is allowed to cross the boundary because its own executable
+    # contains the concrete 2 -> 1 data migration.
+    result = run_updater(code, data, "true")
+    assert result["status"] == "ok"
+    state = json.loads((data / "update_state.json").read_text())
+    assert (state["prev_data_version"], state["new_data_version"]) == (1, 2)
+
+    db = sqlite3.connect(data / "drafts.db")
+    db.execute("CREATE TABLE max_actions(id INTEGER PRIMARY KEY,state TEXT,payload TEXT)")
+    db.execute("""INSERT INTO max_actions VALUES
+                  (1,'handoff','{"message":{"_space":7},"_material_to_inbox":true}')""")
+    db.commit()
+    db.close()
+
+    rolled = run_updater(code, data, "true", "--rollback")
+    assert rolled["status"] == "rolled_back"
+    assert json.loads((code / "compatibility.json").read_text()) == {"read_versions": [1], "write_version": 1}
+    db = sqlite3.connect(data / "drafts.db")
+    row = db.execute("SELECT state,payload FROM max_actions WHERE id=1").fetchone()
+    db.close()
+    assert row[0] == "pending"
+    assert '"_space":7' in row[1] and '"_material_to_inbox":true' in row[1]
 
 
 def test_bot_side_update_flow(repos, tmp_path, monkeypatch):
