@@ -286,6 +286,7 @@ def test_interrupted_notice_becomes_unknown_not_automatic_retry():
 
 def test_handoff_backoff_preserves_workspace_material_order(monkeypatch):
     async def scenario():
+        core.SHUTTING_DOWN = False
         adapter = make(Api())
         now = __import__("time").time()
         payload = __import__("json").dumps({"message": {"_space": 1}, "_material_to_inbox": True})
