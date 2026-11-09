@@ -177,7 +177,7 @@ def update():
             command = [sys.executable, "-m", "pip", "install", "-q", "--target", str(libs), "-r", req]
             if req.endswith(".lock"):
                 command.append("--require-hashes")
-            rc, out = run(command, wt, 900)
+            rc, out = run(command, wt, 900, candidate_test_env(str(wt), tmp / "data"), clean_env=True)
             if rc:
                 return finish("failed", who, detail="не удалось установить библиотеки: " + out[-300:], commit=short())
             pypath = os.pathsep.join([str(wt), str(libs)])
