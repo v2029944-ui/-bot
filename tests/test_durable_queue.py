@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import core
 import max_
 import max_actions
 import max_queue
+import spaces
 
 
 def event(mid="message-1", count=1):
@@ -302,9 +304,6 @@ def test_terminal_handoff_rolls_back_if_notice_write_fails(adapter, monkeypatch)
 
 
 def test_material_failure_recipient_resolution_falls_back_before_transaction(adapter, monkeypatch):
-    import types
-    import spaces
-
     adapter.global_admins = ["5"]
 
     def broken_space(_sid):
