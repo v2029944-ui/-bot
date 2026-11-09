@@ -74,6 +74,7 @@ class Worker:
             task.exception()
 
     async def process(self, row):
+        material_transfer = False
         try:
             update = json.loads(row["payload"])
             material_transfer = bool(update.pop("_material_to_inbox", False))
@@ -103,7 +104,23 @@ class Worker:
             core.db.execute("UPDATE max_actions SET state='pending' WHERE id=? AND state='processing'", (row["id"],))
             core.db.commit()
             raise
-        except Exception:
+        except Exception as exc:
+            if material_transfer:
+                # Workspace is not frozen yet, so ordering must remain blocked until
+                # routing succeeds. This phase has no external side effect for media
+                # and is safe to retry with backoff without losing the payload.
+                now = time.time()
+                attempt = int(row["attempts"] or 0) + 1
+                if now - float(row["created"] or now) >= 7 * 86400:
+                    self._terminal_handoff(row, update if 'update' in locals() else {}, attempt, now, core.err(exc))
+                    return
+                delay = min(30 * 2 ** min(attempt - 1, 7), 3600)
+                core.db.execute("""UPDATE max_actions SET state='pending',attempts=?,next_try=?
+                                   WHERE id=?""", (attempt, now + delay, row["id"]))
+                core.db.commit()
+                logging.getLogger("max_actions").exception(
+                    "не удалось определить workspace материала %s; повтор через %.0f с", row["id"], delay)
+                return
             # Unknown side effects of ordinary commands are never replayed automatically.
             core.db.execute("UPDATE max_actions SET state='failed',payload='' WHERE id=?", (row["id"],))
             core.db.commit()
@@ -218,9 +235,11 @@ class Worker:
 
     def schedule(self):
         self.active = {uid: task for uid, task in self.active.items() if not task.done()}
+        now = time.time()
         rows = core.db.execute("""SELECT a.* FROM max_actions a JOIN (
             SELECT MIN(id) AS id FROM max_actions WHERE state='pending' GROUP BY uid
-            ) first ON first.id=a.id ORDER BY a.id LIMIT 8""").fetchall()
+            ) first ON first.id=a.id
+            WHERE a.next_try<=? ORDER BY a.id LIMIT 8""", (now,)).fetchall()
         for row in rows:
             if len(self.active) >= 4 or core.SHUTTING_DOWN:
                 break
