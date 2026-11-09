@@ -43,10 +43,11 @@ def test_new_models_use_max_completion_tokens(monkeypatch):
     assert "max_completion_tokens" in sent[1] and "max_tokens" not in sent[1]
 
 
-def test_temporary_errors_are_retried(monkeypatch):
-    mock_http(monkeypatch, [httpx.Response(429, text="slow"), httpx.Response(503, text="down"),
-                            httpx.Response(200, json=OK)])
-    assert run(core._openai("s", "t", None)) == "Пост"
+def test_temporary_errors_are_left_to_durable_queue(monkeypatch):
+    sent = mock_http(monkeypatch, [httpx.Response(429, text="slow")])
+    with pytest.raises(RuntimeError, match="429"):
+        run(core._openai("s", "t", None))
+    assert len(sent) == 1
 
 
 @pytest.mark.parametrize("response, expected", [
