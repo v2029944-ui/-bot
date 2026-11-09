@@ -1,6 +1,7 @@
 """MAX-адаптер на прямых запросах к официальному Bot API (https://dev.max.ru/docs-api)."""
 import asyncio
 import contextvars
+import hashlib
 import html
 import json
 import logging
@@ -370,8 +371,13 @@ class Max(core.Adapter):
                     continue
                 if not refreshed and i < tries - 1 and e.response.status_code in (400, 404, 422) and "attachment" in e.response.text.lower() and "not.ready" not in e.response.text and upload_items:
                     refreshed = True
-                    for index, item in enumerate(upload_items):
-                        attachments[index]["payload"]["token"] = await self._cached_upload(item["path"], item["type"], force=True)
+                    try:
+                        for index, item in enumerate(upload_items):
+                            attachments[index]["payload"]["token"] = await self._cached_upload(item["path"], item["type"], force=True)
+                    except Exception as exc:
+                        # The preceding POST /messages was explicitly rejected.
+                        setattr(exc, "max_not_sent", True)
+                        raise
                     continue
                 raise
         mid = _mid(resp)
@@ -540,8 +546,10 @@ class Max(core.Adapter):
                 body = message.get("body") or {}
                 callback = update.get("callback") or {}
                 sender = message.get("sender") or callback.get("user") or update.get("user") or {}
-                log.info("MAX update type=%s uid=%s mid=%s attachments=%s",
-                         update.get("update_type"), sender.get("user_id"), body.get("mid"),
+                uid = sender.get("user_id")
+                uid_tag = hashlib.sha256(str(uid).encode()).hexdigest()[:10] if uid is not None else "-"
+                log.info("MAX update type=%s uid_hash=%s mid=%s attachments=%s",
+                         update.get("update_type"), uid_tag, body.get("mid"),
                          [a.get("type") for a in (body.get("attachments") or [])])
             if max_queue.is_material(update):
                 update = spaces.stamp(update)
