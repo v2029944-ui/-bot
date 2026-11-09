@@ -105,7 +105,7 @@ async def _complete(system: str, text: str, b64: str | None = None) -> str:
 
 
 async def _claude(system: str, text: str, b64: str | None) -> str:
-    from anthropic import APITimeoutError, AsyncAnthropic
+    from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
     core._client = core._client or AsyncAnthropic(max_retries=0)  # durable queue owns automatic retries
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
@@ -115,6 +115,17 @@ async def _claude(system: str, text: str, b64: str | None) -> str:
                                           messages=[{"role": "user", "content": content}])
     except APITimeoutError as exc:
         raise core.AmbiguousGeneration("Таймаут нейросети: результат запроса неизвестен. Автоматический повтор остановлен.") from exc
+    except APIStatusError as exc:
+        if exc.status_code == 429:
+            raise RuntimeError("Нейросеть временно ограничила запросы (429).") from exc
+        if 400 <= exc.status_code < 500:
+            raise core.PermanentGeneration(f"Нейросеть отклонила запрос ({exc.status_code}). Проверьте ключ, модель и настройки.") from exc
+        raise core.AmbiguousGeneration(
+            f"Нейросеть вернула серверную ошибку {exc.status_code}; результат и оплата неизвестны. "
+            "Автоматический повтор остановлен.") from exc
+    except APIConnectionError as exc:
+        raise core.AmbiguousGeneration(
+            "Соединение с нейросетью оборвалось; результат запроса неизвестен. Автоматический повтор остановлен.") from exc
     if getattr(r, "stop_reason", None) in ("max_tokens", "model_context_window_exceeded", "pause_turn"):
         raise core.IncompleteGeneration("Ответ нейросети оборван до завершения. Повторите генерацию вручную или сократите описание.")
     # первым блоком может прийти не текст: собираем все текстовые
@@ -151,7 +162,13 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
             # queue owns backoff/retry, avoiding multiplicative paid requests.
             break
     if r.status_code >= 400:
-        raise RuntimeError(f"Нейросеть вернула {r.status_code}: {r.text[:200]}")
+        detail = r.text[:200]
+        if r.status_code == 429:
+            raise RuntimeError(f"Нейросеть временно ограничила запросы (429): {detail}")
+        if 400 <= r.status_code < 500 and r.status_code != 408:
+            raise core.PermanentGeneration(f"Нейросеть отклонила запрос ({r.status_code}): {detail}")
+        raise core.AmbiguousGeneration(
+            f"Нейросеть вернула {r.status_code}; результат и оплата неизвестны. Автоматический повтор остановлен.")
     choice = (r.json().get("choices") or [{}])[0]
     if choice.get("finish_reason") == "length":
         raise core.IncompleteGeneration("Ответ нейросети оборван по лимиту токенов. Повторите генерацию вручную или сократите описание.")
