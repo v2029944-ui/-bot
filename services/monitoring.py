@@ -159,6 +159,16 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
     day = one("SELECT COUNT(*) FROM drafts WHERE created > ?", now - 86400)
     pub7 = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND published_at > ?", now - 7 * 86400)
     undated = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND COALESCE(published_at,0)=0")
+    root_db = spaces.root().db if spaces.INSTALLED else core.db
+    sid = spaces.active_id()
+    handoff_where, handoff_args = ("", ()) if include_global else (" WHERE space_id=?", (sid,))
+    handoff_failed = root_db.execute(
+        "SELECT COUNT(*) FROM max_handoff_failures" + handoff_where, handoff_args).fetchone()[0]
+    notice_where = "" if include_global else " AND space_id=?"
+    notice_args = () if include_global else (sid,)
+    notice_issues = root_db.execute(
+        "SELECT COUNT(*) FROM max_handoff_notices WHERE state IN ('pending','unknown','failed')" + notice_where,
+        notice_args).fetchone()[0]
     async def check_llm():
         try:
             await asyncio.wait_for(core._complete("Отвечай одним словом.", "Ответь: ОК"), 30)
@@ -185,6 +195,17 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
         lines.append(f"⚠️ Зависших черновиков: {stuck} (после перезапуска вернутся в работу)")
     if undated:
         lines.append(f"У {undated} старых публикаций дата отправки неизвестна; они не включены в недельную статистику.")
+    if handoff_failed:
+        lines.append(f"⚠️ Материалов потеряно до очереди обработки: {handoff_failed}.")
+        latest = root_db.execute(
+            "SELECT uid,source_mid,space_id,attempts,reason FROM max_handoff_failures"
+            + handoff_where + " ORDER BY failed_at DESC LIMIT 3", handoff_args).fetchall()
+        for row in latest:
+            space = f" · пространство {row['space_id']}" if include_global else ""
+            lines.append(f"• пользователь {row['uid']}{space} · mid {row['source_mid'] or '—'} · "
+                         f"{row['attempts']} попыток · {row['reason'][:100]}")
+    if notice_issues:
+        lines.append(f"⚠️ Не завершены предупреждения о потерянных материалах: {notice_issues}.")
     if balance:
         lines.append(balance)
     lines.append(f"Свободно на диске: {free}")

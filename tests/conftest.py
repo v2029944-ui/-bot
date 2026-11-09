@@ -95,7 +95,7 @@ def clean_state(monkeypatch):
     """Каждый тест начинает с чистой базы и чистой памяти бота."""
     core.db.execute("DELETE FROM drafts")
     core.db.execute("DELETE FROM rules")
-    for t in ("people", "requests", "settings", "prefs", "deferred", "max_inbox", "max_actions", "max_draft_ui", "max_draft_recipient", "max_approval_delivery", "max_notices", "max_ui_cleanup", "command_results", "rate_events"):
+    for t in ("people", "requests", "settings", "prefs", "deferred", "max_inbox", "max_actions", "max_handoff_failures", "max_handoff_notices", "max_draft_ui", "max_draft_recipient", "max_approval_delivery", "max_notices", "max_ui_cleanup", "command_results", "rate_events"):
         core.db.execute(f"DELETE FROM {t}")
     core.db.commit()
     for d in (core.WAITING, core._HITS, core._RL_ALERT, core._ALERT_LAST, core.ADAPTERS):
@@ -110,6 +110,7 @@ def clean_state(monkeypatch):
     core.spaces.WAITING_MEMBER.clear()
     core.shutil.rmtree(core.DATA / "inbox", ignore_errors=True)
     core.ops.RESTART_CODE = None
+    core.SHUTTING_DOWN = False
     for k in _settings_names():
         if k != "DATA_DIR":
             monkeypatch.delenv(k, raising=False)

@@ -56,6 +56,126 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             bid = root.db.execute("SELECT last_insert_rowid()").fetchone()[0]
             root.db.commit()
             a, b = spaces.get(aid), spaces.get(bid)
+
+            async def test_version():
+                return "test"
+            monkeypatch.setattr(ops, "version", test_version)
+            now = time.time()
+            root.db.execute("""INSERT INTO max_handoff_failures
+                               (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                               VALUES('ha','11','ma',?,?,?,?,?)""",
+                            (aid, now - 10, now, 4, "ошибка А"))
+            root.db.execute("""INSERT INTO max_handoff_failures
+                               (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                               VALUES('hb','22','mb',?,?,?,?,?)""",
+                            (bid, now - 10, now, 5, "ошибка Б"))
+            root.db.commit()
+            with spaces.enter(a):
+                status_a = await core.status_text(core.ADAPTERS["max"], include_global=False)
+                assert "ошибка А" in status_a and "ошибка Б" not in status_a
+            with spaces.enter(b):
+                status_b = await core.status_text(core.ADAPTERS["max"], include_global=False)
+                assert "ошибка Б" in status_b and "ошибка А" not in status_b
+            global_status = await core.status_text(root_max, include_global=True)
+            assert "ошибка А" in global_status and "ошибка Б" in global_status
+            root.db.execute("DELETE FROM max_handoff_failures")
+            root.db.commit()
+
+            # Durable staff notices re-check current workspace rights immediately
+            # before delivery. A removed administrator must not receive stale details.
+            with spaces.enter(b):
+                bmax = core.ADAPTERS["max"]
+                core._add_person(bmax, "55", "Временный администратор", "adm")
+                assert "55" in core.staff(bmax)
+            root.db.execute("""INSERT INTO max_handoff_notices
+                               (event_key,kind,uid,space_id,text,state,created)
+                               VALUES('revoked-staff','staff','55',?,'secret','sending',?)""",
+                            (bid, time.time()))
+            root.db.commit()
+            with spaces.enter(b):
+                bmax = core.ADAPTERS["max"]
+                core._remove_person(bmax, "55", "Временный администратор")
+                assert "55" not in core.staff(bmax)
+            before = len(calls)
+            notice = dict(root.db.execute(
+                "SELECT * FROM max_handoff_notices WHERE event_key='revoked-staff'").fetchone())
+            await max_actions.Worker(root_max).process_notice(notice)
+            skipped = root.db.execute(
+                "SELECT state,last_error FROM max_handoff_notices WHERE event_key='revoked-staff'").fetchone()
+            assert skipped["state"] == "skipped" and "отозваны" in skipped["last_error"]
+            assert len(calls) == before
+
+            # If the workspace cannot be opened, terminal diagnostics still persist
+            # and the warning is queued only for immutable global administrators.
+            original_get = spaces.get
+
+            def fail_space(value):
+                if value == bid:
+                    raise RuntimeError("workspace unavailable")
+                return original_get(value)
+
+            monkeypatch.setattr(spaces, "get", fail_space)
+            now = time.time()
+            root.db.execute("""INSERT INTO max_actions
+                               (event_key,uid,payload,state,created,attempts,next_try,space_id)
+                               VALUES('fallback-global','9','{}','handoff_processing',?,6,0,?)""",
+                            (now - 8 * 86400, bid))
+            action = dict(root.db.execute(
+                "SELECT * FROM max_actions WHERE event_key='fallback-global'").fetchone())
+            max_actions.Worker(root_max)._terminal_handoff(
+                action, {"message": {"_space": bid, "body": {"mid": "m-fallback"}}},
+                7, now, "workspace unavailable")
+            fallback = root.db.execute(
+                """SELECT kind,uid,space_id,state FROM max_handoff_notices
+                   WHERE event_key='fallback-global' ORDER BY kind,uid""").fetchall()
+            assert [tuple(row) for row in fallback] == [
+                ("global_staff", "1", bid, "pending"),
+                ("user", "9", bid, "pending"),
+            ]
+            assert not root.db.execute(
+                "SELECT 1 FROM max_handoff_notices WHERE event_key='fallback-global' AND uid='22'").fetchone()
+            monkeypatch.setattr(spaces, "get", original_get)
+
+            # Preparation failures happen before Max.notify(), so they are safe to
+            # retry. Once the workspace is available again the notice is sent once.
+            root.db.execute("""INSERT INTO max_handoff_notices
+                               (event_key,kind,uid,space_id,text,state,created)
+                               VALUES('prepare-retry','user','33',?,'retry-me','sending',?)""",
+                            (bid, time.time()))
+            root.db.commit()
+            original_get = spaces.get
+
+            def fail_prepare(value):
+                if value == bid:
+                    raise RuntimeError("workspace temporarily unavailable")
+                return original_get(value)
+
+            monkeypatch.setattr(spaces, "get", fail_prepare)
+            notice = dict(root.db.execute(
+                "SELECT * FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone())
+            before = len(calls)
+            notice_worker = max_actions.Worker(root_max)
+            await notice_worker.process_notice(notice)
+            pending = root.db.execute(
+                "SELECT state,attempts,next_try FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone()
+            assert pending["state"] == "pending" and pending["attempts"] == 1 and pending["next_try"] > time.time()
+            assert len(calls) == before
+
+            monkeypatch.setattr(spaces, "get", original_get)
+            root.db.execute(
+                "UPDATE max_handoff_notices SET state='sending',next_try=0 WHERE event_key='prepare-retry'")
+            root.db.commit()
+            notice = dict(root.db.execute(
+                "SELECT * FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone())
+            await notice_worker.process_notice(notice)
+            done = root.db.execute(
+                "SELECT state,attempts FROM max_handoff_notices WHERE event_key='prepare-retry'").fetchone()
+            assert done["state"] == "done" and done["attempts"] == 1
+            sent_retry = [kw for _, method, path, kw in calls[before:]
+                          if method == "POST" and path == "/messages"
+                          and kw.get("json", {}).get("text") == "retry-me"]
+            assert len(sent_retry) == 1
+
             for space, rule in [(a, "ТОЛЬКО_ПРАВИЛО_А"), (b, "ТОЛЬКО_ПРАВИЛО_Б")]:
                 with spaces.enter(space):
                     ad = core.ADAPTERS["max"]
@@ -209,19 +329,36 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             def fail_handoff(_update):
                 raise RuntimeError("temporary inbox failure")
 
-            monkeypatch.setattr(max_queue, "enqueue", fail_handoff)
-            await actions.process(material_row)
+            root.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (material_row["id"],))
+            root.db.commit()
+            await actions.process(dict(material_row))
             frozen = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
             assert __import__("json").loads(frozen["payload"])["message"]["_space"] == bid
-            assert frozen["state"] == "pending" and frozen["next_try"] > 0
+            assert frozen["state"] == "handoff" and frozen["space_id"] == bid
 
-            # Even if routing changes while the material waits, retry must use the
-            # workspace frozen at its ordered position before the crash/failure.
-            root.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", ("33", aid))
-            root.db.execute("UPDATE max_actions SET next_try=0 WHERE id=?", (material_row["id"],))
+            monkeypatch.setattr(max_queue, "enqueue", fail_handoff)
+            root.db.execute("UPDATE max_actions SET state='handoff_processing' WHERE id=?", (material_row["id"],))
+            root.db.commit()
+            await actions.process_handoff(dict(frozen))
+            waiting = root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()
+            assert waiting["state"] == "handoff" and waiting["next_try"] > 0
+
+            # A later real callback may switch the user back to A while B's material
+            # is waiting for handoff. It must not be blocked and must not re-route the photo.
+            switch_back = {"update_type": "message_callback", "callback": {
+                "callback_id": "rapid-switch-back", "user": {"user_id": 33}, "payload": f"w:{aid}:m:menu"}}
+            await root_max._handle_limited(switch_back)
+            back_row = root.db.execute(
+                "SELECT * FROM max_actions WHERE state='pending' AND payload LIKE '%rapid-switch-back%'").fetchone()
+            root.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (back_row["id"],))
+            root.db.commit()
+            await actions.process(dict(back_row))
+            assert spaces.for_user("33") == aid
+
+            root.db.execute("UPDATE max_actions SET next_try=0,state='handoff_processing' WHERE id=?", (material_row["id"],))
             root.db.commit()
             monkeypatch.setattr(max_queue, "enqueue", original_enqueue)
-            await actions.process(root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone())
+            await actions.process_handoff(dict(root.db.execute("SELECT * FROM max_actions WHERE id=?", (material_row["id"],)).fetchone()))
             routed = root.db.execute("SELECT space_id FROM max_inbox WHERE payload LIKE '%rapid-photo%'").fetchone()
             assert routed and routed["space_id"] == bid
 
