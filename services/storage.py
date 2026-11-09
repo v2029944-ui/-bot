@@ -64,7 +64,7 @@ def housekeeping() -> int:
     dialog_state.cleanup(core.db)
     now = time.time()
     core.db.execute("DELETE FROM requests WHERE created<?", (now - core.REQ_TTL,))
-    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - 3600,))
+    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - core.RATE_EVENT_TTL,))
     core.db.execute("DELETE FROM command_results WHERE created<?", (now - QUEUE_HISTORY_TTL,))
     core.db.execute("DELETE FROM max_inbox WHERE state IN ('done','expired') AND created<?", (now - QUEUE_HISTORY_TTL,))
     if core.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone():
