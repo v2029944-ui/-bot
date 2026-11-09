@@ -105,18 +105,22 @@ class Worker:
                 sid = int(row["space_id"] or message.get("_space") or 0)
                 reason = "Истёк семидневный срок обработки в max_inbox"
                 db = spaces.queue_db()
-                max_actions.stage_material_failure(
-                    self.adapter, row["event_key"], uid, mid, sid, row["created"], row["attempts"], reason,
-                    user_text=("⚠️ Материал не удалось обработать за 7 дней. Отправьте его заново." if uid else None),
-                    staff_text=(f"⚠️ Истёк срок обработки материала {row['event_key'][:8]}"
-                                f"{f' пользователя {uid}' if uid else ''}. "
-                                "Попросите отправить материал заново."),
-                    now=now, db=db)
-                changed = db.execute(
-                    """UPDATE max_inbox SET state='expired',payload='',error=?
-                       WHERE event_key=? AND state IN ('pending','failed')""",
-                    (reason, row["event_key"])).rowcount
-                db.commit()
+                try:
+                    max_actions.stage_material_failure(
+                        self.adapter, row["event_key"], uid, mid, sid, row["created"], row["attempts"], reason,
+                        user_text=("⚠️ Материал не удалось обработать за 7 дней. Отправьте его заново." if uid else None),
+                        staff_text=(f"⚠️ Истёк срок обработки материала {row['event_key'][:8]}"
+                                    f"{f' пользователя {uid}' if uid else ''}. "
+                                    "Попросите отправить материал заново."),
+                        now=now, db=db)
+                    changed = db.execute(
+                        """UPDATE max_inbox SET state='expired',payload='',error=?
+                           WHERE event_key=? AND state IN ('pending','failed')""",
+                        (reason, row["event_key"])).rowcount
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
                 if changed:
                     clear_cache(row["event_key"], sid)
         if core.SHUTTING_DOWN:
