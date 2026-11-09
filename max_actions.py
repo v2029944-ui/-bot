@@ -168,10 +168,11 @@ class Worker:
 
     def _queue_notice(self, event_key, kind, uid, sid, text, now=None):
         now = time.time() if now is None else now
-        core.db.execute("""INSERT OR IGNORE INTO max_handoff_notices
-                           (event_key,kind,uid,space_id,text,created)
-                           VALUES(?,?,?,?,?,?)""",
-                        (event_key, kind, str(uid or ""), int(sid or 0), text[:500], now))
+        db = spaces.queue_db()
+        db.execute("""INSERT OR IGNORE INTO max_handoff_notices
+                      (event_key,kind,uid,space_id,text,created)
+                      VALUES(?,?,?,?,?,?)""",
+                   (event_key, kind, str(uid or ""), int(sid or 0), text[:500], now))
 
     async def process_notice(self, row):
         try:
