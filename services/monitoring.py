@@ -196,7 +196,7 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
     if undated:
         lines.append(f"У {undated} старых публикаций дата отправки неизвестна; они не включены в недельную статистику.")
     if handoff_failed:
-        lines.append(f"⚠️ Материалов потеряно до очереди обработки: {handoff_failed}.")
+        lines.append(f"⚠️ Материалов с terminal failure/истечением: {handoff_failed}.")
         latest = root_db.execute(
             "SELECT uid,source_mid,space_id,attempts,reason FROM max_handoff_failures"
             + handoff_where + " ORDER BY failed_at DESC LIMIT 3", handoff_args).fetchall()
