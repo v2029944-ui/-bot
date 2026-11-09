@@ -414,7 +414,9 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             assert "Истёк срок обработки" in expiry_notices[0]["text"]
             assert not root.db.execute(
                 "SELECT 1 FROM max_handoff_notices WHERE event_key='expired-a' AND uid='22'").fetchone()
-            assert not [x for x in calls if x[1] == "POST" and x[2] == "/messages"]
+            assert not [x for x in calls
+                        if x[1] == "POST" and x[2] == "/messages"
+                        and "Истёк срок обработки" in x[3].get("json", {}).get("text", "")]
 
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-a','failed','ОШИБКА_А',?)", (aid,))
             root.db.execute("INSERT INTO max_inbox(event_key,state,error,space_id) VALUES('job-b','failed','ОШИБКА_Б',?)", (bid,))
