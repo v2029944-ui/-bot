@@ -36,6 +36,12 @@ def enqueue(update):
     core.db.commit()
 
 
+def recover():
+    """A process crash cannot leave per-user command ordering stuck in processing."""
+    core.db.execute("UPDATE max_actions SET state='pending' WHERE state='processing'")
+    core.db.commit()
+
+
 class Worker:
     name = "max_actions"
 
@@ -109,8 +115,7 @@ class Worker:
             self.active[row["uid"]].add_done_callback(self.finished)
 
     async def run(self):
-        core.db.execute("UPDATE max_actions SET state='pending' WHERE state='processing'")
-        core.db.commit()
+        recover()
         while not core.SHUTTING_DOWN:
             self.schedule()
             if (self.clean_requested or time.monotonic() - self.last_cleanup >= 30) and (self.clean_task is None or self.clean_task.done()):
