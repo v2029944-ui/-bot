@@ -166,3 +166,14 @@ def test_stale_seen_button_cannot_complete_known_partial_publication(mx, llm, pn
     ok, text = run(core.on_action(mx, "5", "seen_tg", did, 1))
     assert not ok and "текст точно не отправлен" in text
     assert core._parse_marks(core.get(did)["published_to"])["tg"] == "unknown"
+
+
+def test_housekeeping_keeps_command_result_for_pending_replay(monkeypatch):
+    monkeypatch.setenv("DRAFT_TTL_DAYS", "0")
+    old = time.time() - 31 * 86400
+    core.db.execute("INSERT INTO max_actions(event_key,uid,payload,state,created) VALUES('pending-old','1','{}','pending',?)", (old,))
+    core.db.execute("INSERT INTO command_results(event_key,operation,result,created) VALUES('pending-old','mutation','null',?)", (old,))
+    core.db.commit()
+    core.housekeeping()
+    assert core.db.execute(
+        "SELECT 1 FROM command_results WHERE event_key='pending-old' AND operation='mutation'").fetchone()
