@@ -49,6 +49,17 @@ class _RateGate:
                 await asyncio.sleep(max(0.001, self.period - (now - self._times[0])))
 
 
+class _RateRegistry:
+    def __init__(self):
+        self.api = _RateGate(30)
+        self.answers: dict[str, _RateGate] = {}
+        self.message_mutation = _RateGate(2)
+        self.messages: dict[str, _RateGate] = {}
+
+
+_RATE_LOOPS = weakref.WeakKeyDictionary()
+
+
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_notices (mid TEXT PRIMARY KEY, uid TEXT, remaining INTEGER)")
@@ -98,10 +109,7 @@ class Max(core.Adapter):
         self._send_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._upload_cache = {}
         self._upload_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-        self._api_gate = _RateGate(30)
-        self._answer_gates: dict[str, _RateGate] = {}
-        self._message_mutation_gate = _RateGate(2)
-        self._message_gates: dict[str, _RateGate] = {}
+        self._rate_token = hashlib.sha256(token.encode()).hexdigest()
 
     CONFIRM_ACTIONS = {"okyes", "okforce", "delyes", "rejectphoto", "rejecttext", "rejectcustom"}
 
@@ -112,6 +120,11 @@ class Max(core.Adapter):
         self._confirmations().pop((self.name, str(uid)), None)
         dialog_state.PendingMap(core.db, "confirmation_channels").pop((self.name, str(uid)), None)
 
+    def _rates(self) -> _RateRegistry:
+        loop = asyncio.get_running_loop()
+        registries = _RATE_LOOPS.setdefault(loop, {})
+        return registries.setdefault(self._rate_token, _RateRegistry())
+
     def not_sent(self, e):
         """MAX ответил отказом 4xx (кроме таймаута 408): сообщение не создано."""
         return (bool(getattr(e, "max_not_sent", False))
@@ -120,18 +133,19 @@ class Max(core.Adapter):
 
     async def call(self, method, path, **kw):
         rate_key = str(kw.pop("_rate_key", "global"))
-        await self._api_gate.wait()
+        rates = self._rates()
+        await rates.api.wait()
         if path == "/answers":
-            await self._answer_gates.setdefault(rate_key, _RateGate(2)).wait()
+            await rates.answers.setdefault(rate_key, _RateGate(2)).wait()
         elif path == "/messages":
             if method == "POST":
                 params = kw.get("params") or {}
                 target = next((f"{k}:{params[k]}" for k in ("user_id", "chat_id") if k in params), "unknown")
-                await self._message_gates.setdefault(target, _RateGate(2)).wait()
+                await rates.messages.setdefault(target, _RateGate(2)).wait()
             elif method in ("PUT", "DELETE"):
                 # The edit/delete API has the same documented 2 rps cap. message_id
                 # does not identify its chat locally, so use a conservative shared gate.
-                await self._message_mutation_gate.wait()
+                await rates.message_mutation.wait()
         started = time.monotonic()
         try:
             r = await self.http.request(method, path, **kw)
