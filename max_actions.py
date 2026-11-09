@@ -52,20 +52,34 @@ class Worker:
             task.exception()
 
     async def process(self, row):
+        material_transfer = False
         try:
             update = json.loads(row["payload"])
+            material_transfer = bool(update.pop("_material_to_inbox", False))
             if update.pop("_route_on_process", False):
                 update = spaces.stamp(update)
-            token = command_context.EVENT.set(row["event_key"])
-            try:
-                await self.adapter.handle(update)
-            finally:
-                command_context.EVENT.reset(token)
+            if material_transfer:
+                import max_queue
+                max_queue.enqueue(update)
+            else:
+                token = command_context.EVENT.set(row["event_key"])
+                try:
+                    await self.adapter.handle(update)
+                finally:
+                    command_context.EVENT.reset(token)
         except asyncio.CancelledError:
             core.db.execute("UPDATE max_actions SET state='pending' WHERE id=?", (row["id"],))
             core.db.commit()
             raise
         except Exception:
+            if material_transfer:
+                # Transfer to max_inbox is idempotent and has no external side effect.
+                # Keep the original payload until the durable handoff succeeds.
+                core.db.execute("UPDATE max_actions SET state='pending' WHERE id=?", (row["id"],))
+                core.db.commit()
+                logging.getLogger("max_actions").exception(
+                    "не удалось перенести материал %s в постоянную очередь; повторим", row["id"])
+                return
             # Не повторяем неизвестный побочный эффект команды автоматически.
             core.db.execute("UPDATE max_actions SET state='failed',payload='' WHERE id=?", (row["id"],))
             core.db.commit()
