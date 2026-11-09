@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 import httpx
@@ -97,7 +98,7 @@ def test_candidate_tests_do_not_receive_production_secrets(monkeypatch, tmp_path
     env = updater.candidate_test_env("candidate", tmp_path)
     assert env["PYTHONPATH"] == "candidate"
     assert env["DATA_DIR"] == str(tmp_path)
-    assert env["HOME"] != str(tmp_path.home()) if hasattr(tmp_path, "home") else env["HOME"]
+    assert env["HOME"] != os.environ.get("HOME")
     assert env["HOME"].startswith(str(tmp_path.parent))
     for name in ("MAX_TOKEN", "TG_TOKEN", "LLM_API_KEY", "ANTHROPIC_API_KEY"):
         assert name not in env
