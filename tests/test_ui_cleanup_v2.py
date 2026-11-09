@@ -338,6 +338,10 @@ def test_failed_edit_does_not_reuse_partial_delivery_revision(monkeypatch, png, 
         rolled = core.get(did)
         assert rolled["attempts"] == 1
         assert rolled["revision_seq"] == 2
+        assert core.db.execute(
+            "SELECT 1 FROM max_approval_delivery WHERE did=? AND attempt=2", (did,)).fetchone() is None
+        assert core.db.execute(
+            "SELECT 1 FROM max_ui_cleanup WHERE op='delete' AND mid='partial-v2'").fetchone()
 
         monkeypatch.setattr(ad, "send_for_approval", original)
         ok, _ = await core._apply_edit(ad, "5", did, 1, "Edit v3")
@@ -379,6 +383,39 @@ def test_resume_resends_when_saved_max_message_is_confirmed_missing(monkeypatch,
                                      WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()["mid"]
         assert new_mid != old_mid
         assert core.db.execute("SELECT 1 FROM max_draft_ui WHERE mid=?", (old_mid,)).fetchone() is None
+        await ad.http.aclose()
+
+    run(scenario())
+
+
+def test_resume_does_not_resend_when_saved_message_check_is_uncertain(monkeypatch, png, llm):
+    async def scenario():
+        api = Api()
+        ad = make(api)
+        core.ADAPTERS["max"] = ad
+        ad.allowed = {"9"}
+
+        async def upload(path):
+            return "photo-token"
+
+        monkeypatch.setattr(ad, "_upload_image", upload)
+        did = await core.submit(ad, "9", "Author", "Description", png)
+        before = len(api.of("POST"))
+        original_handler = api.handler
+
+        async def handler(request):
+            if request.method == "GET" and request.url.path.startswith("/messages/"):
+                return httpx.Response(503, request=request, text="temporary")
+            return await original_handler(request)
+
+        await ad.http.aclose()
+        ad.http = httpx.AsyncClient(base_url=max_.API, transport=httpx.MockTransport(handler))
+        d = core.get(did)
+        with __import__("pytest").raises(httpx.HTTPStatusError):
+            await ad.send_for_approval("9", did, d["photo"], d["post"], resume=True)
+        assert len(api.of("POST")) == before
+        assert core.db.execute("""SELECT 1 FROM max_approval_delivery
+                                  WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()
         await ad.http.aclose()
 
     run(scenario())
