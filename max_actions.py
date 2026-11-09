@@ -239,9 +239,12 @@ class Worker:
         if not slots or core.SHUTTING_DOWN:
             return
         now = time.time()
-        rows = core.db.execute("""SELECT * FROM max_actions
-                                  WHERE state='handoff' AND next_try<=?
-                                  ORDER BY id LIMIT ?""", (now, slots)).fetchall()
+        rows = core.db.execute("""SELECT a.* FROM max_actions a JOIN (
+            SELECT MIN(id) AS id FROM max_actions
+            WHERE state IN ('handoff','handoff_processing') GROUP BY space_id
+            ) first ON first.id=a.id
+            WHERE a.state='handoff' AND a.next_try<=?
+            ORDER BY a.id LIMIT ?""", (now, slots)).fetchall()
         for row in rows:
             changed = core.db.execute("""UPDATE max_actions SET state='handoff_processing'
                                          WHERE id=? AND state='handoff'""", (row["id"],)).rowcount
