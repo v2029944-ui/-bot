@@ -110,6 +110,7 @@ def clean_state(monkeypatch):
     core.spaces.WAITING_MEMBER.clear()
     core.shutil.rmtree(core.DATA / "inbox", ignore_errors=True)
     core.ops.RESTART_CODE = None
+    core.SHUTTING_DOWN = False
     for k in _settings_names():
         if k != "DATA_DIR":
             monkeypatch.delenv(k, raising=False)
