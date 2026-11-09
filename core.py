@@ -248,6 +248,10 @@ class IncompleteGeneration(RuntimeError):
     """The provider stopped before completing the text; automatic paid retry is unsafe."""
 
 
+class AmbiguousGeneration(RuntimeError):
+    """The request may have been processed/charged, so automatic retry is unsafe."""
+
+
 _HITS: dict[str, list[float]] = {}
 _RL_ALERT: dict[str, float] = {}
 
