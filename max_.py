@@ -367,7 +367,8 @@ class Max(core.Adapter):
             if time.monotonic() >= entry[2] or not Path(path).exists():
                 self._upload_cache.pop(path, None)
         stale = ("SELECT u.* FROM max_draft_ui u LEFT JOIN drafts d ON d.id=u.did "
-                 "WHERE (d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt) ")
+                 "WHERE (d.id IS NULL OR d.status IN ('published','deleted','expired') OR d.attempts!=u.attempt) "
+                 "AND NOT EXISTS (SELECT 1 FROM max_ui_cleanup q WHERE q.mid=u.mid AND q.op='strip_draft') ")
         cursor = getattr(self, "_stale_cursor", "")
         rows = core.db.execute(stale + "AND u.mid>? ORDER BY u.mid LIMIT 20", (cursor,)).fetchall()
         if not rows and cursor:
