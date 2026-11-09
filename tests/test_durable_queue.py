@@ -157,6 +157,12 @@ def test_failure_limit_admin_retry_and_seven_day_cleanup(adapter, llm):
     assert inbox(key)["state"] == "pending" and inbox(key)["attempts"] == 0
     run(worker.process_once(now + 8 * 86400))
     assert inbox(key)["state"] == "expired" and not inbox(key)["payload"]
+    failure = core.db.execute("SELECT * FROM max_handoff_failures WHERE event_key=?", (key,)).fetchone()
+    assert failure["uid"] == "9" and failure["source_mid"] == "message-1"
+    assert "max_inbox" in failure["reason"]
+    notices = core.db.execute(
+        "SELECT kind,uid,state FROM max_handoff_notices WHERE event_key=? ORDER BY kind,uid", (key,)).fetchall()
+    assert [tuple(row) for row in notices] == [("staff", "5", "pending"), ("user", "9", "pending")]
     assert not max_queue.cache_dir(key).exists()
 
 
@@ -218,3 +224,21 @@ def test_polling_persists_callback_before_following_material(adapter, monkeypatc
     monkeypatch.setattr(adapter, "call", call)
     with pytest.raises(asyncio.CancelledError):
         run(adapter.run())
+
+
+def test_expiry_keeps_payload_if_durable_failure_staging_fails(adapter, monkeypatch):
+    key = max_queue.enqueue(event(mid="expiry-atomic"))
+    original = inbox(key)["payload"]
+    core.db.execute("UPDATE max_inbox SET created=?,state='failed' WHERE event_key=?",
+                    (time.time() - 8 * 86400, key))
+    core.db.commit()
+
+    def fail_stage(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(max_actions, "stage_material_failure", fail_stage)
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        run(max_queue.Worker(adapter).process_once())
+    row = inbox(key)
+    assert row["state"] == "failed" and row["payload"] == original
+    assert not core.db.execute("SELECT 1 FROM max_handoff_failures WHERE event_key=?", (key,)).fetchone()
