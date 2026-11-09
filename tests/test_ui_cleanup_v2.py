@@ -135,6 +135,7 @@ def test_material_progress_message_is_removed_and_no_redundant_ready_notice(monk
         assert all("Пост готов к редактированию" not in t for t in texts)
         progress_mid = next(mid for mid, body in api.messages.items() if body.get("text") == "Принято, готовлю пост…")
         assert any(c[2].get("message_id") == progress_mid for c in api.of("DELETE"))
+        assert not core.db.execute("SELECT 1 FROM max_ui_cleanup WHERE mid=?", (progress_mid,)).fetchone()
         await ad.http.aclose()
 
     run(scenario())
