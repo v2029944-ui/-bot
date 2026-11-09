@@ -105,13 +105,27 @@ async def _complete(system: str, text: str, b64: str | None = None) -> str:
 
 
 async def _claude(system: str, text: str, b64: str | None) -> str:
-    from anthropic import AsyncAnthropic
-    core._client = core._client or AsyncAnthropic()  # ключ из ANTHROPIC_API_KEY
+    from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
+    core._client = core._client or AsyncAnthropic(max_retries=0)  # durable queue owns automatic retries
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
-    r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
-                                      messages=[{"role": "user", "content": content}])
+    try:
+        r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
+                                          messages=[{"role": "user", "content": content}])
+    except APITimeoutError as exc:
+        raise core.AmbiguousGeneration("Таймаут нейросети: результат запроса неизвестен. Автоматический повтор остановлен.") from exc
+    except APIStatusError as exc:
+        if exc.status_code == 429:
+            raise RuntimeError("Нейросеть временно ограничила запросы (429).") from exc
+        if 400 <= exc.status_code < 500:
+            raise core.PermanentGeneration(f"Нейросеть отклонила запрос ({exc.status_code}). Проверьте ключ, модель и настройки.") from exc
+        raise core.AmbiguousGeneration(
+            f"Нейросеть вернула серверную ошибку {exc.status_code}; результат и оплата неизвестны. "
+            "Автоматический повтор остановлен.") from exc
+    except APIConnectionError as exc:
+        raise core.AmbiguousGeneration(
+            "Соединение с нейросетью оборвалось; результат запроса неизвестен. Автоматический повтор остановлен.") from exc
     if getattr(r, "stop_reason", None) in ("max_tokens", "model_context_window_exceeded", "pause_turn"):
         raise core.IncompleteGeneration("Ответ нейросети оборван до завершения. Повторите генерацию вручную или сократите описание.")
     # первым блоком может прийти не текст: собираем все текстовые
@@ -133,20 +147,28 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
                                             {"role": "user", "content": content}]}
     headers = {"Authorization": f"Bearer {os.environ['LLM_API_KEY']}"}
     key = "max_tokens"
-    retries = 0
     async with httpx.AsyncClient(timeout=120) as c:
         while True:
-            r = await c.post(f"{base}/chat/completions", headers=headers, json={**payload, key: 1000})
+            try:
+                r = await c.post(f"{base}/chat/completions", headers=headers, json={**payload, key: 1000})
+            except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError) as exc:
+                raise core.AmbiguousGeneration(
+                    "Связь с нейросетью оборвалась после отправки запроса; результат и оплата неизвестны. "
+                    "Автоматический повтор остановлен.") from exc
             if r.status_code == 400 and key == "max_tokens" and "max_tokens" in r.text:
-                key = "max_completion_tokens"  # новые модели требуют другое имя параметра (это не «попытка»)
+                key = "max_completion_tokens"  # compatibility retry: rejected request was not generated/billed
                 continue
-            if r.status_code in (429, 500, 502, 503, 504) and retries < 3:
-                retries += 1
-                await asyncio.sleep(2 * retries)  # временная ошибка сервиса: повторяем
-                continue
+            # Do not retry transient provider failures here. The durable material
+            # queue owns backoff/retry, avoiding multiplicative paid requests.
             break
     if r.status_code >= 400:
-        raise RuntimeError(f"Нейросеть вернула {r.status_code}: {r.text[:200]}")
+        detail = r.text[:200]
+        if r.status_code == 429:
+            raise RuntimeError(f"Нейросеть временно ограничила запросы (429): {detail}")
+        if 400 <= r.status_code < 500 and r.status_code != 408:
+            raise core.PermanentGeneration(f"Нейросеть отклонила запрос ({r.status_code}): {detail}")
+        raise core.AmbiguousGeneration(
+            f"Нейросеть вернула {r.status_code}; результат и оплата неизвестны. Автоматический повтор остановлен.")
     choice = (r.json().get("choices") or [{}])[0]
     if choice.get("finish_reason") == "length":
         raise core.IncompleteGeneration("Ответ нейросети оборван по лимиту токенов. Повторите генерацию вручную или сократите описание.")
@@ -173,11 +195,15 @@ async def generate_options(*args, previous=None, **kwargs):
                 raise ValueError("Слишком длинный вариант для сравнения")
             return {"model": model, "post": post}
         except Exception as e:
-            return {"model": model, "error": core.err(e)[:120], "incomplete": isinstance(e, core.IncompleteGeneration)}
+            return {"model": model, "error": core.err(e)[:120],
+                    "incomplete": isinstance(e, core.IncompleteGeneration),
+                    "ambiguous": isinstance(e, core.AmbiguousGeneration)}
         finally:
             comparison.MODEL.reset(token)
     options = await asyncio.gather(*(one(model) for model in c["models"]))
     if not any(o.get("post") for o in options):
+        if any(o.get("ambiguous") for o in options):
+            raise core.AmbiguousGeneration("Нет готового поста: результат одного из запросов неизвестен. Повторите обработку вручную после проверки расходов.")
         if any(o.get("incomplete") for o in options):
             raise core.IncompleteGeneration("Нет готового поста: нейросеть оборвала ответ. Повторите обработку вручную или сократите описание.")
         raise RuntimeError("Ни одна модель не подготовила пост. Проверьте баланс и доступность моделей.")

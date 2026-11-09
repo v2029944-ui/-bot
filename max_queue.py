@@ -41,17 +41,18 @@ def clear_cache(key, space_id=None):
 
 def is_material(update):
     message = update.get("message") or {}
+    body = message.get("body") or {}
     return (update.get("update_type") == "message_created"
-            and message.get("recipient", {}).get("chat_type", "dialog") == "dialog"
+            and (message.get("recipient") or {}).get("chat_type", "dialog") == "dialog"
             and any(a.get("type") in ("image", "video")
-                    for a in (message.get("body", {}).get("attachments") or [])))
+                    for a in (body.get("attachments") or [])))
 
 
 def enqueue(update):
     payload = json.dumps(update, ensure_ascii=False, sort_keys=True)
     message = update["message"]
-    mid = message.get("body", {}).get("mid")
-    identity = f"{message.get('sender', {}).get('user_id')}:{mid}" if mid else payload
+    mid = (message.get("body") or {}).get("mid")
+    identity = f"{(message.get('sender') or {}).get('user_id')}:{mid}" if mid else payload
     key = hashlib.sha256(identity.encode()).hexdigest()
     core.db.execute("INSERT OR IGNORE INTO max_inbox(event_key,payload,created,space_id) VALUES(?,?,?,?)",
                     (key, payload, time.time(), message.get("_space", 0)))
@@ -132,7 +133,10 @@ class Worker:
             core.db.commit()
         except Exception as exc:
             incomplete = isinstance(exc, core.IncompleteGeneration)
-            state = "failed" if incomplete or attempt >= 8 else "pending"
+            ambiguous = isinstance(exc, core.AmbiguousGeneration)
+            permanent = isinstance(exc, core.PermanentGeneration)
+            manual = incomplete or ambiguous or permanent
+            state = "failed" if manual or attempt >= 8 else "pending"
             changed = core.db.execute("UPDATE max_inbox SET state=?,next_try=?,error=? WHERE event_key=? AND state='processing'",
                                       (state, now + min(30 * 2 ** min(attempt - 1, 7), 3600), core.err(exc)[:300], key)).rowcount
             core.db.commit()
@@ -140,7 +144,9 @@ class Worker:
                 return True  # пост уже полностью опубликован; очищенную очередь не оживляем
             log.warning("материал %s: попытка %s не удалась: %s", key[:8], attempt, core.err(exc))
             if state == "failed":
-                reason = ("⚠️ Нейросеть оборвала ответ. Автоматические платные повторы остановлены.\n" if incomplete else
+                reason = ("⚠️ Результат запроса к нейросети неизвестен; автоматический платный повтор остановлен.\n" if ambiguous else
+                          "⚠️ Нейросеть отклонила запрос; автоматические повторы остановлены.\n" if permanent else
+                          "⚠️ Нейросеть оборвала ответ. Автоматические платные повторы остановлены.\n" if incomplete else
                           "⚠️ Материал не обработан после 8 попыток.\n")
                 if spaces.INSTALLED and row["space_id"]:
                     with spaces.enter(spaces.get(row["space_id"])):

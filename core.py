@@ -102,7 +102,7 @@ db.execute("""CREATE TABLE IF NOT EXISTS people (
 db.execute("""CREATE TABLE IF NOT EXISTS requests (
     platform TEXT, uid TEXT, name TEXT, username TEXT, status TEXT, created REAL, PRIMARY KEY (platform, uid))""")
 schema.add_columns(db, "drafts", ("published_to TEXT DEFAULT ''", "last_sent REAL DEFAULT 0", "reminded INTEGER DEFAULT 0", "video TEXT DEFAULT ''", "media TEXT DEFAULT '[]'",
-             "publication_channels TEXT DEFAULT '{}'", "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
+             "publication_channels TEXT DEFAULT '{}'", "publish_progress TEXT DEFAULT '{}'", "post_length TEXT DEFAULT ''", "source_key TEXT", "expiry_warned REAL DEFAULT 0",
              "rejection_reason TEXT DEFAULT ''", "publish_errors TEXT DEFAULT '{}'", "footer TEXT", "candidates TEXT DEFAULT '[]'", "selected_model TEXT DEFAULT ''"))
 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS drafts_source_key ON drafts(source_key)")
 db.execute("""CREATE TABLE IF NOT EXISTS max_inbox (
@@ -111,6 +111,11 @@ db.execute("""CREATE TABLE IF NOT EXISTS max_inbox (
     error TEXT DEFAULT '')""")
 schema.add_columns(db, "max_inbox", ("rate_counted INTEGER DEFAULT 0", "space_id INTEGER DEFAULT 0"))
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_work ON max_inbox(state,next_try,created)")
+db.execute("""CREATE TABLE IF NOT EXISTS rate_events (
+    platform TEXT, uid TEXT, created REAL, source_key TEXT)""")
+schema.add_columns(db, "rate_events", ("source_key TEXT",))
+db.execute("CREATE INDEX IF NOT EXISTS rate_events_lookup ON rate_events(platform,uid,created)")
+db.execute("CREATE UNIQUE INDEX IF NOT EXISTS rate_events_source ON rate_events(source_key) WHERE source_key IS NOT NULL")
 db.commit()
 db.execute("CREATE INDEX IF NOT EXISTS max_inbox_space_state ON max_inbox(space_id,state)")
 db.commit()
@@ -243,8 +248,17 @@ class IncompleteGeneration(RuntimeError):
     """The provider stopped before completing the text; automatic paid retry is unsafe."""
 
 
+class AmbiguousGeneration(RuntimeError):
+    """The request may have been processed/charged, so automatic retry is unsafe."""
+
+
+class PermanentGeneration(RuntimeError):
+    """The provider rejected the request permanently; automatic retry is useless."""
+
+
 _HITS: dict[str, list[float]] = {}
 _RL_ALERT: dict[str, float] = {}
+RATE_EVENT_TTL = 8 * 86400  # keep source-key idempotency longer than the 7-day material queue
 
 
 WAITING = dialog_state.PendingMap(db, "comment")

@@ -32,6 +32,7 @@ def publication_view(d, adapter):
         return f"✅ Пост №{d['id']} опубликован. Содержимое удалено с сервера.", []
     marks = core._parse_marks(d.get("published_to"))
     errors = json.loads(d.get("publish_errors") or "{}")
+    progress = json.loads(d.get("publish_progress") or "{}")
     names = {"max": "MAX", "tg": "Telegram"}
     lines = [f"Публикация поста №{d['id']}:"]
     rows = []
@@ -39,12 +40,19 @@ def publication_view(d, adapter):
     for target in core.publication_targets(d, adapter):
         name = names.get(target.name, target.name)
         mark = marks.get(target.name)
-        status = "✅ опубликовано" if mark == "done" else "❓ результат неизвестен" if mark == "unknown" else "❌ ошибка" if target.name in errors else "⏳ не отправлено"
+        channel_progress = progress.get(target.name) or {}
+        partial = channel_progress.get("media") and not channel_progress.get("text") and not channel_progress.get("text_started")
+        text_unknown = channel_progress.get("media") and channel_progress.get("text_started") and not channel_progress.get("text")
+        status = ("✅ опубликовано" if mark == "done" else
+                  "⚠️ медиа опубликовано, текст не отправлен" if mark == "unknown" and partial else
+                  "❓ медиа опубликовано, результат отправки текста неизвестен" if mark == "unknown" and text_unknown else
+                  "❓ результат неизвестен" if mark == "unknown" else
+                  "❌ ошибка" if target.name in errors else "⏳ не отправлено")
         destination = f" (канал {channels[target.name]})" if channels.get(target.name) else ""
         lines.append(f"{name} — {status}{destination}")
         if mark != "done" and target.name in errors:
             lines.append(errors[target.name][:180])
-        if mark == "unknown":
+        if mark == "unknown" and not partial:
             rows.append([(f"Проверил: пост есть в {name}", f"d:seen_{target.name}:{d['id']}:{d['attempts']}")])
     if d["status"] == "pending":
         rows.append([("🔁 Отправить в оставшиеся каналы", f"d:ok:{d['id']}:{d['attempts']}")])
@@ -145,7 +153,21 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
         core._set(did, published_to=core._dump_marks(marks))
         started = time.monotonic()
         try:
-            await t.publish(d["photo"], posts[t.name], **core.media_kw(d))
+            publish_kw = core.media_kw(d)
+            if getattr(t, "supports_publish_resume", False):
+                progress = json.loads(core.get(did).get("publish_progress") or "{}")
+                resume = dict(progress.get(t.name) or {})
+                def record(stage, value=True):
+                    current = json.loads(core.get(did).get("publish_progress") or "{}")
+                    channel = dict(current.get(t.name) or {})
+                    if value:
+                        channel[stage] = True
+                    else:
+                        channel.pop(stage, None)
+                    current[t.name] = channel
+                    core._set(did, publish_progress=json.dumps(current, ensure_ascii=False))
+                publish_kw.update(resume=resume, progress=record)
+            await t.publish(d["photo"], posts[t.name], **publish_kw)
         except Exception as e:
             core.log.exception("publish failed")
             errors = json.loads(core.get(did).get("publish_errors") or "{}")

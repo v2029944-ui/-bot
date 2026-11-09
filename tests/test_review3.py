@@ -43,11 +43,10 @@ def test_claude_reply_collects_text_blocks(monkeypatch):
     assert run(core._claude("sys", "text", None)) == "Готовый пост"
 
 
-def test_openai_param_switch_is_not_a_retry(monkeypatch):
+def test_openai_param_switch_is_only_compatibility_retry(monkeypatch):
     calls = []
     answers = [S(status_code=400, text="use max_completion_tokens instead of max_tokens"),
-               S(status_code=429, text="slow"), S(status_code=429, text="slow"), S(status_code=429, text="slow"),
-               S(status_code=200, text="", json=lambda: {"choices": [{"message": {"content": "Пост"}}]})]
+               S(status_code=429, text="slow")]
 
     class Client:
         def __init__(self, *a, **k):
@@ -65,6 +64,6 @@ def test_openai_param_switch_is_not_a_retry(monkeypatch):
     monkeypatch.setattr(core.httpx, "AsyncClient", Client)
     monkeypatch.setenv("LLM_API_KEY", "k")
     monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
-    assert run(core._openai("sys", "text", None)) == "Пост"
-    assert calls[0] == ["max_tokens"] and all(c == ["max_completion_tokens"] for c in calls[1:])
-    assert len(calls) == 5  # смена параметра + три повтора после 429 + успех
+    with pytest.raises(RuntimeError, match="429"):
+        run(core._openai("sys", "text", None))
+    assert calls == [["max_tokens"], ["max_completion_tokens"]]

@@ -23,19 +23,25 @@ async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, s
     if str(author_id) in adapter.approvers:
         return
     if source_key:
+        if core.db.execute("SELECT 1 FROM rate_events WHERE source_key=?", (source_key,)).fetchone():
+            return  # локальная идемпотентная запись переживает сбой между двумя SQLite
         row = spaces.queue_db().execute("SELECT rate_counted FROM max_inbox WHERE event_key=?", (source_key,)).fetchone()
         if row and row[0]:
-            return  # повтор обработки одного материала не расходует лимит сотрудника
+            return  # совместимость с материалами, учтёнными до журнала rate_events
     limit = int(core.env("RATE_LIMIT_PER_HOUR", "20"))
     key, now = f"{adapter.name}:{author_id}", time.time()
-    hits = [t for t in core._HITS.get(key, []) if now - t < 3600]
-    if len(hits) >= limit:
-        core._HITS[key] = hits
+    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - core.RATE_EVENT_TTL,))
+    used = core.db.execute("SELECT COUNT(*) FROM rate_events WHERE platform=? AND uid=? AND created>=?",
+                           (adapter.name, str(author_id), now - 3600)).fetchone()[0]
+    if used >= limit:
+        core.db.commit()
         if now - core._RL_ALERT.get(key, 0) > 3600:  # администраторам пишем не чаще раза в час
             core._RL_ALERT[key] = now
             await core.alert(adapter, f"⚠️ {author_name} отправил больше {limit} фото за час. Новые фото игнорируются.")
         raise core.RateLimited(key)
-    core._HITS[key] = hits + [now]
+    core.db.execute("INSERT INTO rate_events(platform,uid,created,source_key) VALUES(?,?,?,?)",
+                    (adapter.name, str(author_id), now, source_key))
+    core.db.commit()
     if source_key:
         queue = spaces.queue_db()
         queue.execute("UPDATE max_inbox SET rate_counted=1 WHERE event_key=?", (source_key,))

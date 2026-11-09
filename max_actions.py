@@ -7,11 +7,14 @@ import time
 
 import command_context
 import core
+import schema
 import spaces
 
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, uid TEXT,
-    payload TEXT, state TEXT DEFAULT 'pending')""")
+    payload TEXT, state TEXT DEFAULT 'pending', created REAL DEFAULT 0)""")
+schema.add_columns(core.db, "max_actions", ("created REAL DEFAULT 0",))
+core.db.execute("UPDATE max_actions SET created=? WHERE created=0", (time.time(),))
 core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_pending ON max_actions(state,uid,id)")
 core.db.commit()
 
@@ -29,7 +32,7 @@ def enqueue(update):
     mid = (message.get("body") or {}).get("mid")
     identity = f"message:{uid}:{mid}" if update.get("update_type") == "message_created" and mid else payload
     key = callback.get("callback_id") or hashlib.sha256(identity.encode()).hexdigest()
-    core.db.execute("INSERT OR IGNORE INTO max_actions(event_key,uid,payload) VALUES(?,?,?)", (key, uid, payload))
+    core.db.execute("INSERT OR IGNORE INTO max_actions(event_key,uid,payload,created) VALUES(?,?,?,?)", (key, uid, payload, time.time()))
     core.db.commit()
 
 

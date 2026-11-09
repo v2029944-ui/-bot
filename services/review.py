@@ -93,6 +93,9 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         marks = core._parse_marks(d.get("published_to"))
         if marks.get(target) != "unknown":
             return False, "Для этого канала подтверждение не требуется."
+        progress = json.loads(d.get("publish_progress") or "{}").get(target) or {}
+        if progress.get("media") and not progress.get("text") and not progress.get("text_started"):
+            return False, "В этом канале опубликовано только медиа, а текст точно не отправлен. Завершите отправку текста."
         marks[target] = "done"
         core._set(did, published_to=core._dump_marks(marks))
         if all(marks.get(t.name) == "done" for t in core.publication_targets(d, adapter)):

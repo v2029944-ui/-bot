@@ -7,6 +7,7 @@ import dialog_state
 import spaces
 
 TERMINAL_TEXT_TTL = 7 * 86400
+QUEUE_HISTORY_TTL = 30 * 86400
 CLEANUP_BATCH = 200
 
 
@@ -61,7 +62,21 @@ def housekeeping() -> int:
     стираем оставшиеся файлы опубликованных/удалённых/просроченных постов и файлы-сироты (которых нет ни в одном черновике).
     Вызывается при старте и периодически (HOUSEKEEPING_SEC). Возвращает число закрытых черновиков."""
     dialog_state.cleanup(core.db)
-    core.db.execute("DELETE FROM requests WHERE created<?", (time.time() - core.REQ_TTL,))
+    now = time.time()
+    core.db.execute("DELETE FROM requests WHERE created<?", (now - core.REQ_TTL,))
+    core.db.execute("DELETE FROM rate_events WHERE created<?", (now - core.RATE_EVENT_TTL,))
+    has_actions = core.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_actions'").fetchone()
+    if has_actions:
+        core.db.execute("""DELETE FROM command_results WHERE created<? AND NOT EXISTS (
+            SELECT 1 FROM max_actions a WHERE a.event_key=command_results.event_key
+            AND a.state IN ('pending','processing'))""", (now - QUEUE_HISTORY_TTL,))
+    else:
+        core.db.execute("DELETE FROM command_results WHERE created<?", (now - QUEUE_HISTORY_TTL,))
+    core.db.execute("DELETE FROM max_inbox WHERE state IN ('done','expired') AND created<?", (now - QUEUE_HISTORY_TTL,))
+    if has_actions:
+        core.db.execute("DELETE FROM max_actions WHERE state IN ('done','failed') AND created>0 AND created<?",
+                        (now - QUEUE_HISTORY_TTL,))
     core.db.commit()
     expired = 0
     ttl = int(core.env("DRAFT_TTL_DAYS", "7"))  # 0 — не закрывать
@@ -142,7 +157,7 @@ def scrub_published(d):
 def _scrub_terminal(d):
     """Оставляем ID, источник, дату и конечный статус; содержимое завершённого поста больше не нужно."""
     core.db.execute("""UPDATE drafts SET author_id='',author_name='',source_text='',post='',
-                  photo='',video='',media='[]',published_to='',publish_errors='{}',publication_channels='{}',
+                  photo='',video='',media='[]',published_to='',publish_errors='{}',publication_channels='{}',publish_progress='{}',
                   post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0,cleaned=2
                   WHERE id=? AND status IN ('published','deleted','expired')""", (d["id"],))
     if d.get("source_key"):
