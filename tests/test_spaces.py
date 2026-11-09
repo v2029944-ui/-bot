@@ -56,6 +56,31 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             bid = root.db.execute("SELECT last_insert_rowid()").fetchone()[0]
             root.db.commit()
             a, b = spaces.get(aid), spaces.get(bid)
+
+            async def test_version():
+                return "test"
+            monkeypatch.setattr(ops, "version", test_version)
+            now = time.time()
+            root.db.execute("""INSERT INTO max_handoff_failures
+                               (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                               VALUES('ha','11','ma',?,?,?,?,?)""",
+                            (aid, now - 10, now, 4, "ошибка А"))
+            root.db.execute("""INSERT INTO max_handoff_failures
+                               (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
+                               VALUES('hb','22','mb',?,?,?,?,?)""",
+                            (bid, now - 10, now, 5, "ошибка Б"))
+            root.db.commit()
+            with spaces.enter(a):
+                status_a = await core.status_text(core.ADAPTERS["max"], include_global=False)
+                assert "ошибка А" in status_a and "ошибка Б" not in status_a
+            with spaces.enter(b):
+                status_b = await core.status_text(core.ADAPTERS["max"], include_global=False)
+                assert "ошибка Б" in status_b and "ошибка А" not in status_b
+            global_status = await core.status_text(root_max, include_global=True)
+            assert "ошибка А" in global_status and "ошибка Б" in global_status
+            root.db.execute("DELETE FROM max_handoff_failures")
+            root.db.commit()
+
             for space, rule in [(a, "ТОЛЬКО_ПРАВИЛО_А"), (b, "ТОЛЬКО_ПРАВИЛО_Б")]:
                 with spaces.enter(space):
                     ad = core.ADAPTERS["max"]
