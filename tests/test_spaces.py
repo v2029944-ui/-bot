@@ -177,6 +177,33 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 core._add_person(ad, "33", "Администратор команды Б", "adm")
             with spaces.enter(a):
                 assert "33" not in core.ADAPTERS["max"].approvers
+                core._add_person(core.ADAPTERS["max"], "33", "Участник двух команд", "member")
+
+            # Workspace switch and immediately following media are accepted in MAX order.
+            # Even after a restart between receipt and processing, the callback must run
+            # before material routing and the photo must land in the newly selected space.
+            root.db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", ("33", aid))
+            root.db.commit()
+            rapid_callback = {"update_type": "message_callback", "callback": {
+                "callback_id": "rapid-switch", "user": {"user_id": 33}, "payload": f"w:{bid}:m:menu"}}
+            rapid_material = material(33)
+            rapid_material["message"]["body"]["mid"] = "rapid-photo"
+            await root_max._handle_limited(rapid_callback)
+            await root_max._handle_limited(rapid_material)
+            queued = root.db.execute("""SELECT id,state,payload FROM max_actions
+                                        WHERE state='pending' ORDER BY id""").fetchall()
+            assert len(queued) >= 2
+            assert "rapid-switch" in queued[-2]["payload"] and "rapid-photo" in queued[-1]["payload"]
+            root.db.execute("UPDATE max_actions SET state='processing' WHERE id=?", (queued[-2]["id"],))
+            root.db.commit()
+            max_actions.recover()
+            actions = max_actions.Worker(root_max)
+            for row in root.db.execute("SELECT * FROM max_actions WHERE state='pending' ORDER BY id").fetchall():
+                await actions.process(row)
+            routed = root.db.execute("SELECT space_id FROM max_inbox WHERE payload LIKE '%rapid-photo%'").fetchone()
+            assert routed and routed["space_id"] == bid
+            assert spaces.for_user("33") == bid
+
             await root_max.handle({"update_type": "message_callback", "callback": {"callback_id": "edit", "user": {"user_id": 33},
                                   "payload": f"w:{bid}:d:edit:2:1"}})
             reply = {"update_type": "message_created", "message": {"sender": {"user_id": 33}, "body": {"text": "Исправленный текст {bot}"}}}
