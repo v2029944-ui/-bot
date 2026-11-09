@@ -40,9 +40,12 @@ def publication_view(d, adapter):
     for target in core.publication_targets(d, adapter):
         name = names.get(target.name, target.name)
         mark = marks.get(target.name)
-        partial = (progress.get(target.name) or {}).get("media") and not (progress.get(target.name) or {}).get("text")
+        channel_progress = progress.get(target.name) or {}
+        partial = channel_progress.get("media") and not channel_progress.get("text") and not channel_progress.get("text_started")
+        text_unknown = channel_progress.get("media") and channel_progress.get("text_started") and not channel_progress.get("text")
         status = ("✅ опубликовано" if mark == "done" else
                   "⚠️ медиа опубликовано, текст не отправлен" if mark == "unknown" and partial else
+                  "❓ медиа опубликовано, результат отправки текста неизвестен" if mark == "unknown" and text_unknown else
                   "❓ результат неизвестен" if mark == "unknown" else
                   "❌ ошибка" if target.name in errors else "⏳ не отправлено")
         destination = f" (канал {channels[target.name]})" if channels.get(target.name) else ""
@@ -154,10 +157,13 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
             if getattr(t, "supports_publish_resume", False):
                 progress = json.loads(core.get(did).get("publish_progress") or "{}")
                 resume = dict(progress.get(t.name) or {})
-                def record(stage):
+                def record(stage, value=True):
                     current = json.loads(core.get(did).get("publish_progress") or "{}")
                     channel = dict(current.get(t.name) or {})
-                    channel[stage] = True
+                    if value:
+                        channel[stage] = True
+                    else:
+                        channel.pop(stage, None)
                     current[t.name] = channel
                     core._set(did, publish_progress=json.dumps(current, ensure_ascii=False))
                 publish_kw.update(resume=resume, progress=record)
