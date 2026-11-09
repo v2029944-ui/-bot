@@ -23,6 +23,7 @@ import max_actions
 import max_queue
 import max_tls
 import post_footer
+import schema
 import spaces
 from services import publication
 
@@ -61,7 +62,13 @@ _RATE_LOOPS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _Rat
 
 
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
-core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
+core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER, uid TEXT DEFAULT '')")
+schema.add_columns(core.db, "max_draft_ui", ("uid TEXT DEFAULT ''",))
+core.db.execute("""CREATE TABLE IF NOT EXISTS max_ui_cleanup (
+    op TEXT, mid TEXT, uid TEXT DEFAULT '', attempts INTEGER DEFAULT 0,
+    next_try REAL DEFAULT 0, created REAL, last_error TEXT DEFAULT '',
+    PRIMARY KEY(op,mid))""")
+core.db.execute("CREATE INDEX IF NOT EXISTS max_ui_cleanup_due ON max_ui_cleanup(next_try,created)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_notices (mid TEXT PRIMARY KEY, uid TEXT, remaining INTEGER)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_button_cache (mid TEXT PRIMARY KEY, attachments TEXT)")
 core.db.execute("""DELETE FROM max_button_cache WHERE mid NOT IN (
@@ -227,11 +234,30 @@ class Max(core.Adapter):
                         (str(uid), cur["menu"], json.dumps(cur["btn"], ensure_ascii=False) if cur["btn"] else None))
         core.db.commit()
 
-    async def _delete(self, mid, uid=None):
-        """Удаляет своё сообщение. Ошибка (уже удалено, истёк срок) не страшна."""
+    def _queue_ui_cleanup(self, op, mid, uid=None, delay=0):
+        if not mid:
+            return
+        now = time.time()
+        core.db.execute("""INSERT INTO max_ui_cleanup(op,mid,uid,next_try,created)
+                           VALUES(?,?,?,?,?) ON CONFLICT(op,mid) DO UPDATE SET
+                           uid=CASE WHEN excluded.uid!='' THEN excluded.uid ELSE max_ui_cleanup.uid END,
+                           next_try=MIN(max_ui_cleanup.next_try,excluded.next_try)""",
+                        (op, str(mid), str(uid or ""), now + max(0, delay), now))
+        core.db.commit()
+
+    async def _delete(self, mid, uid=None, queue_on_fail=True):
+        """Удаляет своё сообщение. 404 означает, что желаемое состояние уже достигнуто."""
         try:
             await self.call("DELETE", "/messages", params={"message_id": mid})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                if queue_on_fail:
+                    self._queue_ui_cleanup("delete", mid, uid)
+                log.warning("не удалось удалить сообщение %s", mid, exc_info=True)
+                return False
         except Exception:
+            if queue_on_fail:
+                self._queue_ui_cleanup("delete", mid, uid)
             log.warning("не удалось удалить сообщение %s", mid, exc_info=True)
             return False
         if uid is not None:  # удалённое сообщение больше не держит кнопку «Меню админа»
@@ -239,13 +265,19 @@ class Max(core.Adapter):
             if btn and btn.get("mid") == mid:
                 self._ui_set(uid, btn=None)
         core.db.execute("DELETE FROM max_button_cache WHERE mid=?", (mid,))
+        core.db.execute("DELETE FROM max_draft_ui WHERE mid=?", (mid,))
+        core.db.execute("DELETE FROM max_notices WHERE mid=?", (mid,))
+        core.db.execute("DELETE FROM max_ui_cleanup WHERE mid=?", (mid,))
         core.db.commit()
         return True
 
-    async def _strip_admin_button(self, prev: dict, draft_buttons=False, replacement=None):
+    async def _strip_admin_button(self, prev: dict, draft_buttons=False, replacement=None, queue_on_fail=True):
         lock = self._send_locks.setdefault("message:" + str(prev["mid"]), asyncio.Lock())
         async with lock:
-            return await self._edit_buttons(prev, draft_buttons, replacement)
+            ok = await self._edit_buttons(prev, draft_buttons, replacement)
+        if ok is not True and replacement is None and queue_on_fail:
+            self._queue_ui_cleanup("strip_draft" if draft_buttons else "strip_admin", prev["mid"])
+        return ok
 
     async def _edit_buttons(self, prev, draft_buttons=False, replacement=None, use_cache=True):
         """Убирает «Меню админа» из старого сообщения: правим клавиатуру, текст и вложения оставляем как были.
@@ -301,7 +333,36 @@ class Max(core.Adapter):
                 return await self._edit_buttons(prev, draft_buttons, replacement, use_cache=False)
             log.warning("не удалось убрать кнопку меню из сообщения %s", prev.get("mid"), exc_info=True)
 
+    async def _process_ui_cleanup(self, limit=20):
+        now = time.time()
+        rows = core.db.execute("""SELECT * FROM max_ui_cleanup WHERE next_try<=?
+                                  ORDER BY created LIMIT ?""", (now, limit)).fetchall()
+        for row in rows:
+            op, mid, uid = row["op"], row["mid"], row["uid"] or None
+            if op == "delete":
+                ok = await self._delete(mid, uid, queue_on_fail=False)
+            elif op in ("strip_admin", "strip_draft"):
+                ok = await self._strip_admin_button({"mid": mid}, draft_buttons=op == "strip_draft",
+                                                    queue_on_fail=False)
+            else:
+                ok = True
+            if ok is True:
+                core.db.execute("DELETE FROM max_ui_cleanup WHERE op=? AND mid=?", (op, mid))
+                core.db.commit()
+                continue
+            attempts = row["attempts"] + 1
+            if attempts >= 8:
+                log.warning("UI cleanup abandoned op=%s mid=%s after %s attempts", op, mid, attempts)
+                core.db.execute("DELETE FROM max_ui_cleanup WHERE op=? AND mid=?", (op, mid))
+            else:
+                core.db.execute("""UPDATE max_ui_cleanup SET attempts=?,next_try=?,last_error=?
+                                   WHERE op=? AND mid=?""",
+                                (attempts, now + min(30 * 2 ** (attempts - 1), 3600),
+                                 "MAX UI operation failed", op, mid))
+            core.db.commit()
+
     async def cleanup_stale_buttons(self):
+        await self._process_ui_cleanup()
         for path, entry in list(self._upload_cache.items()):
             if time.monotonic() >= entry[2] or not Path(path).exists():
                 self._upload_cache.pop(path, None)
@@ -400,8 +461,16 @@ class Max(core.Adapter):
             for button in row:
                 parts = str(button.get("payload", "")).split(":")
                 if mid and len(parts) == 4 and parts[0] == "d" and parts[2].isdigit() and parts[3].isdigit():
-                    core.db.execute("INSERT OR REPLACE INTO max_draft_ui VALUES(?,?,?)", (mid, int(parts[2]), int(parts[3])))
-                    current = core.get(int(parts[2]))
+                    did, attempt = int(parts[2]), int(parts[3])
+                    uid = str(target.get("user_id") or "")
+                    core.db.execute("""INSERT OR REPLACE INTO max_draft_ui(mid,did,attempt,uid)
+                                       VALUES(?,?,?,?)""", (mid, did, attempt, uid))
+                    if uid:
+                        for old in core.db.execute("""SELECT mid FROM max_draft_ui
+                                                     WHERE did=? AND uid=? AND attempt<? AND mid!=?""",
+                                                   (did, uid, attempt, mid)).fetchall():
+                            self._queue_ui_cleanup("delete", old["mid"], uid)
+                    current = core.get(did)
                     if current and current["status"] == "pending" and current["attempts"] == int(parts[3]):
                         core.db.execute("INSERT OR REPLACE INTO max_button_cache VALUES(?,?)", (mid, json.dumps(attachments, ensure_ascii=False)))
                     core.db.commit()
@@ -649,8 +718,14 @@ class Max(core.Adapter):
             return await self.notify(uid, "🔄 Бот перезапускается. Пришлите материал через минуту.")
         if not core.caption_ok(body.get("text")):  # единственное, что отвечаем сотруднику в тихом режиме
             return await self.notify(uid, core.CAPTION_ASK)
+        progress_mid = None
         if not quiet and core.confirm_mode() != "off":
-            await self.notify(uid, "Принято, готовлю пост…")
+            show_progress = True
+            if source_key:
+                row = spaces.queue_db().execute("SELECT attempts FROM max_inbox WHERE event_key=?", (source_key,)).fetchone()
+                show_progress = not row or row["attempts"] <= 1
+            if show_progress:
+                progress_mid = _mid(await self.notify(uid, "Принято, готовлю пост…"))
         try:
             source_opts = {"source_key": source_key} if source_key else {}
             if len(media_atts) > 1:
@@ -667,19 +742,26 @@ class Max(core.Adapter):
             else:
                 data = await max_queue.download(self, images[0], core.MAX_PHOTO_BYTES, "image", source_key, 0)
                 await core.submit(self, str(uid), name, body.get("text") or "", data, **source_opts)
-            if core.confirm_mode() != "off":
-                await self.notify(uid, "✅ Принято" if quiet else "Пост готов к редактированию и публикации ✅")
+            # Сам черновик уже доставлен выше, поэтому отдельное «Пост готов» только захламляет чат.
+            if progress_mid:
+                await self._delete(progress_mid, uid)
         except core.RateLimited:
+            if progress_mid:
+                await self._delete(progress_mid, uid)
             if source_key:
                 raise
             log.warning("лимит материалов: %s", uid)
             if not quiet:
                 await self.notify(uid, "Слишком много материалов за час. Попробуйте позже.")
         except core.BadImage as e:  # файл не картинка: администраторов не тревожим
+            if progress_mid:
+                await self._delete(progress_mid, uid)
             log.info("неподходящий материал от %s: %s", uid, e)
             await self.notify(uid, f"⚠️ {core.err(e)}. Материал не принят. Исправьте файл и отправьте весь набор заново.")
         except Exception as e:
             log.exception("submit failed")
+            if progress_mid:
+                await self._delete(progress_mid, uid)
             if source_key:
                 raise  # очередь повторит временный сбой без повторного запроса сотруднику
             if quiet:  # сотруднику ничего не пишем, ошибка уходит администраторам
