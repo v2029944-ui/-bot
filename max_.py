@@ -99,7 +99,7 @@ class Max(core.Adapter):
         self._upload_cache = {}
         self._upload_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._api_gate = _RateGate(30)
-        self._answer_gate = _RateGate(2)
+        self._answer_gates: dict[str, _RateGate] = {}
         self._message_mutation_gate = _RateGate(2)
         self._message_gates: dict[str, _RateGate] = {}
 
@@ -119,9 +119,10 @@ class Max(core.Adapter):
                     and 400 <= e.response.status_code < 500 and e.response.status_code != 408))
 
     async def call(self, method, path, **kw):
+        rate_key = str(kw.pop("_rate_key", "global"))
         await self._api_gate.wait()
         if path == "/answers":
-            await self._answer_gate.wait()
+            await self._answer_gates.setdefault(rate_key, _RateGate(2)).wait()
         elif path == "/messages":
             if method == "POST":
                 params = kw.get("params") or {}
@@ -716,7 +717,7 @@ class Max(core.Adapter):
         uid = cb["user"]["user_id"]
         try:
             await self.call("POST", "/answers", params={"callback_id": cb["callback_id"]},
-                            json={"notification": "Работаю…"})
+                            json={"notification": "Работаю…"}, _rate_key=f"user:{uid}")
         except Exception:  # ответ на нажатие не критичен (например, он устарел)
             log.warning("callback answer failed", exc_info=True)
         payload = cb.get("payload")
