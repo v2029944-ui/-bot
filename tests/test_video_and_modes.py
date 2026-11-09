@@ -329,7 +329,8 @@ def test_max_video_message_is_submitted_as_video(mx, monkeypatch):
     monkeypatch.setattr(core, "submit", fake_submit)
     run(mx.on_message(video_msg()))
     assert got == [("9", "Установили новый насос", b"VIDEO", {"kind": "video", "filename": "video.mp4"})]
-    assert ("notify", "9", "Пост готов к редактированию и публикации ✅") in mx.out
+    assert ("notify", "9", "Принято, готовлю пост…") in mx.out
+    assert not any(o[0] == "notify" and "Пост готов к редактированию" in o[2] for o in mx.out)
     assert FakeHttp.downloads == [("GET", "http://cdn/v.mp4")]
 
 

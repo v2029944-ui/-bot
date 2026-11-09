@@ -74,6 +74,12 @@ def housekeeping() -> int:
     else:
         core.db.execute("DELETE FROM command_results WHERE created<?", (now - QUEUE_HISTORY_TTL,))
     core.db.execute("DELETE FROM max_inbox WHERE state IN ('done','expired') AND created<?", (now - QUEUE_HISTORY_TTL,))
+    if core.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_approval_delivery'").fetchone():
+        core.db.execute("""DELETE FROM max_approval_delivery
+                           WHERE NOT EXISTS (
+                               SELECT 1 FROM drafts d WHERE d.id=max_approval_delivery.did
+                               AND d.attempts=max_approval_delivery.attempt
+                               AND d.status IN ('pending','regenerating'))""")
     if has_actions:
         core.db.execute("DELETE FROM max_actions WHERE state IN ('done','failed') AND created>0 AND created<?",
                         (now - QUEUE_HISTORY_TTL,))
@@ -160,6 +166,8 @@ def _scrub_terminal(d):
                   photo='',video='',media='[]',published_to='',publish_errors='{}',publication_channels='{}',publish_progress='{}',
                   post_length='',rejection_reason='',footer=NULL,candidates='[]',selected_model='',attempts=1,last_sent=0,reminded=0,expiry_warned=0,cleaned=2
                   WHERE id=? AND status IN ('published','deleted','expired')""", (d["id"],))
+    if core.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='max_approval_delivery'").fetchone():
+        core.db.execute("DELETE FROM max_approval_delivery WHERE did=?", (d["id"],))
     if d.get("source_key"):
         queue = spaces.queue_db()
         queue.execute("UPDATE max_inbox SET state='done',payload='',error='' WHERE event_key=?", (d["source_key"],))

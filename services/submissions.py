@@ -75,6 +75,8 @@ async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
                 sent += 1
                 continue
             kw = {"silent": True} if mode == "silent" else {}
+            if getattr(approval, "supports_approval_resume", False):
+                kw["resume"] = True
             await approval.send_for_approval(a, did, d["photo"], post, **kw, **core.media_kw(d))
             sent += 1
         except Exception as e:

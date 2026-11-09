@@ -227,6 +227,8 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
             continue
         try:
             kw: dict[str, Any] = {"silent": True} if mode == "silent" else {}
+            if getattr(ad, "supports_approval_resume", False):
+                kw["resume"] = True
             await ad.send_for_approval(r["uid"], d["id"], d["photo"], d["post"], **kw, **core.media_kw(d))
         except BaseException as exc:
             core.db.execute("UPDATE deferred SET lease_until=0 WHERE platform=? AND uid=? AND did=? AND lease_until=?", (*key, lease))
