@@ -4,12 +4,12 @@ import hashlib
 import json
 import logging
 import time
-from collections import Counter
 
 import core
 import spaces
 
 log = logging.getLogger("max_queue")
+QUARANTINE_RETENTION_SEC = 30 * 86400
 
 
 def cache_dir(key, space_id=None):
@@ -72,7 +72,8 @@ def view(all_spaces=None):
     args = (spaces.active_id(),) if limited else ()
     counts = dict(queue.execute("SELECT state,COUNT(*) FROM max_inbox" + clause + " GROUP BY state", args).fetchall())
     text = (f"Обработка материалов: в очереди {counts.get('pending', 0)}, "
-            f"в работе {counts.get('processing', 0)}, с ошибкой {counts.get('failed', 0)}.")
+            f"в работе {counts.get('processing', 0)}, с ошибкой {counts.get('failed', 0)}, "
+            f"в карантине {counts.get('quarantined', 0)}.")
     rows = []
     condition = " AND space_id=?" if args else ""
     for row in queue.execute("SELECT event_key,error FROM max_inbox WHERE state='failed'" + condition + " ORDER BY created LIMIT 5", args):
@@ -90,20 +91,72 @@ class Worker:
 
     async def process_once(self, now=None):
         now = time.time() if now is None else now
-        # Ссылки и подписи не храним бесконечно даже при недоступной нейросети.
-        expired_keys = list(core.db.execute(
-            "SELECT event_key,space_id FROM max_inbox WHERE state IN ('pending','failed') AND created<?", (now - 7 * 86400,)))
-        expired = core.db.execute(
-            "UPDATE max_inbox SET state='expired',payload='',error='Истёк срок обработки' "
-            "WHERE state IN ('pending','failed') AND created<?", (now - 7 * 86400,)).rowcount
+        # Карантин хранит повреждённый payload 30 дней для административного разбора.
+        core.db.execute("""UPDATE max_inbox SET payload=''
+                           WHERE state='quarantined' AND payload!='' AND created<?""",
+                        (now - QUARANTINE_RETENTION_SEC,))
         core.db.commit()
-        for key, sid in expired_keys:
-            clear_cache(key, sid)
-        if expired:
-            for sid, count in Counter(sid for _, sid in expired_keys).items():
-                with spaces.enter(spaces.get(sid) if spaces.INSTALLED else None):
-                    adapter = core.ADAPTERS["max"] if spaces.INSTALLED else self.adapter
-                    await core.alert_staff(adapter, f"⚠️ Истёк срок обработки {count} материалов в очереди. Попросите сотрудников отправить их заново.")
+
+        # Ссылки и подписи не храним бесконечно даже при недоступной нейросети.
+        # Получателей определяем до terminal-транзакции; внутри неё только SQLite-записи.
+        expired_rows = core.db.execute(
+            """SELECT event_key,space_id,payload,created,attempts FROM max_inbox
+               WHERE state IN ('pending','failed') AND created<? ORDER BY created""",
+            (now - 7 * 86400,)).fetchall()
+        if expired_rows:
+            import max_actions
+            for row in expired_rows:
+                sid = int(row["space_id"] or 0)
+                staff_kind, staff_uids = max_actions.material_failure_recipients(self.adapter, sid)
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                    if not isinstance(payload, dict) or not isinstance(payload.get("message"), dict):
+                        raise ValueError("payload не содержит объект message")
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    reason = ("Повреждён payload max_inbox: " + core.err(exc))[:240]
+                    db = spaces.queue_db()
+                    try:
+                        max_actions.stage_material_failure(
+                            self.adapter, row["event_key"], "", "", sid, row["created"], row["attempts"], reason,
+                            staff_text=(f"⚠️ Материал {row['event_key'][:8]} помещён в карантин: "
+                                        "повреждены сохранённые данные. Требуется административный разбор."),
+                            staff_kind=staff_kind, staff_uids=staff_uids, now=now, db=db)
+                        db.execute(
+                            """UPDATE max_inbox SET state='quarantined',error=?
+                               WHERE event_key=? AND state IN ('pending','failed')""",
+                            (reason, row["event_key"]))
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        raise
+                    continue
+
+                message = payload["message"]
+                uid = str((message.get("sender") or {}).get("user_id") or "")
+                mid = str((message.get("body") or {}).get("mid") or "")
+                sid = int(row["space_id"] or message.get("_space") or 0)
+                if sid != int(row["space_id"] or 0):
+                    staff_kind, staff_uids = max_actions.material_failure_recipients(self.adapter, sid)
+                reason = "Истёк семидневный срок обработки в max_inbox"
+                db = spaces.queue_db()
+                try:
+                    max_actions.stage_material_failure(
+                        self.adapter, row["event_key"], uid, mid, sid, row["created"], row["attempts"], reason,
+                        user_text=("⚠️ Материал не удалось обработать за 7 дней. Отправьте его заново." if uid else None),
+                        staff_text=(f"⚠️ Истёк срок обработки материала {row['event_key'][:8]}"
+                                    f"{f' пользователя {uid}' if uid else ''}. "
+                                    "Попросите отправить материал заново."),
+                        staff_kind=staff_kind, staff_uids=staff_uids, now=now, db=db)
+                    changed = db.execute(
+                        """UPDATE max_inbox SET state='expired',payload='',error=?
+                           WHERE event_key=? AND state IN ('pending','failed')""",
+                        (reason, row["event_key"])).rowcount
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                if changed:
+                    clear_cache(row["event_key"], sid)
         if core.SHUTTING_DOWN:
             return False
         row = core.db.execute("SELECT a.* FROM max_inbox a WHERE a.state='pending' AND a.next_try<=? "
@@ -119,7 +172,30 @@ class Worker:
         if not changed:
             return False
         try:
-            message = json.loads(row["payload"])["message"]
+            try:
+                payload = json.loads(row["payload"])
+                message = payload["message"]
+                if not isinstance(message, dict):
+                    raise TypeError("message должен быть объектом")
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                import max_actions
+                sid = int(row["space_id"] or 0)
+                staff_kind, staff_uids = max_actions.material_failure_recipients(self.adapter, sid)
+                reason = ("Повреждён payload max_inbox: " + core.err(exc))[:240]
+                db = spaces.queue_db()
+                try:
+                    max_actions.stage_material_failure(
+                        self.adapter, key, "", "", sid, row["created"], attempt, reason,
+                        staff_text=(f"⚠️ Материал {key[:8]} помещён в карантин: "
+                                    "повреждены сохранённые данные. Требуется административный разбор."),
+                        staff_kind=staff_kind, staff_uids=staff_uids, now=now, db=db)
+                    db.execute("""UPDATE max_inbox SET state='quarantined',next_try=0,error=?
+                                  WHERE event_key=? AND state='processing'""", (reason, key))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                return True
             if spaces.INSTALLED:
                 message = {"_space": row["space_id"], **message}
             await self.adapter.on_message(message, source_key=key)

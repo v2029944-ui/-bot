@@ -68,6 +68,10 @@ async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
     if actor and core.can_manage_draft(approval, actor, d) and actor not in recipients:
         recipients.append(actor)
     for a in recipients:
+        current = core.get(did)
+        if not current or not core.can_manage_draft(approval, a, current):
+            core.log.info("доставка черновика %s получателю %s пропущена: права изменились", did, a)
+            continue
         mode = "normal" if a == actor else ops.delivery_for(approval, a)
         try:
             if mode == "defer":
