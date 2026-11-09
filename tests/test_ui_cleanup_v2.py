@@ -60,7 +60,9 @@ def test_new_draft_attempt_queues_only_older_version_for_same_recipient(monkeypa
         monkeypatch.setattr(ad, "_upload_image", upload)
         did = await core.submit(ad, "9", "Author", "Description", png)
         first_mid = f"m{api.n}"
-        first = core.db.execute("SELECT did,attempt,uid FROM max_draft_ui WHERE mid=?", (first_mid,)).fetchone()
+        first = core.db.execute("""SELECT u.did,u.attempt,r.uid FROM max_draft_ui u
+                                   JOIN max_draft_recipient r ON r.mid=u.mid WHERE u.mid=?""",
+                                (first_mid,)).fetchone()
         assert tuple(first) == (did, 1, "9")
 
         core._set(did, attempts=2, post="Second version")
@@ -97,6 +99,7 @@ def test_cleanup_deletes_old_draft_after_new_delivery(monkeypatch, png, llm):
         deletes = [c for c in api.of("DELETE") if c[2].get("message_id") == first_mid]
         assert len(deletes) == 1
         assert core.db.execute("SELECT 1 FROM max_draft_ui WHERE mid=?", (first_mid,)).fetchone() is None
+        assert core.db.execute("SELECT 1 FROM max_draft_recipient WHERE mid=?", (first_mid,)).fetchone() is None
         await ad.http.aclose()
 
     run(scenario())
