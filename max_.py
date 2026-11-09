@@ -142,6 +142,7 @@ class Max(core.Adapter):
                     and 400 <= e.response.status_code < 500 and e.response.status_code != 408))
 
     async def call(self, method, path, **kw):
+        preflight = kw.pop("_preflight", None)
         rate_key = str(kw.pop("_rate_key", "global"))
         rates = self._rates()
         await rates.api.wait()
@@ -156,6 +157,8 @@ class Max(core.Adapter):
                 # The edit/delete API has the same documented 2 rps cap. message_id
                 # does not identify its chat locally, so use a conservative shared gate.
                 await rates.message_mutation.wait()
+        if preflight is not None:
+            preflight()
         started = time.monotonic()
         try:
             r = await self.http.request(method, path, **kw)
@@ -387,15 +390,18 @@ class Max(core.Adapter):
                 core.db.commit()
 
     async def _send(self, target: dict, post: str, photo: str | None = None, buttons=None, silent=False, video=None, media=None,
-                    admin_menu=True):
+                    admin_menu=True, preflight=None):
         if admin_menu and "user_id" in target:
             lock = self._send_locks.setdefault(str(target["user_id"]), asyncio.Lock())
             async with lock:
-                return await self._send_inner(target, post, photo, buttons, silent, video, media, admin_menu)
-        return await self._send_inner(target, post, photo, buttons, silent, video, media, admin_menu)
+                return await self._send_inner(target, post, photo, buttons, silent, video, media, admin_menu, preflight)
+        return await self._send_inner(target, post, photo, buttons, silent, video, media, admin_menu, preflight)
 
-    async def _send_inner(self, target, post, photo=None, buttons=None, silent=False, video=None, media=None, admin_menu=True):
+    async def _send_inner(self, target, post, photo=None, buttons=None, silent=False, video=None, media=None, admin_menu=True,
+                          preflight=None):
         target = {k: _id(v) for k, v in target.items()}  # user_id/chat_id — числами
+        if preflight is not None:
+            preflight()
         with_admin = bool(admin_menu and "user_id" in target and core.is_admin(self, target["user_id"]))
         base_buttons = [[dict(button) for button in row] for row in (buttons or [])]  # без кнопки админа: нужны, чтобы потом её убрать
         if "user_id" in target:
@@ -445,7 +451,9 @@ class Max(core.Adapter):
         refreshed = False
         for i in range(tries):  # MAX отвечает "attachment.not.ready", пока вложение обрабатывается
             try:
-                resp = await self.call("POST", "/messages", params=target, json=body)
+                if preflight is not None:
+                    preflight()
+                resp = await self.call("POST", "/messages", params=target, json=body, _preflight=preflight)
                 break
             except httpx.HTTPStatusError as e:
                 if "not.ready" in e.response.text and i < tries - 1:
@@ -557,10 +565,15 @@ class Max(core.Adapter):
         core.db.commit()
 
     async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None, resume=False):
-        d = core.get(did)
-        if not d:  # черновик успели удалить — не роняем рассылку остальным
-            log.warning("черновик %s не найден, доставка получателю %s пропущена", did, approver)
-            return
+        def require_access():
+            current = core.get(did)
+            if not current or not core.can_manage_draft(self, approver, current):
+                exc = PermissionError(f"получатель {approver} больше не имеет доступа к черновику {did}")
+                setattr(exc, "max_not_sent", True)
+                raise exc
+            return current
+
+        d = require_access()
         n = d["attempts"]
         settings = post_footer.for_draft(did)
         preview = dict(settings)
@@ -574,6 +587,7 @@ class Max(core.Adapter):
                 if not option.get("post"):
                     saved_mid = await self._approval_delivery_mid(did, n, approver, index) if resume else None
                     if not saved_mid:
+                        require_access()
                         resp = await self.notify(
                             approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
                         if resume:
@@ -591,12 +605,14 @@ class Max(core.Adapter):
                 else:
                     content = header + content
                 if len(content.encode("utf-16-le")) // 2 > 4000:
+                    require_access()
                     await self.notify(approver, f"Вариант {option['model']} слишком длинный для показа со ссылкой.")
                     continue
                 rows = [[{"type": "callback", "text": "✅ Выбрать этот вариант", "payload": f"d:choose_{index}:{did}:{n}"}],
                         [{"type": "callback", "text": "🔁 Заново", "payload": f"d:redo:{did}:{n}"}],
                         [{"type": "callback", "text": "❌ Отклонить материал", "payload": f"d:del:{did}:{n}"}]]
-                resp = await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media)
+                resp = await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media,
+                                        preflight=require_access)
                 sent_mid = _mid(resp)
                 if resume:
                     self._save_approval_delivery(did, n, approver, index, sent_mid)
@@ -613,7 +629,8 @@ class Max(core.Adapter):
         if saved_mid:
             self._record_draft_delivery([saved_mid], approver, did, n)
             return
-        resp = await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)
+        resp = await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media,
+                                preflight=require_access)
         sent_mid = _mid(resp)
         if resume:
             self._save_approval_delivery(did, n, approver, -1, sent_mid)

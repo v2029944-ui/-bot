@@ -9,6 +9,7 @@ import core
 import max_
 import ops
 import spaces
+from services import submissions
 
 
 def test_promoting_root_admin_does_not_grant_global_process_control():
@@ -83,4 +84,110 @@ def test_media_upload_locks_release_after_use_without_cleanup(monkeypatch, tmp_p
             assert len(ad._upload_cache) == 1
         finally:
             await ad.http.aclose()
+    run(scenario())
+
+
+def test_send_draft_rechecks_stale_recipient_list_before_delivery(monkeypatch, png, llm):
+    async def scenario():
+        approval = FakeAdapter("max", ["9"], admins=[])
+        core.ADAPTERS["max"] = approval
+        core.refresh_people(approval)
+        core._add_person(approval, "5", "Admin", "adm")
+        did = await core.submit(approval, "9", "Author", "Description", png)
+        d = core.get(did)
+        sent_before = len(approval.sent("approval"))
+
+        def stale_recipients(_draft, _adapter):
+            core._remove_person(approval, "5", "Admin")
+            return ["5"]
+
+        monkeypatch.setattr(core, "draft_recipients", stale_recipients)
+        sent, last = await submissions._send_draft(d, did, d["post"], approval)
+        assert sent == 0 and last is None
+        assert len(approval.sent("approval")) == sent_before
+        assert not core.can_manage_draft(approval, "5", core.get(did))
+
+    run(scenario())
+
+
+
+
+def test_max_rechecks_draft_rights_after_rate_limit_before_http(monkeypatch, png, llm):
+    async def scenario():
+        seed = FakeAdapter("max", ["9"], admins=[])
+        core.ADAPTERS["max"] = seed
+        did = await core.submit(seed, "9", "Author", "Description", png)
+        d = core.get(did)
+
+        ad = max_.Max("token", "-1", [], ["9"], [])
+        core.ADAPTERS["max"] = ad
+        core.refresh_people(ad)
+        core._add_person(ad, "5", "Admin", "adm")
+        assert core.can_manage_draft(ad, "5", core.get(did))
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingGate:
+            async def wait(self):
+                entered.set()
+                await release.wait()
+
+        rates = ad._rates()
+        rates.messages["user_id:5"] = BlockingGate()
+        http_calls = []
+
+        async def unexpected_request(method, path, **kwargs):
+            http_calls.append((method, path))
+            raise AssertionError("HTTP request must not happen after access revocation")
+
+        monkeypatch.setattr(ad.http, "request", unexpected_request)
+        try:
+            task = asyncio.create_task(ad.send_for_approval("5", did, None, d["post"]))
+            await entered.wait()
+            core._remove_person(ad, "5", "Admin")
+            release.set()
+            with pytest.raises(PermissionError, match="больше не имеет доступа") as exc:
+                await task
+            assert ad.not_sent(exc.value)
+            assert http_calls == []
+            assert not core.can_manage_draft(ad, "5", core.get(did))
+        finally:
+            release.set()
+            await ad.http.aclose()
+
+    run(scenario())
+
+def test_max_rechecks_draft_rights_after_media_upload_before_post(monkeypatch, png, llm):
+    async def scenario():
+        seed = FakeAdapter("max", ["9"], admins=[])
+        core.ADAPTERS["max"] = seed
+        did = await core.submit(seed, "9", "Author", "Description", png)
+        d = core.get(did)
+
+        ad = max_.Max("token", "-1", [], ["9"], [])
+        core.ADAPTERS["max"] = ad
+        core.refresh_people(ad)
+        core._add_person(ad, "5", "Admin", "adm")
+        assert core.can_manage_draft(ad, "5", core.get(did))
+        calls = []
+
+        async def upload(_path, _kind, force=False):
+            core._remove_person(ad, "5", "Admin")
+            return "token-after-slow-upload"
+
+        async def call(method, path, **kwargs):
+            calls.append((method, path))
+            return {"message": {"body": {"mid": "unexpected"}}}
+
+        monkeypatch.setattr(ad, "_cached_upload", upload)
+        monkeypatch.setattr(ad, "call", call)
+        try:
+            with pytest.raises(PermissionError, match="больше не имеет доступа"):
+                await ad.send_for_approval("5", did, d["photo"], d["post"])
+            assert ("POST", "/messages") not in calls
+            assert not core.can_manage_draft(ad, "5", core.get(did))
+        finally:
+            await ad.http.aclose()
+
     run(scenario())
