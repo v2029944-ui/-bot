@@ -110,8 +110,17 @@ async def _claude(system: str, text: str, b64: str | None) -> str:
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if b64:
         content.insert(0, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
-    r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
-                                      messages=[{"role": "user", "content": content}])
+    try:
+        r = await core._client.messages.create(model=comparison.request_model(comparison.MODEL.get()), max_tokens=1000, system=system,
+                                          messages=[{"role": "user", "content": content}])
+    except Exception as exc:
+        try:
+            from anthropic import APITimeoutError
+        except ImportError:
+            APITimeoutError = ()  # type: ignore[assignment,misc]
+        if APITimeoutError and isinstance(exc, APITimeoutError):
+            raise core.AmbiguousGeneration("Таймаут нейросети: результат запроса неизвестен. Автоматический повтор остановлен.") from exc
+        raise
     if getattr(r, "stop_reason", None) in ("max_tokens", "model_context_window_exceeded", "pause_turn"):
         raise core.IncompleteGeneration("Ответ нейросети оборван до завершения. Повторите генерацию вручную или сократите описание.")
     # первым блоком может прийти не текст: собираем все текстовые
@@ -135,7 +144,12 @@ async def _openai(system: str, text: str, b64: str | None) -> str:
     key = "max_tokens"
     async with httpx.AsyncClient(timeout=120) as c:
         while True:
-            r = await c.post(f"{base}/chat/completions", headers=headers, json={**payload, key: 1000})
+            try:
+                r = await c.post(f"{base}/chat/completions", headers=headers, json={**payload, key: 1000})
+            except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError) as exc:
+                raise core.AmbiguousGeneration(
+                    "Связь с нейросетью оборвалась после отправки запроса; результат и оплата неизвестны. "
+                    "Автоматический повтор остановлен.") from exc
             if r.status_code == 400 and key == "max_tokens" and "max_tokens" in r.text:
                 key = "max_completion_tokens"  # compatibility retry: rejected request was not generated/billed
                 continue
@@ -170,11 +184,15 @@ async def generate_options(*args, previous=None, **kwargs):
                 raise ValueError("Слишком длинный вариант для сравнения")
             return {"model": model, "post": post}
         except Exception as e:
-            return {"model": model, "error": core.err(e)[:120], "incomplete": isinstance(e, core.IncompleteGeneration)}
+            return {"model": model, "error": core.err(e)[:120],
+                    "incomplete": isinstance(e, core.IncompleteGeneration),
+                    "ambiguous": isinstance(e, core.AmbiguousGeneration)}
         finally:
             comparison.MODEL.reset(token)
     options = await asyncio.gather(*(one(model) for model in c["models"]))
     if not any(o.get("post") for o in options):
+        if any(o.get("ambiguous") for o in options):
+            raise core.AmbiguousGeneration("Нет готового поста: результат одного из запросов неизвестен. Повторите обработку вручную после проверки расходов.")
         if any(o.get("incomplete") for o in options):
             raise core.IncompleteGeneration("Нет готового поста: нейросеть оборвала ответ. Повторите обработку вручную или сократите описание.")
         raise RuntimeError("Ни одна модель не подготовила пост. Проверьте баланс и доступность моделей.")
