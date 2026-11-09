@@ -492,11 +492,27 @@ class Max(core.Adapter):
                 core.db.commit()
         return resp
 
-    def _approval_delivery_mid(self, did, attempt, uid, slot):
+    async def _approval_delivery_mid(self, did, attempt, uid, slot):
         row = core.db.execute("""SELECT mid FROM max_approval_delivery
                                  WHERE did=? AND attempt=? AND uid=? AND slot=?""",
                               (did, attempt, str(uid), slot)).fetchone()
-        return row["mid"] if row else None
+        if not row:
+            return None
+        mid = row["mid"]
+        try:
+            await self.call("GET", "/messages/" + quote(str(mid), safe=""))
+            return mid
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+        # Confirmed absent: stale delivery state must not suppress a resend.
+        core.db.execute("""DELETE FROM max_approval_delivery
+                           WHERE did=? AND attempt=? AND uid=? AND slot=?""",
+                        (did, attempt, str(uid), slot))
+        for table in ("max_button_cache", "max_draft_ui", "max_draft_recipient", "max_notices", "max_ui_cleanup"):
+            core.db.execute(f"DELETE FROM {table} WHERE mid=?", (mid,))
+        core.db.commit()
+        return None
 
     def _save_approval_delivery(self, did, attempt, uid, slot, mid):
         if mid:
@@ -539,14 +555,14 @@ class Max(core.Adapter):
             delivered_mids = []
             for index, option in enumerate(options):
                 if not option.get("post"):
-                    saved_mid = self._approval_delivery_mid(did, n, approver, index) if resume else None
+                    saved_mid = await self._approval_delivery_mid(did, n, approver, index) if resume else None
                     if not saved_mid:
                         resp = await self.notify(
                             approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
                         if resume:
                             self._save_approval_delivery(did, n, approver, index, _mid(resp))
                     continue
-                saved_mid = self._approval_delivery_mid(did, n, approver, index) if resume else None
+                saved_mid = await self._approval_delivery_mid(did, n, approver, index) if resume else None
                 if saved_mid:
                     delivered_mids.append(saved_mid)
                     delivered += 1
@@ -576,7 +592,7 @@ class Max(core.Adapter):
         post = post_footer.render(post, "max", preview)
         buttons = [[{"type": "callback", "text": label, "payload": payload}
                     for label, payload in row] for row in core.approval_rows(did, n)]
-        saved_mid = self._approval_delivery_mid(did, n, approver, -1) if resume else None
+        saved_mid = await self._approval_delivery_mid(did, n, approver, -1) if resume else None
         if saved_mid:
             self._record_draft_delivery([saved_mid], approver, did, n)
             return
