@@ -27,11 +27,12 @@ def scrub(text: str) -> str:
     return re.sub(r"//[^/@\s]+@", "//***@", text or "")
 
 
-def run(cmd: list[str], cwd: Path, timeout: int = 300, env: dict | None = None) -> tuple[int, str]:
+def run(cmd: list[str], cwd: Path, timeout: int = 300, env: dict | None = None, *, clean_env: bool = False) -> tuple[int, str]:
     try:
+        base_env = {} if clean_env else dict(os.environ)
         with subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               start_new_session=os.name == "posix",
-                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})}) as p:
+                              env={**base_env, "GIT_TERMINAL_PROMPT": "0", **(env or {})}) as p:
             try:
                 stdout, stderr = p.communicate(timeout=timeout)
             except BaseException:
@@ -83,6 +84,15 @@ def summarize_failure(out: str) -> str:
 def finish(status: str, who: dict, **kw):
     _write("update_result.json", {"status": status, "platform": who.get("platform"), "uid": who.get("uid"), **kw})
     print(f"[updater] {status} {kw.get('detail', '')[:200]}", flush=True)
+
+
+def candidate_test_env(pypath: str, data_dir: Path) -> dict[str, str]:
+    """Minimal environment for untrusted candidate tests; production secrets stay out."""
+    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE")
+    env = {name: os.environ[name] for name in keep if os.environ.get(name)}
+    env.update({"PYTHONPATH": pypath, "DATA_DIR": str(data_dir)})
+    return env
 
 
 def requirements_sha(folder: Path) -> str:
@@ -167,7 +177,7 @@ def update():
             if rc:
                 return finish("failed", who, detail="не удалось установить библиотеки: " + out[-300:], commit=short())
             pypath = os.pathsep.join([str(wt), str(libs)])
-        rc, out = run(shlex.split(TEST_CMD), wt, 600, {"PYTHONPATH": pypath, "DATA_DIR": str(tmp / "data")})
+        rc, out = run(shlex.split(TEST_CMD), wt, 600, candidate_test_env(pypath, tmp / "data"), clean_env=True)
         if rc:
             return finish("tests_failed", who, detail=summarize_failure(out)[-900:], commit=short())
         subject = git("log", "-1", "--format=%s", new)[1][:100]
