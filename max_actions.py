@@ -12,8 +12,9 @@ import spaces
 
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, uid TEXT,
-    payload TEXT, state TEXT DEFAULT 'pending', created REAL DEFAULT 0)""")
-schema.add_columns(core.db, "max_actions", ("created REAL DEFAULT 0",))
+    payload TEXT, state TEXT DEFAULT 'pending', created REAL DEFAULT 0,
+    attempts INTEGER DEFAULT 0, next_try REAL DEFAULT 0)""")
+schema.add_columns(core.db, "max_actions", ("created REAL DEFAULT 0", "attempts INTEGER DEFAULT 0", "next_try REAL DEFAULT 0"))
 core.db.execute("UPDATE max_actions SET created=? WHERE created=0", (time.time(),))
 core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_pending ON max_actions(state,uid,id)")
 core.db.commit()
@@ -80,11 +81,28 @@ class Worker:
         except Exception:
             if material_transfer:
                 # Transfer to max_inbox is idempotent and has no external side effect.
-                # Keep the original payload until the durable handoff succeeds.
-                core.db.execute("UPDATE max_actions SET state='pending' WHERE id=?", (row["id"],))
+                # Keep the original payload until the durable handoff succeeds, but
+                # back off and respect the same 7-day retention as max_inbox.
+                now = time.time()
+                attempt = int(row.get("attempts") or 0) + 1
+                if now - float(row.get("created") or now) >= 7 * 86400:
+                    core.db.execute("UPDATE max_actions SET state='failed',payload='',attempts=? WHERE id=?",
+                                    (attempt, row["id"]))
+                    core.db.commit()
+                    logging.getLogger("max_actions").error(
+                        "материал %s не удалось перенести в очередь за 7 дней; запись закрыта", row["id"])
+                    try:
+                        await self.adapter.notify(
+                            row["uid"], "⚠️ Материал не удалось поставить в очередь обработки. Отправьте его заново.")
+                    except Exception:
+                        logging.getLogger("max_actions").warning("не удалось сообщить об истёкшем материале")
+                    return
+                delay = min(30 * 2 ** min(attempt - 1, 7), 3600)
+                core.db.execute("""UPDATE max_actions SET state='pending',attempts=?,next_try=?
+                                   WHERE id=?""", (attempt, now + delay, row["id"]))
                 core.db.commit()
                 logging.getLogger("max_actions").exception(
-                    "не удалось перенести материал %s в постоянную очередь; повторим", row["id"])
+                    "не удалось перенести материал %s в постоянную очередь; повтор через %.0f с", row["id"], delay)
                 return
             # Не повторяем неизвестный побочный эффект команды автоматически.
             core.db.execute("UPDATE max_actions SET state='failed',payload='' WHERE id=?", (row["id"],))
@@ -101,9 +119,11 @@ class Worker:
     def schedule(self):
         self.active = {uid: task for uid, task in self.active.items() if not task.done()}
         # Только первая команда каждого пользователя; тела всей очереди не нужны.
+        now = time.time()
         rows = core.db.execute("""SELECT a.* FROM max_actions a JOIN (
-            SELECT MIN(id) AS id FROM max_actions WHERE state='pending' GROUP BY uid
-            ) first ON first.id=a.id ORDER BY a.id LIMIT 8""").fetchall()
+            SELECT MIN(id) AS id FROM max_actions
+            WHERE state='pending' AND next_try<=? GROUP BY uid
+            ) first ON first.id=a.id ORDER BY a.id LIMIT 8""", (now,)).fetchall()
         for row in rows:
             if len(self.active) >= 4 or core.SHUTTING_DOWN:
                 break
