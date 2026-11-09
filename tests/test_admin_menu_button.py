@@ -113,7 +113,10 @@ class Api:
             self.messages[f"m{self.n}"] = body
             return httpx.Response(200, json={"message": {"body": {"mid": f"m{self.n}"}}})
         if request.method == "GET" and request.url.path.startswith("/messages/"):
-            return httpx.Response(200, json={"body": self.messages[request.url.path.rsplit("/", 1)[-1]]})
+            mid = request.url.path.rsplit("/", 1)[-1]
+            if mid not in self.messages:
+                return httpx.Response(404, request=request, json={"code": "not_found", "message": "Message not found"})
+            return httpx.Response(200, json={"body": self.messages[mid]})
         if request.method == "PUT" and request.url.path == "/messages":
             mid = request.url.params["message_id"]
             if mid in self.messages:
