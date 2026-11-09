@@ -103,7 +103,9 @@ def test_max_approval_has_three_main_buttons(tg, llm, png, monkeypatch):
     sent = []
 
     async def scenario():
-        adapter = max_.Max("token", "-1", ["1"], [])
+        adapter = max_.Max("token", "-1", [], [], admins=["1"])
+        core.ADAPTERS["max"] = adapter
+        core.refresh_people(adapter)
 
         async def send(target, post, photo, buttons, **kwargs):
             sent.extend(button for row in buttons for button in row)
