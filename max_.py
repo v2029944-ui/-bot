@@ -464,15 +464,7 @@ class Max(core.Adapter):
                 parts = str(button.get("payload", "")).split(":")
                 if mid and len(parts) == 4 and parts[0] == "d" and parts[2].isdigit() and parts[3].isdigit():
                     did, attempt = int(parts[2]), int(parts[3])
-                    uid = str(target.get("user_id") or "")
                     core.db.execute("INSERT OR REPLACE INTO max_draft_ui VALUES(?,?,?)", (mid, did, attempt))
-                    if uid:
-                        core.db.execute("INSERT OR REPLACE INTO max_draft_recipient(mid,uid) VALUES(?,?)", (mid, uid))
-                        for old in core.db.execute("""SELECT u.mid FROM max_draft_ui u
-                                                     JOIN max_draft_recipient r ON r.mid=u.mid
-                                                     WHERE u.did=? AND r.uid=? AND u.attempt<? AND u.mid!=?""",
-                                                   (did, uid, attempt, mid)).fetchall():
-                            self._queue_ui_cleanup("delete", old["mid"], uid)
                     current = core.get(did)
                     if current and current["status"] == "pending" and current["attempts"] == int(parts[3]):
                         core.db.execute("INSERT OR REPLACE INTO max_button_cache VALUES(?,?)", (mid, json.dumps(attachments, ensure_ascii=False)))
@@ -496,6 +488,24 @@ class Max(core.Adapter):
                 core.db.commit()
         return resp
 
+    def _record_draft_delivery(self, mids, approver, did, attempt):
+        """Record recipient only after the complete approval delivery succeeded."""
+        uid = str(approver)
+        mids = [str(mid) for mid in mids if mid]
+        for mid in mids:
+            core.db.execute("INSERT OR REPLACE INTO max_draft_recipient(mid,uid) VALUES(?,?)", (mid, uid))
+        if mids:
+            placeholders = ",".join("?" for _ in mids)
+            old_rows = core.db.execute(
+                f"""SELECT u.mid FROM max_draft_ui u
+                    JOIN max_draft_recipient r ON r.mid=u.mid
+                    WHERE u.did=? AND r.uid=? AND u.attempt<?
+                    AND u.mid NOT IN ({placeholders})""",
+                (did, uid, attempt, *mids)).fetchall()
+            for old in old_rows:
+                self._queue_ui_cleanup("delete", old["mid"], uid)
+        core.db.commit()
+
     async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
         d = core.get(did)
         if not d:  # черновик успели удалить — не роняем рассылку остальным
@@ -509,6 +519,7 @@ class Max(core.Adapter):
         options = json.loads(d.get("candidates") or "[]")
         if options:
             delivered = 0
+            delivered_mids = []
             for index, option in enumerate(options):
                 if not option.get("post"):
                     await self.notify(approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
@@ -525,15 +536,18 @@ class Max(core.Adapter):
                 rows = [[{"type": "callback", "text": "✅ Выбрать этот вариант", "payload": f"d:choose_{index}:{did}:{n}"}],
                         [{"type": "callback", "text": "🔁 Заново", "payload": f"d:redo:{did}:{n}"}],
                         [{"type": "callback", "text": "❌ Отклонить материал", "payload": f"d:del:{did}:{n}"}]]
-                await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media)
+                resp = await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media)
+                delivered_mids.append(_mid(resp))
                 delivered += 1
             if not delivered:
                 raise RuntimeError("Нет доступных вариантов для согласования")
+            self._record_draft_delivery(delivered_mids, approver, did, n)
             return
         post = post_footer.render(post, "max", preview)
         buttons = [[{"type": "callback", "text": label, "payload": payload}
                     for label, payload in row] for row in core.approval_rows(did, n)]
-        await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)
+        resp = await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)
+        self._record_draft_delivery([_mid(resp)], approver, did, n)
 
     async def publish(self, photo, post, video=None, media=None):
         if str(self.channel).startswith("user:"):
