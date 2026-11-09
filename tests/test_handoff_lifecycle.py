@@ -1,4 +1,5 @@
 import sqlite3
+
 from conftest import FakeAdapter, run
 
 import core
