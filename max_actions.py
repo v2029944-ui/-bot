@@ -204,21 +204,32 @@ class Worker:
                    (event_key, kind, str(uid or ""), int(sid or 0), text[:500], now))
 
     async def process_notice(self, row):
+        # Resolve workspace/recipient before the send boundary. Any failure here is
+        # definitely pre-send and therefore safe to retry with backoff.
         try:
             if row["kind"] == "global_staff":
+                space = None
                 adapter = spaces.root().adapters["max"] if spaces.INSTALLED else self.adapter
                 allowed = spaces.global_admin(row["uid"]) if spaces.INSTALLED else str(row["uid"]) in core.staff(adapter)
                 if not allowed:
                     self._skip_notice(row, "Права глобального администратора отозваны")
                     return
-                await adapter.notify(row["uid"], row["text"])
             else:
-                with spaces.enter(spaces.get(row["space_id"]) if spaces.INSTALLED and row["space_id"] else None):
+                space = spaces.get(row["space_id"]) if spaces.INSTALLED and row["space_id"] else None
+                with spaces.enter(space):
                     adapter = core.ADAPTERS["max"]
                     if row["kind"] == "staff" and str(row["uid"]) not in core.staff(adapter):
                         self._skip_notice(row, "Права администратора пространства отозваны")
                         return
-                    await adapter.notify(row["uid"], row["text"])
+        except Exception as exc:
+            self._notice_prepare_failed(row, exc)
+            return
+
+        # From this point the adapter call may reach MAX. Ambiguous send failures must
+        # not be retried automatically because that could duplicate the warning.
+        try:
+            with spaces.enter(space):
+                await adapter.notify(row["uid"], row["text"])
         except asyncio.CancelledError:
             core.db.execute("""UPDATE max_handoff_notices
                                SET state='unknown',last_error='Отправка прервана; результат неизвестен'
@@ -230,6 +241,16 @@ class Worker:
             return
         core.db.execute("UPDATE max_handoff_notices SET state='done',last_error='' WHERE id=? AND state='sending'", (row["id"],))
         core.db.commit()
+
+    def _notice_prepare_failed(self, row, exc):
+        attempts = int(row["attempts"] or 0) + 1
+        delay = min(30 * 2 ** min(attempts - 1, 7), 3600)
+        db = spaces.queue_db()
+        db.execute("""UPDATE max_handoff_notices
+                      SET state='pending',attempts=?,next_try=?,last_error=?
+                      WHERE id=? AND state='sending'""",
+                   (attempts, time.time() + delay, core.err(exc)[:240], row["id"]))
+        db.commit()
 
     def _skip_notice(self, row, reason):
         db = spaces.queue_db()
