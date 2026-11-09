@@ -63,6 +63,9 @@ _RATE_LOOPS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, _Rat
 core.db.execute("CREATE TABLE IF NOT EXISTS max_ui (uid TEXT PRIMARY KEY, menu_mid TEXT, btn TEXT)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_ui (mid TEXT PRIMARY KEY, did INTEGER, attempt INTEGER)")
 core.db.execute("CREATE TABLE IF NOT EXISTS max_draft_recipient (mid TEXT PRIMARY KEY, uid TEXT)")
+core.db.execute("""CREATE TABLE IF NOT EXISTS max_approval_delivery (
+    did INTEGER, attempt INTEGER, uid TEXT, slot INTEGER, mid TEXT, created REAL,
+    PRIMARY KEY(did,attempt,uid,slot))""")
 core.db.execute("""CREATE TABLE IF NOT EXISTS max_ui_cleanup (
     op TEXT, mid TEXT, uid TEXT DEFAULT '', attempts INTEGER DEFAULT 0,
     next_try REAL DEFAULT 0, created REAL, last_error TEXT DEFAULT '',
@@ -102,6 +105,7 @@ def _id(x):
 
 class Max(core.Adapter):
     name = "max"
+    supports_approval_resume = True
 
     def __init__(self, token, channel, approvers, employees, admins=()):
         self.http = httpx.AsyncClient(base_url=API, headers={"Authorization": token}, timeout=60,
@@ -488,6 +492,19 @@ class Max(core.Adapter):
                 core.db.commit()
         return resp
 
+    def _approval_delivery_mid(self, did, attempt, uid, slot):
+        row = core.db.execute("""SELECT mid FROM max_approval_delivery
+                                 WHERE did=? AND attempt=? AND uid=? AND slot=?""",
+                              (did, attempt, str(uid), slot)).fetchone()
+        return row["mid"] if row else None
+
+    def _save_approval_delivery(self, did, attempt, uid, slot, mid):
+        if mid:
+            core.db.execute("""INSERT OR REPLACE INTO max_approval_delivery
+                               (did,attempt,uid,slot,mid,created) VALUES(?,?,?,?,?,?)""",
+                            (did, attempt, str(uid), slot, str(mid), time.time()))
+            core.db.commit()
+
     def _record_draft_delivery(self, mids, approver, did, attempt):
         """Record recipient only after the complete approval delivery succeeded."""
         uid = str(approver)
@@ -506,7 +523,7 @@ class Max(core.Adapter):
                 self._queue_ui_cleanup("delete", old["mid"], uid)
         core.db.commit()
 
-    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None):
+    async def send_for_approval(self, approver, did, photo, post, silent=False, video=None, media=None, resume=False):
         d = core.get(did)
         if not d:  # черновик успели удалить — не роняем рассылку остальным
             log.warning("черновик %s не найден, доставка получателю %s пропущена", did, approver)
@@ -524,6 +541,11 @@ class Max(core.Adapter):
                 if not option.get("post"):
                     await self.notify(approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
                     continue
+                saved_mid = self._approval_delivery_mid(did, n, approver, index) if resume else None
+                if saved_mid:
+                    delivered_mids.append(saved_mid)
+                    delivered += 1
+                    continue
                 content = post_footer.render(option["post"], "max", preview)
                 header = f"Модель: {option['model']}\n\n"
                 if isinstance(content, post_footer.LinkedPost):
@@ -537,7 +559,10 @@ class Max(core.Adapter):
                         [{"type": "callback", "text": "🔁 Заново", "payload": f"d:redo:{did}:{n}"}],
                         [{"type": "callback", "text": "❌ Отклонить материал", "payload": f"d:del:{did}:{n}"}]]
                 resp = await self._send({"user_id": approver}, content, photo, rows, silent=silent, video=video, media=media)
-                delivered_mids.append(_mid(resp))
+                sent_mid = _mid(resp)
+                if resume:
+                    self._save_approval_delivery(did, n, approver, index, sent_mid)
+                delivered_mids.append(sent_mid)
                 delivered += 1
             if not delivered:
                 raise RuntimeError("Нет доступных вариантов для согласования")
@@ -546,8 +571,15 @@ class Max(core.Adapter):
         post = post_footer.render(post, "max", preview)
         buttons = [[{"type": "callback", "text": label, "payload": payload}
                     for label, payload in row] for row in core.approval_rows(did, n)]
+        saved_mid = self._approval_delivery_mid(did, n, approver, -1) if resume else None
+        if saved_mid:
+            self._record_draft_delivery([saved_mid], approver, did, n)
+            return
         resp = await self._send({"user_id": approver}, post, photo, buttons, silent=silent, video=video, media=media)
-        self._record_draft_delivery([_mid(resp)], approver, did, n)
+        sent_mid = _mid(resp)
+        if resume:
+            self._save_approval_delivery(did, n, approver, -1, sent_mid)
+        self._record_draft_delivery([sent_mid], approver, did, n)
 
     async def publish(self, photo, post, video=None, media=None):
         if str(self.channel).startswith("user:"):
