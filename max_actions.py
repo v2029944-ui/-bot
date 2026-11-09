@@ -14,6 +14,7 @@ core.db.execute("""CREATE TABLE IF NOT EXISTS max_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, uid TEXT,
     payload TEXT, state TEXT DEFAULT 'pending', created REAL DEFAULT 0)""")
 schema.add_columns(core.db, "max_actions", ("created REAL DEFAULT 0",))
+core.db.execute("UPDATE max_actions SET created=? WHERE created=0", (time.time(),))
 core.db.execute("CREATE INDEX IF NOT EXISTS max_actions_pending ON max_actions(state,uid,id)")
 core.db.commit()
 
