@@ -159,3 +159,16 @@ def test_rate_registry_is_shared_by_workspaces_using_same_token():
         await other.http.aclose()
 
     run(scenario())
+
+
+def test_senderless_message_is_ignored_without_breaking_polling():
+    async def scenario():
+        adapter = max_.Max("token", "-1", [], [], admins=[])
+        await adapter.on_message({
+            "sender": None,
+            "recipient": {"chat_type": "dialog"},
+            "body": {"mid": "m1", "seq": 1, "text": "forwarded"},
+        })
+        await adapter.http.aclose()
+
+    run(scenario())
