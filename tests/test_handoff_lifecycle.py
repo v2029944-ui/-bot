@@ -1,12 +1,9 @@
 import sqlite3
-from pathlib import Path
-
 from conftest import FakeAdapter, run
 
 import core
 import max_actions
 import ops
-import spaces
 import updater
 
 
@@ -60,7 +57,7 @@ def test_status_shows_handoff_failures_and_notice_problems(monkeypatch):
         now = __import__("time").time()
         core.db.execute("""INSERT INTO max_handoff_failures
                            (event_key,uid,source_mid,space_id,created,failed_at,attempts,reason)
-                           VALUES('f1','9','m9',0,?,?,?,?,?)""",
+                           VALUES('f1','9','m9',0,?,?,?,?)""",
                         (now - 100, now, 7, "sqlite unavailable"))
         core.db.execute("""INSERT INTO max_handoff_notices
                            (event_key,kind,uid,space_id,text,state,created,last_error)
