@@ -183,11 +183,15 @@ class Worker:
             with spaces.enter(spaces.get(sid) if spaces.INSTALLED and sid else None):
                 admins = list(core.staff(core.ADAPTERS["max"]))
         except Exception:
-            admins = []
             logging.getLogger("max_actions").warning(
                 "не удалось определить администраторов для terminal handoff space=%s", sid, exc_info=True)
-        for admin_uid in admins:
-            self._queue_notice(row["event_key"], "staff", admin_uid, sid, staff_text, now)
+            root = spaces.root().adapters["max"] if spaces.INSTALLED else self.adapter
+            admins = list(getattr(root, "global_admins", core._base_admins(root)))
+            for admin_uid in admins:
+                self._queue_notice(row["event_key"], "global_staff", admin_uid, sid, staff_text, now)
+        else:
+            for admin_uid in admins:
+                self._queue_notice(row["event_key"], "staff", admin_uid, sid, staff_text, now)
         db.commit()
         logging.getLogger("max_actions").error("terminal handoff failure event=%s space=%s", row["event_key"][:8], sid)
 
@@ -201,9 +205,20 @@ class Worker:
 
     async def process_notice(self, row):
         try:
-            with spaces.enter(spaces.get(row["space_id"]) if spaces.INSTALLED and row["space_id"] else None):
-                adapter = core.ADAPTERS["max"]
+            if row["kind"] == "global_staff":
+                adapter = spaces.root().adapters["max"] if spaces.INSTALLED else self.adapter
+                allowed = spaces.global_admin(row["uid"]) if spaces.INSTALLED else str(row["uid"]) in core.staff(adapter)
+                if not allowed:
+                    self._skip_notice(row, "Права глобального администратора отозваны")
+                    return
                 await adapter.notify(row["uid"], row["text"])
+            else:
+                with spaces.enter(spaces.get(row["space_id"]) if spaces.INSTALLED and row["space_id"] else None):
+                    adapter = core.ADAPTERS["max"]
+                    if row["kind"] == "staff" and str(row["uid"]) not in core.staff(adapter):
+                        self._skip_notice(row, "Права администратора пространства отозваны")
+                        return
+                    await adapter.notify(row["uid"], row["text"])
         except asyncio.CancelledError:
             core.db.execute("""UPDATE max_handoff_notices
                                SET state='unknown',last_error='Отправка прервана; результат неизвестен'
@@ -215,6 +230,13 @@ class Worker:
             return
         core.db.execute("UPDATE max_handoff_notices SET state='done',last_error='' WHERE id=? AND state='sending'", (row["id"],))
         core.db.commit()
+
+    def _skip_notice(self, row, reason):
+        db = spaces.queue_db()
+        db.execute("""UPDATE max_handoff_notices
+                      SET state='skipped',next_try=0,last_error=?
+                      WHERE id=? AND state='sending'""", (reason[:240], row["id"]))
+        db.commit()
 
     def _notice_failed(self, row, exc):
         import httpx
