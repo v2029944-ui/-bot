@@ -41,16 +41,17 @@ def clear_cache(key, space_id=None):
 
 def is_material(update):
     message = update.get("message") or {}
+    body = message.get("body") or {}
     return (update.get("update_type") == "message_created"
-            and message.get("recipient", {}).get("chat_type", "dialog") == "dialog"
+            and (message.get("recipient") or {}).get("chat_type", "dialog") == "dialog"
             and any(a.get("type") in ("image", "video")
-                    for a in (message.get("body", {}).get("attachments") or [])))
+                    for a in (body.get("attachments") or [])))
 
 
 def enqueue(update):
     payload = json.dumps(update, ensure_ascii=False, sort_keys=True)
     message = update["message"]
-    mid = message.get("body", {}).get("mid")
+    mid = (message.get("body") or {}).get("mid")
     identity = f"{message.get('sender', {}).get('user_id')}:{mid}" if mid else payload
     key = hashlib.sha256(identity.encode()).hexdigest()
     core.db.execute("INSERT OR IGNORE INTO max_inbox(event_key,payload,created,space_id) VALUES(?,?,?,?)",
