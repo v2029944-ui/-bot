@@ -172,7 +172,15 @@ def check_compatibility(current: Path, candidate: Path) -> tuple[int, int] | Non
 
 
 def rollback_data(from_version: int | None, to_version: int | None):
-    if from_version is None or to_version is None or from_version == to_version:
+    if from_version is None and to_version is None:
+        # Probation state created by PR #9 predates version fields. The only new
+        # persistent states from that release are handoff/handoff_processing, and
+        # this executable knows their safe legacy conversion.
+        _rollback_v2_to_v1()
+        return
+    if from_version is None or to_version is None:
+        raise ValueError("Неполная информация о версии данных для безопасного отката")
+    if from_version == to_version:
         return
     migration = ROLLBACK_DATA_MIGRATIONS.get((from_version, to_version))
     if migration is None:
