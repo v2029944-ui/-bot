@@ -81,6 +81,61 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
             root.db.execute("DELETE FROM max_handoff_failures")
             root.db.commit()
 
+            # Durable staff notices re-check current workspace rights immediately
+            # before delivery. A removed administrator must not receive stale details.
+            with spaces.enter(b):
+                bmax = core.ADAPTERS["max"]
+                core._add_person(bmax, "55", "Временный администратор", "adm")
+                assert "55" in core.staff(bmax)
+            root.db.execute("""INSERT INTO max_handoff_notices
+                               (event_key,kind,uid,space_id,text,state,created)
+                               VALUES('revoked-staff','staff','55',?,'secret','sending',?)""",
+                            (bid, time.time()))
+            root.db.commit()
+            with spaces.enter(b):
+                bmax = core.ADAPTERS["max"]
+                core._remove_person(bmax, "55", "Временный администратор")
+                assert "55" not in core.staff(bmax)
+            before = len(calls)
+            notice = dict(root.db.execute(
+                "SELECT * FROM max_handoff_notices WHERE event_key='revoked-staff'").fetchone())
+            await max_actions.Worker(root_max).process_notice(notice)
+            skipped = root.db.execute(
+                "SELECT state,last_error FROM max_handoff_notices WHERE event_key='revoked-staff'").fetchone()
+            assert skipped["state"] == "skipped" and "отозваны" in skipped["last_error"]
+            assert len(calls) == before
+
+            # If the workspace cannot be opened, terminal diagnostics still persist
+            # and the warning is queued only for immutable global administrators.
+            original_get = spaces.get
+
+            def fail_space(value):
+                if value == bid:
+                    raise RuntimeError("workspace unavailable")
+                return original_get(value)
+
+            monkeypatch.setattr(spaces, "get", fail_space)
+            now = time.time()
+            root.db.execute("""INSERT INTO max_actions
+                               (event_key,uid,payload,state,created,attempts,next_try,space_id)
+                               VALUES('fallback-global','9','{}','handoff_processing',?,6,0,?)""",
+                            (now - 8 * 86400, bid))
+            action = dict(root.db.execute(
+                "SELECT * FROM max_actions WHERE event_key='fallback-global'").fetchone())
+            max_actions.Worker(root_max)._terminal_handoff(
+                action, {"message": {"_space": bid, "body": {"mid": "m-fallback"}}},
+                7, now, "workspace unavailable")
+            fallback = root.db.execute(
+                """SELECT kind,uid,space_id,state FROM max_handoff_notices
+                   WHERE event_key='fallback-global' ORDER BY kind,uid""").fetchall()
+            assert [tuple(row) for row in fallback] == [
+                ("global_staff", "1", bid, "pending"),
+                ("user", "9", bid, "pending"),
+            ]
+            assert not root.db.execute(
+                "SELECT 1 FROM max_handoff_notices WHERE event_key='fallback-global' AND uid='22'").fetchone()
+            monkeypatch.setattr(spaces, "get", original_get)
+
             for space, rule in [(a, "ТОЛЬКО_ПРАВИЛО_А"), (b, "ТОЛЬКО_ПРАВИЛО_Б")]:
                 with spaces.enter(space):
                     ad = core.ADAPTERS["max"]
