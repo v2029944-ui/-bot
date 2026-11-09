@@ -561,10 +561,8 @@ class Max(core.Adapter):
                 body = message.get("body") or {}
                 callback = update.get("callback") or {}
                 sender = message.get("sender") or callback.get("user") or update.get("user") or {}
-                uid = sender.get("user_id")
-                uid_tag = hashlib.sha256(str(uid).encode()).hexdigest()[:10] if uid is not None else "-"
-                log.info("MAX update type=%s uid_hash=%s mid=%s attachments=%s",
-                         update.get("update_type"), uid_tag, body.get("mid"),
+                log.info("MAX update type=%s has_user=%s has_text=%s attachments=%s",
+                         update.get("update_type"), bool(sender.get("user_id")), bool(body.get("text")),
                          [a.get("type") for a in (body.get("attachments") or [])])
             if max_queue.is_material(update):
                 update = spaces.stamp(update)
