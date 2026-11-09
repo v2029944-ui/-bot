@@ -136,3 +136,53 @@ def test_material_progress_message_is_removed_and_no_redundant_ready_notice(monk
         await ad.http.aclose()
 
     run(scenario())
+
+
+def test_legacy_max_draft_ui_shape_stays_rollback_compatible():
+    columns = [row["name"] for row in core.db.execute("PRAGMA table_info(max_draft_ui)")]
+    assert columns == ["mid", "did", "attempt"]
+    assert [row["name"] for row in core.db.execute("PRAGMA table_info(max_draft_recipient)")] == ["mid", "uid"]
+
+
+def test_deferred_strip_draft_clears_local_tracking(monkeypatch):
+    async def scenario():
+        ad = make(Api())
+        core.db.execute("INSERT INTO max_draft_ui VALUES('old',99,1)")
+        core.db.execute("INSERT INTO max_draft_recipient VALUES('old','1')")
+        core.db.execute("INSERT INTO max_button_cache VALUES('old','[]')")
+        ad._queue_ui_cleanup("strip_draft", "old")
+
+        async def strip(*args, **kwargs):
+            return True
+
+        monkeypatch.setattr(ad, "_strip_admin_button", strip)
+        await ad._process_ui_cleanup()
+        assert core.db.execute("SELECT 1 FROM max_draft_ui WHERE mid='old'").fetchone() is None
+        assert core.db.execute("SELECT 1 FROM max_draft_recipient WHERE mid='old'").fetchone() is None
+        assert core.db.execute("SELECT 1 FROM max_button_cache WHERE mid='old'").fetchone() is None
+        assert core.db.execute("SELECT 1 FROM max_ui_cleanup WHERE mid='old'").fetchone() is None
+        await ad.http.aclose()
+
+    run(scenario())
+
+
+def test_stale_scan_respects_cleanup_backoff(monkeypatch):
+    async def scenario():
+        ad = make(Api())
+        core.db.execute("INSERT INTO max_draft_ui VALUES('backoff',999999,1)")
+        core.db.execute("""INSERT INTO max_ui_cleanup(op,mid,next_try,created)
+                           VALUES('strip_draft','backoff',99999999999,0)""")
+        core.db.commit()
+        visited = []
+
+        async def strip(prev, **kwargs):
+            visited.append(prev["mid"])
+            return True
+
+        monkeypatch.setattr(ad, "_strip_admin_button", strip)
+        await ad.cleanup_stale_buttons()
+        assert "backoff" not in visited
+        assert core.db.execute("SELECT 1 FROM max_ui_cleanup WHERE mid='backoff'").fetchone()
+        await ad.http.aclose()
+
+    run(scenario())
