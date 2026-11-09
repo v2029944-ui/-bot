@@ -50,7 +50,9 @@ def recover():
     """Recover ordered commands and independent handoffs without re-routing frozen materials."""
     core.db.execute("UPDATE max_actions SET state='pending' WHERE state='processing'")
     core.db.execute("UPDATE max_actions SET state='handoff' WHERE state='handoff_processing'")
-    core.db.execute("UPDATE max_handoff_notices SET state='pending' WHERE state='sending'")
+    core.db.execute("""UPDATE max_handoff_notices
+                       SET state='unknown',last_error='Процесс остановился во время отправки; результат неизвестен'
+                       WHERE state='sending'""")
     core.db.commit()
 
 
@@ -177,7 +179,9 @@ class Worker:
                 adapter = core.ADAPTERS["max"]
                 await adapter.notify(row["uid"], row["text"])
         except asyncio.CancelledError:
-            core.db.execute("UPDATE max_handoff_notices SET state='pending' WHERE id=? AND state='sending'", (row["id"],))
+            core.db.execute("""UPDATE max_handoff_notices
+                               SET state='unknown',last_error='Отправка прервана; результат неизвестен'
+                               WHERE id=? AND state='sending'""", (row["id"],))
             core.db.commit()
             raise
         except Exception as exc:
