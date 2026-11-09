@@ -539,7 +539,12 @@ class Max(core.Adapter):
             delivered_mids = []
             for index, option in enumerate(options):
                 if not option.get("post"):
-                    await self.notify(approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
+                    saved_mid = self._approval_delivery_mid(did, n, approver, index) if resume else None
+                    if not saved_mid:
+                        resp = await self.notify(
+                            approver, f"Модель {option['model']}: не удалось подготовить вариант. {option.get('error', '')}")
+                        if resume:
+                            self._save_approval_delivery(did, n, approver, index, _mid(resp))
                     continue
                 saved_mid = self._approval_delivery_mid(did, n, approver, index) if resume else None
                 if saved_mid:
