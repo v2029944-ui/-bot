@@ -254,6 +254,7 @@ class AmbiguousGeneration(RuntimeError):
 
 _HITS: dict[str, list[float]] = {}
 _RL_ALERT: dict[str, float] = {}
+RATE_EVENT_TTL = 8 * 86400  # keep source-key idempotency longer than the 7-day material queue
 
 
 WAITING = dialog_state.PendingMap(db, "comment")
