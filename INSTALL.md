@@ -277,7 +277,22 @@ docker compose ps
 sudo -v
 ```
 
-Если `sudo -v` завершился ошибкой, **не продолжайте под `bot`**. Подключитесь отдельной SSH-сессией как `root` и выполните команды архивации из `/home/bot/post_bot`, заменив `sudo tar` на `tar`, а после проверки архива верните владельца командой `chown bot:bot ИМЯ_АРХИВА`.
+Если `sudo -v` завершился ошибкой, **не продолжайте под `bot`**. Подключитесь отдельной SSH-сессией как `root` и выполните архивирование явно в каталоге пользователя `bot`:
+
+```sh
+cd /home/bot/post_bot
+mkdir -p /home/bot/bot-backups
+chmod 700 /home/bot/bot-backups
+backup="/home/bot/bot-backups/post_bot-$(date +%Y%m%d-%H%M%S).tar.gz"
+tar -czf "$backup" .env data
+tar -tzf "$backup" > /dev/null
+test -s "$backup"
+chown bot:bot "$backup"
+chmod 600 "$backup"
+ls -lh "$backup"
+```
+
+Если любая команда завершилась ошибкой, остановитесь и не начинайте обновление. После успешной проверки архива вернитесь в SSH-сессию пользователя `bot`; основной контейнер остаётся остановленным.
 
 При успешном `sudo -v`:
 
@@ -384,7 +399,7 @@ docker compose logs --tail 100 bot
 whoami
 cd /home/bot/post_bot
 pwd
-git -C code rev-parse HEAD
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
 docker compose ps
 docker inspect post_bot --format 'image={{.Image}} status={{.State.Status}} restarts={{.RestartCount}}'
 df -h .
@@ -485,7 +500,7 @@ docker compose run --rm -T --no-deps --entrypoint python bot /app/updater.py
 
 ```sh
 cat data/update_result.json
-git -C code rev-parse HEAD
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
 cat data/update_state.json
 ```
 
@@ -509,7 +524,7 @@ docker compose logs --tail 100 bot
 ```sh
 cat data/update_state.json
 docker inspect post_bot --format 'image={{.Image}} status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}}'
-git -C code rev-parse HEAD
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
 ```
 
 Обновление завершено только если `update_state.json` содержит `"status": "ok"`, Git HEAD равен SHA кандидата, контейнер `running` и `restarts` не увеличился после запуска нового контейнера.
@@ -522,7 +537,7 @@ git -C code rev-parse HEAD
 
 ```sh
 cd /home/bot/post_bot
-git -C code rev-parse HEAD
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
 docker compose ps -a
 docker ps --format '{{.ID}} {{.Image}} {{.Command}} {{.Names}}' | grep -F updater.py
 cat data/update_result.json 2>/dev/null
@@ -549,7 +564,7 @@ docker image inspect post_bot:pre_data_v2 --format '{{.Id}}' 2>/dev/null
 После обновления проверьте:
 
 ```sh
-git -C /home/bot/post_bot/code rev-parse HEAD
+cd /home/bot/post_bot\ndocker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
 cat /home/bot/post_bot/data/update_state.json
 docker inspect post_bot --format 'status={{.State.Status}} restarts={{.RestartCount}} image={{.Image}}'
 ```
@@ -565,36 +580,15 @@ docker inspect post_bot --format 'status={{.State.Status}} restarts={{.RestartCo
 проверяются. Ставить сертификат в ОС VPS или добавлять новые настройки `.env`
 не требуется. [Источник и отпечаток сертификата](certs/README.md).
 
-При уже настроенном обновлении через GitHub этот переход доставляется обычной
-кнопкой: вместе с Python-кодом скачиваются `max_tls.py` и `certs/`.
-Если ещё не применена пересборка после полного аудита, выполните также следующий
-временный раздел. При установке из ZIP перенесите **весь** архив, включая `certs`,
-и пересоберите образ по разделу ручного обновления.
+Для уже обновлённой установки отдельная процедура перехода на API2 не нужна.
+Обычные совместимые изменения Python-кода устанавливаются через кнопку обновления.
+Если старая установка одновременно требует нового Docker-образа, нового
+`/app/updater.py` или смены data-format, используйте соответствующую одноразовую
+процедуру выше, а не запускайте старый updater в обход её проверок.
 
-Если бот не отвечает и нажать кнопку невозможно, при настроенном `GITHUB_REPO`
-и существующей папке `code` запустите штатную проверку обновления через Docker.
-**Под Linux-пользователем `bot`, в `/home/bot/post_bot`:**
-
-```sh
-cd /home/bot/post_bot
-docker compose stop bot
-docker compose run --rm -T --no-deps --entrypoint python bot /app/updater.py
-```
-
-Проверьте вывод загрузчика. Продолжайте только при `[updater] ok` или `nochange`.
-При `failed`/`tests_failed` сначала устраните указанную причину.
-Если пересборка после полного аудита ещё не выполнена, **оставьте бот остановленным**
-и продолжите с шага 2 следующего раздела. Если образ уже пересобран, запустите бот:
-
-```sh
-docker compose start bot
-docker compose logs --tail 100 bot
-```
-
-Отдельный контейнер выполняет только обновление с тестами и не запускает второй
-polling-процесс. После запуска проверьте `/menu` и один материал в тестовых группах.
-При ошибке TLS проверьте наличие файлов новой версии и сетевой доступ к API2;
-не отключайте проверку сертификатов.
+При ошибке TLS проверьте версию установленного кода, наличие `max_tls.py` и
+`certs/russian_trusted_root_ca.crt` в образе и сетевой доступ к API2. Не
+отключайте проверку TLS и не добавляйте fallback на старый адрес.
 
 ## Если возникла ошибка
 
