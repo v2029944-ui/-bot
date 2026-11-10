@@ -389,7 +389,7 @@ docker compose logs --tail 100 bot
 
 Этот раздел нужен только для первого выпуска с `compatibility.json: {"read_versions":[1,2],"write_version":2}`. Старый Docker-образ содержит старый `/app/updater.py`, который правильно откажется устанавливать data-v2: у него нет rollback-миграции 2→1. Не обходите этот отказ ручным `git reset --hard`.
 
-Все команды выполняйте под Linux-пользователем `bot` из `/home/bot/post_bot`, если явно не указано иное. Команды выполняйте по одной. После ошибки остановитесь, зафиксируйте фактическое состояние и используйте раздел восстановления ниже; не начинайте процедуру заново вслепую.
+Все команды выполняйте под Linux-пользователем `bot` из `/home/bot/post_bot`, если явно не указано иное. **Каждую строку команд выполняйте отдельно; не вставляйте целый многострочный блок одним запуском.** После любой ошибки остановитесь, зафиксируйте фактическое состояние и используйте раздел восстановления ниже; не начинайте процедуру заново вслепую.
 
 ### 1. Предварительная проверка
 
@@ -564,7 +564,8 @@ docker image inspect post_bot:pre_data_v2 --format '{{.Id}}' 2>/dev/null
 После обновления проверьте:
 
 ```sh
-cd /home/bot/post_bot\ndocker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
+cd /home/bot/post_bot
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
 cat /home/bot/post_bot/data/update_state.json
 docker inspect post_bot --format 'status={{.State.Status}} restarts={{.RestartCount}} image={{.Image}}'
 ```
