@@ -263,23 +263,71 @@ Docker включён в автозапуск, а в Compose задано `resta
 
 ## Резервная копия
 
-**На сервере под `bot`, из `~/post_bot`.** Для полной согласованной копии базы, медиа и настроек остановите контейнер на время архивации:
+**На сервере под `bot`, из `~/post_bot`.** Для согласованной копии базы, медиа и настроек сначала штатно остановите контейнер. Команды ниже выполняйте **по одной**. Если любая команда завершается ошибкой, не выполняйте следующую и не начинайте обновление.
 
 ```sh
-cd ~/post_bot
-mkdir -p ~/bot-backups
-chmod 700 ~/bot-backups
+cd /home/bot/post_bot
 docker compose stop bot
+docker compose ps
+```
+
+Убедитесь, что `bot` остановлен. Затем проверьте возможность использовать `sudo`:
+
+```sh
+sudo -v
+```
+
+Если `sudo -v` завершился ошибкой, **не продолжайте под `bot`**. Подключитесь отдельной SSH-сессией как `root` и выполните архивирование явно в каталоге пользователя `bot`:
+
+```sh
+cd /home/bot/post_bot
+mkdir -p /home/bot/bot-backups
+chmod 700 /home/bot/bot-backups
+backup="/home/bot/bot-backups/post_bot-$(date +%Y%m%d-%H%M%S).tar.gz"
+tar -czf "$backup" .env data
+tar -tzf "$backup" > /dev/null
+test -s "$backup"
+chown bot:bot "$backup"
+chmod 600 "$backup"
+ls -lh "$backup"
+```
+
+Если любая команда завершилась ошибкой, остановитесь и не начинайте обновление. После успешной проверки архива вернитесь в SSH-сессию пользователя `bot`; основной контейнер остаётся остановленным.
+
+При успешном `sudo -v`:
+
+```sh
+mkdir -p "$HOME/bot-backups"
+chmod 700 "$HOME/bot-backups"
 backup="$HOME/bot-backups/post_bot-$(date +%Y%m%d-%H%M%S).tar.gz"
+echo "$backup"
+```
+
+Запомните напечатанный путь. Создайте архив:
+
+```sh
 sudo tar -czf "$backup" .env data
+```
+
+**Только если эта команда завершилась без ошибки**, проверьте архив:
+
+```sh
+sudo tar -tzf "$backup" > /dev/null
+sudo test -s "$backup"
 sudo chown bot:bot "$backup"
 chmod 600 "$backup"
-sudo tar -tzf "$backup" > /dev/null
+ls -lh "$backup"
+```
+
+После этих проверок архив считается пригодным. Если архив создавался только для резервной копии перед обычной эксплуатацией, контейнер можно запустить:
+
+```sh
 docker compose start bot
 ```
 
-Дождитесь успешного завершения архивации. Сохраните копию также вне VPS через SFTP.
-Архив содержит ключи из `.env`, поэтому храните его как секретный файл.
+Если резервная копия сделана перед обновлением, оставьте контейнер остановленным и продолжайте соответствующий раздел обновления.
+
+Сохраните копию также вне VPS через SFTP. Архив содержит ключи из `.env`, поэтому храните его как секретный файл.
 Не удаляйте `data`: там базы пространств, правила, пользователи, черновики, незавершённые правки и медиа.
 
 ## Обновление вручную из ZIP
@@ -339,72 +387,190 @@ docker compose logs --tail 100 bot
 
 ## Первый переход на data-v2 при настроенном GITHUB_REPO
 
-Этот раздел нужен только для первого выпуска с
-`compatibility.json: {"read_versions":[1,2],"write_version":2}`.
-Старый Docker-образ содержит старый `/app/updater.py`, который правильно
-**откажется** устанавливать data-v2: у него нет rollback-миграции 2→1.
-Не обходите этот отказ ручным `git reset --hard`.
+Этот раздел нужен только для первого выпуска с `compatibility.json: {"read_versions":[1,2],"write_version":2}`. Старый Docker-образ содержит старый `/app/updater.py`, который правильно откажется устанавливать data-v2: у него нет rollback-миграции 2→1. Не обходите этот отказ ручным `git reset --hard`.
 
-Перед началом завершите активные публикации, проверьте записи с неизвестным
-результатом и сделайте проверенную резервную копию `.env` и всей папки `data`.
-Сохраните SHA текущего `./code` и идентификатор работающего Docker-образа.
+Все команды выполняйте под Linux-пользователем `bot` из `/home/bot/post_bot`, если явно не указано иное. **Каждую строку команд выполняйте отдельно; не вставляйте целый многострочный блок одним запуском.** После любой ошибки остановитесь, зафиксируйте фактическое состояние и используйте раздел восстановления ниже; не начинайте процедуру заново вслепую.
 
-### Этап A — обновить Docker-updater, не переключая рабочий код
+### 1. Предварительная проверка
 
-Бот должен быть остановлен. Получите кандидат в Git, проверьте его SHA и manifest,
-но не делайте reset рабочей ветки:
+До остановки бота проверьте пользователя, каталог, текущий Git SHA, контейнер, образ и свободное место:
+
+```sh
+whoami
+cd /home/bot/post_bot
+pwd
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
+docker compose ps
+docker inspect post_bot --format 'image={{.Image}} status={{.State.Status}} restarts={{.RestartCount}}'
+df -h .
+docker system df
+```
+
+`whoami` должен показать `bot`, `pwd` — `/home/bot/post_bot`. Сохраните текущий SHA и ID образа.
+
+Убедитесь, что отдельный updater сейчас не работает:
+
+```sh
+docker ps --format '{{.ID}} {{.Image}} {{.Command}} {{.Names}}' | grep -F updater.py
+```
+
+Нормальный результат — отсутствие строк. Если найден updater, не запускайте второй.
+
+Если свободного места недостаточно, допускается точечная очистка только build-cache:
+
+```sh
+docker builder prune -af
+```
+
+Не используйте `docker system prune -a`, `docker image prune -a`, удаление volumes или каталога `data` в рамках этой процедуры.
+
+### 2. Резервная копия и сохранение старого Docker-образа
+
+Сделайте резервную копию по разделу [Резервная копия](#резервная-копия). После проверки архива бот должен оставаться остановленным.
 
 ```sh
 cd /home/bot/post_bot
-docker compose stop bot
-
-docker compose run --rm -T --no-deps --entrypoint git bot \
-  -C /app/code fetch origin main
-
-docker compose run --rm -T --no-deps --entrypoint git bot \
-  -C /app/code rev-parse FETCH_HEAD
-
-docker compose run --rm -T --no-deps --entrypoint git bot \
-  -C /app/code show FETCH_HEAD:compatibility.json
+docker compose ps
+old_image="$(docker inspect post_bot --format '{{.Image}}')"
+echo "$old_image"
+docker image tag "$old_image" post_bot:pre_data_v2
+docker image inspect post_bot:pre_data_v2 --format '{{.Id}}'
 ```
 
-Продолжайте только если SHA совпадает с проверенным выпуском и его CI успешен.
-Выгрузите именно этот кандидат в отдельный архив и перенесите отслеживаемые
-исходники в каталог сборки; `.env`, `data` и `code` не входят в архив:
+ID тега `post_bot:pre_data_v2` должен совпасть с сохранённым ID старого образа. До завершения перехода этот тег не удаляйте.
+
+### 3. Зафиксировать кандидата и подготовить исходники
+
+Основной бот остаётся остановленным:
 
 ```sh
-stage=$(mktemp -d "$HOME/post_bot-data-v2.XXXXXX")
-docker compose run --rm -T --no-deps --entrypoint git bot \
-  -C /app/code archive --format=tar FETCH_HEAD > "$stage/source.tar"
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code fetch origin main
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse FETCH_HEAD
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code show FETCH_HEAD:compatibility.json
+```
+
+Сохраните SHA кандидата. Продолжайте только если это проверенный коммит с успешным CI и manifest объявляет ожидаемый data-v2.
+
+```sh
+stage="$(mktemp -d "$HOME/post_bot-data-v2.XXXXXX")"
+echo "$stage"
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code archive --format=tar FETCH_HEAD > "$stage/source.tar"
 tar -tf "$stage/source.tar" > /dev/null
 tar -xf "$stage/source.tar" -C /home/bot/post_bot
 sh -n entrypoint.sh
-
-docker compose build bot
-docker compose up -d --force-recreate bot
 ```
 
-После пересоздания **не запускайте обновление вслепую**. Сначала убедитесь, что
-новый образ действительно содержит rollback-миграцию:
+`.env`, `data` и `code` в Git-архив не входят и не должны удаляться.
+
+### 4. Собрать новый образ, не запуская основной бот
 
 ```sh
-docker compose exec -T bot \
-  python -c "ns={'__name__':'not_main'}; exec(compile(open('/app/updater.py').read(),'/app/updater.py','exec'),ns); assert (2, 1) in ns['ROLLBACK_DATA_MIGRATIONS']"
+docker compose build bot
+docker compose images
+docker compose ps
 ```
 
-Если проверка не прошла, остановите контейнер и верните предыдущий образ/исходники.
-Не переключайте `./code` на data-v2.
+После сборки основной контейнер всё ещё должен быть остановлен.
 
-### Этап B — переключить GitHub-код штатным updater
+До запуска бота проверьте встроенный updater **нового образа**:
 
-Когда новый `/app/updater.py` подтверждён, выполните обычное обновление из MAX
-или остановите бот и запустите штатный updater отдельным контейнером. Новый updater
-проверит кандидата, запишет версии данных в `update_state.json` и только затем
-переключит код. При неудачном probation rollback сначала выполняет миграцию 2→1,
-а затем возвращает Git-код.
+```sh
+docker compose run --rm -T --no-deps --entrypoint python bot -c "ns={'__name__':'not_main'}; exec(compile(open('/app/updater.py').read(),'/app/updater.py','exec'),ns); assert (2, 1) in ns['ROLLBACK_DATA_MIGRATIONS']; print('rollback 2->1: OK')"
+```
 
-После успешного перехода проверьте `/status`, очереди и тестовые MAX/Telegram-каналы.
-Реальные публикации для проверки не используйте без отдельного согласования.
+Ожидается `rollback 2->1: OK`. Если проверка не прошла, не запускайте новый контейнер и не переключайте `./code`.
+
+### 5. Переключить Git-код новым updater
+
+Снова убедитесь, что другой updater не работает:
+
+```sh
+docker ps --format '{{.ID}} {{.Image}} {{.Command}} {{.Names}}' | grep -F updater.py
+```
+
+При отсутствии строк:
+
+```sh
+docker compose run --rm -T --no-deps --entrypoint python bot /app/updater.py
+```
+
+Код завершения команды не доказывает успех: updater завершает процесс кодом 0 и при некоторых ошибках.
+
+Сразу проверьте:
+
+```sh
+cat data/update_result.json
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
+cat data/update_state.json
+```
+
+Для успешного нового переключения одновременно нужны: `update_result.json` со `"status": "ok"`, Git HEAD равный сохранённому SHA кандидата и `update_state.json` со `"status": "probation"`, `"prev_data_version": 1`, `"new_data_version": 2`. Если код уже был переключён ранее и updater сообщает `nochange`, состояние определяйте по Git HEAD и `update_state.json`, а не запускайте updater повторно.
+
+### 6. Запустить новый контейнер и завершить probation
+
+Только после успешной проверки шага 5:
+
+```sh
+docker compose up -d --force-recreate bot
+docker compose ps
+docker inspect post_bot --format 'image={{.Image}} status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}}'
+docker compose logs --tail 100 bot
+```
+
+Зафиксируйте `restarts`. Контейнер должен быть `running`, без rollback или повторяющейся ошибки запуска в логах.
+
+После окончания `PROBATION_SEC` (по умолчанию 120 секунд):
+
+```sh
+cat data/update_state.json
+docker inspect post_bot --format 'image={{.Image}} status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}}'
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
+```
+
+Обновление завершено только если `update_state.json` содержит `"status": "ok"`, Git HEAD равен SHA кандидата, контейнер `running` и `restarts` не увеличился после запуска нового контейнера.
+
+После этого проверьте `/status`, меню, людей и один материал в тестовом пространстве. Не используйте рабочие публикации только ради проверки обновления.
+
+### Восстановление после обрыва SSH или прерванного обновления
+
+Не повторяйте updater автоматически. Сначала определите фактическое состояние:
+
+```sh
+cd /home/bot/post_bot
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
+docker compose ps -a
+docker ps --format '{{.ID}} {{.Image}} {{.Command}} {{.Names}}' | grep -F updater.py
+cat data/update_result.json 2>/dev/null
+cat data/update_state.json 2>/dev/null
+docker inspect post_bot --format 'image={{.Image}} status={{.State.Status}} restarts={{.RestartCount}}' 2>/dev/null
+docker image inspect post_bot:pre_data_v2 --format '{{.Id}}' 2>/dev/null
+```
+
+| Git HEAD | update_state | Контейнер | Правильное действие |
+| --- | --- | --- | --- |
+| Старый SHA | нет успешного обновления | остановлен | Проверить `update_result.json` и отсутствие updater; только затем решать, можно ли повторить шаг 5 |
+| Новый SHA | `probation` | остановлен | **Не повторять updater.** Выполнить шаг 6 |
+| Новый SHA | `probation` | работает | **Не повторять updater.** Проверить логи/restart count и дождаться `status=ok` |
+| Новый SHA | `ok` | работает | Обновление завершено |
+| Старый SHA | `rolled_back` | любое | Не продолжать автоматически; разобрать причину отката |
+| Любой SHA | `rollback_failed` | любое | Не продолжать автоматически; проверить данные, backup и сохранённый старый образ |
+
+Если updater ещё отображается в `docker ps`, второй экземпляр не запускайте. Если состояние не соответствует таблице, остановитесь и сохраните вывод команд для разбора.
+
+### Обычные обновления после перехода data-v2
+
+После одноразового перехода обычное обновление Python-кода выполняется через MAX: `/menu` → «🔄 Обновить» → подтверждение. Перед обновлением завершите активные публикации и проверьте неизвестные результаты отправки.
+
+После обновления проверьте:
+
+```sh
+cd /home/bot/post_bot
+docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code rev-parse HEAD
+cat /home/bot/post_bot/data/update_state.json
+docker inspect post_bot --format 'status={{.State.Status}} restarts={{.RestartCount}} image={{.Image}}'
+```
+
+После probation ожидается `status=ok`. Если выпуск меняет Dockerfile, `entrypoint.sh`, `/app/updater.py` или data-format, обычной кнопки недостаточно: нужен отдельный план обновления.
 
 ## Переход на API2 MAX
 
@@ -415,132 +581,15 @@ docker compose exec -T bot \
 проверяются. Ставить сертификат в ОС VPS или добавлять новые настройки `.env`
 не требуется. [Источник и отпечаток сертификата](certs/README.md).
 
-При уже настроенном обновлении через GitHub этот переход доставляется обычной
-кнопкой: вместе с Python-кодом скачиваются `max_tls.py` и `certs/`.
-Если ещё не применена пересборка после полного аудита, выполните также следующий
-временный раздел. При установке из ZIP перенесите **весь** архив, включая `certs`,
-и пересоберите образ по разделу ручного обновления.
+Для уже обновлённой установки отдельная процедура перехода на API2 не нужна.
+Обычные совместимые изменения Python-кода устанавливаются через кнопку обновления.
+Если старая установка одновременно требует нового Docker-образа, нового
+`/app/updater.py` или смены data-format, используйте соответствующую одноразовую
+процедуру выше, а не запускайте старый updater в обход её проверок.
 
-Если бот не отвечает и нажать кнопку невозможно, при настроенном `GITHUB_REPO`
-и существующей папке `code` запустите штатную проверку обновления через Docker.
-**Под Linux-пользователем `bot`, в `/home/bot/post_bot`:**
-
-```sh
-cd /home/bot/post_bot
-docker compose stop bot
-docker compose run --rm -T --no-deps --entrypoint python bot /app/updater.py
-```
-
-Проверьте вывод загрузчика. Продолжайте только при `[updater] ok` или `nochange`.
-При `failed`/`tests_failed` сначала устраните указанную причину.
-Если пересборка после полного аудита ещё не выполнена, **оставьте бот остановленным**
-и продолжите с шага 2 следующего раздела. Если образ уже пересобран, запустите бот:
-
-```sh
-docker compose start bot
-docker compose logs --tail 100 bot
-```
-
-Отдельный контейнер выполняет только обновление с тестами и не запускает второй
-polling-процесс. После запуска проверьте `/menu` и один материал в тестовых группах.
-При ошибке TLS проверьте наличие файлов новой версии и сетевой доступ к API2;
-не отключайте проверку сертификатов.
-
-## Временно: пересборка после обновления кнопкой
-
-Этот раздел применяет весь набор исправлений аудита: новый `entrypoint.sh`,
-загрузчик обновлений, lock-файлы зависимостей и изменённый Dockerfile.
-**Одной кнопки для полного применения этого выпуска недостаточно.**
-После подтверждения успешной установки раздел можно удалить.
-
-Результаты репетиции перехода со старых версий: [проверка перед обновлением](PREUPDATE_CHECK.md).
-Для обычного выпуска без смены data-format этот раздел остаётся применим.
-**Для первого перехода на data-v2 не запускайте старый `/app/updater.py` до
-пересборки образа**: используйте отдельный раздел выше. Старый updater должен
-отказать v2, и этот защитный отказ нельзя обходить.
-
-Сначала завершите частичные публикации и проверьте публикации с неизвестным
-результатом в каналах. Не меняйте каналы во время перехода. Сделайте резервную
-копию `.env` и всей папки `data` по разделу выше; убедитесь, что архив проверен.
-
-**1. На сервере под Linux-пользователем `bot`:**
-
-Если вошли как `root`, сначала выполните `su - bot`. Все следующие команды
-выполняйте под `bot`, без `sudo`, в `/home/bot/post_bot`.
-Этот порядок предназначен для уже настроенного `GITHUB_REPO` и существующей
-папки `code`. Для установки без GitHub используйте обновление из ZIP.
-
-```sh
-whoami
-cd /home/bot/post_bot
-ls -ld code/.git
-docker compose stop bot
-```
-
-`whoami` должен показать `bot`. Если кандидат меняет `write_version`, сначала
-выполните процедуру data-v2 выше. Для обычного совместимого выпуска можно запустить
-штатный updater отдельным контейнером и продолжать только после `[updater] ok`
-или `[updater] nochange`. Не запускайте новый код в старом образе, если выпуск
-требует изменения самого updater/Dockerfile.
-
-**2. В той же папке, под `bot`:** проверьте файлы нового выпуска.
-
-```sh
-ls code/entrypoint.sh code/requirements-dev.lock code/compatibility.json code/max_tls.py code/certs/russian_trusted_root_ca.crt
-```
-
-При ошибке любой команды остановитесь и устраните её; не выполняйте следующие
-шаги с неполным набором файлов.
-
-**3. В той же папке, под `bot`:** перенесите все отслеживаемые исходники из
-обновлённой папки `code` в папку сборки. Команды сами создают архив и копируют
-его содержимое; открывать и переносить файлы вручную не нужно.
-
-```sh
-stage=$(mktemp -d "$HOME/post_bot-rebuild.XXXXXX")
-cp entrypoint.sh "$stage/entrypoint.sh.old"
-cp Dockerfile "$stage/Dockerfile.old"
-docker compose run --rm -T --no-deps --entrypoint git bot -C /app/code archive --format=tar HEAD > "$stage/source.tar"
-tar -tf "$stage/source.tar" > /dev/null
-tar -xf "$stage/source.tar" -C /home/bot/post_bot
-sh -n entrypoint.sh
-```
-
-Git запускается внутри отдельного контейнера из прежнего образа, где он уже
-установлен; отдельно ставить Git на VPS не нужно. Основной бот остаётся остановленным.
-Docker-команду выполняет пользователь `bot`.
-Архив содержит только файлы Git: `.env`, `data` и сама рабочая папка `code` в него
-не входят и сохраняются. Это важно: простого копирования одного `entrypoint.sh`
-для этого выпуска недостаточно — Docker должен получить также новые модули,
-загрузчик, описание совместимости, lock-файлы и каталог `certs`.
-
-**4. Под `bot`, в `/home/bot/post_bot`:**
-
-```sh
-docker compose build bot
-```
-
-При ошибке сборки оставьте бот остановленным и устраните причину; не запускайте
-новый код в прежнем образе. Дождитесь успешной сборки, затем:
-
-```sh
-docker compose up -d --force-recreate bot
-docker compose ps
-docker compose logs --tail 100 bot
-```
-
-Проверьте в MAX меню, список людей, один материал и публикацию в тестовые группы.
-При первом переходе и откате к старой модели ролей прежние назначения могут
-потребовать повторного добавления; это принято для данной установки. Главные
-администраторы из `MAX_ADMINS` сохраняются в `.env`.
-Последующие обновления проверяют совместимость формата данных для обновления
-и отката, а библиотеки устанавливают из одного lock-файла с хешами.
-Если pip завершился с ошибкой, новый код не запускается поверх частично
-обновлённого окружения: сначала выполняется предусмотренный откат либо бот
-завершается с ошибкой для диагностики.
-
-Для последующих обычных обновлений Python-кода достаточно кнопки. Будущие
-изменения Dockerfile или скрипта внутри образа снова требуют пересборки.
+При ошибке TLS проверьте версию установленного кода, наличие `max_tls.py` и
+`certs/russian_trusted_root_ca.crt` в образе и сетевой доступ к API2. Не
+отключайте проверку TLS и не добавляйте fallback на старый адрес.
 
 ## Если возникла ошибка
 
