@@ -10,6 +10,7 @@ from PIL import Image
 
 import core
 import max_
+import spaces
 import tg as tgmod
 
 S = types.SimpleNamespace
@@ -56,7 +57,7 @@ def test_video_goes_through_approval_and_publish_with_the_file(tg, llm, mp4):
     did = draft_id()
     d = core.get(did)
     assert d["video"] and os.path.exists(d["video"]) and os.path.exists(d["photo"])
-    assert [o[1] for o in tg.sent("approval_video")] == ["9"]  # видео ушло только автору
+    assert [o[1] for o in tg.sent("approval_video")] == ["1", "2"]  # видео ушло администраторам
     call = llm.calls[-1]
     assert call["b64"] and "ВИДЕО" in call["text"] and "три кадра" in call["text"]  # нейросеть видит кадры
     assert "на видео" in call["system"]  # и ей запрещено писать «на видео»
@@ -220,7 +221,26 @@ def _env(monkeypatch, **kw):
     monkeypatch.setattr(core, "PROVIDER", "openai")
 
 
-def test_main_builds_publish_only_telegram_with_max(monkeypatch):
+@pytest.fixture
+def main_state():
+    """A simulated main() must not leave workspace proxies installed for later tests."""
+    try:
+        yield
+    finally:
+        if spaces.INSTALLED:
+            root = spaces.root()
+            run(spaces.close())
+            for name, original in root.memories.items():
+                if name != "footer_waiting":
+                    setattr(core, name, original)
+            core.post_footer.WAITING = root.memories["footer_waiting"]
+            core.WAITING_RULE = core.WAITING_RULE.root
+            core.db = root.db
+            core.DATA, core.PHOTOS, core.VIDEOS = root.folder, root.folder / "photos", root.folder / "videos"
+            spaces.INSTALLED, spaces.ROOT = False, None
+
+
+def test_main_builds_publish_only_telegram_with_max(monkeypatch, main_state):
     import main
     _env(monkeypatch, TG_MODE="publish_only", TG_TOKEN="123456:ABCDEF", TG_CHANNEL="@c", MAX_TOKEN="mt",
          MAX_CHANNEL="-5", MAX_APPROVERS="5")
@@ -234,7 +254,7 @@ def test_main_builds_publish_only_telegram_with_max(monkeypatch):
     assert not core.ADAPTERS["max"].publish_only and core.ADAPTERS["max"].allowed == {"5"}
 
 
-def test_main_defaults_to_max_workflow(monkeypatch):
+def test_main_defaults_to_max_workflow(monkeypatch, main_state):
     import main
     _env(monkeypatch, TG_TOKEN="123456:ABCDEF", TG_CHANNEL="@c", MAX_TOKEN="mt",
          MAX_CHANNEL="-5", MAX_APPROVERS="5", TG_APPROVERS="не числовой id")

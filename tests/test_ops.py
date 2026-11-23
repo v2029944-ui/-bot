@@ -87,34 +87,36 @@ def test_menu_lets_every_approver_choose_mode():
 
 
 def test_draft_goes_silent_outside_hours_and_waits_in_defer_mode(tg, llm, png, monkeypatch):
+    tg.admins = ["1"]
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
-    ops.set_mode(tg, "9", "silent")
+    ops.set_mode(tg, "1", "silent")
     run(core.submit(tg, "9", "Анна", "Заменили масло", png))
-    assert [o[1] for o in tg.sent("approval")] == ["9"] and tg.sent("silent")
-    ops.set_mode(tg, "9", "defer")
+    assert [o[1] for o in tg.sent("approval")] == ["1"] and tg.sent("silent")
+    ops.set_mode(tg, "1", "defer")
     did2 = run(core.submit(tg, "9", "Анна", "Заменили фильтр", png))
-    assert core.db.execute("SELECT uid FROM deferred WHERE did=?", (did2,)).fetchone()["uid"] == "9"
+    assert core.db.execute("SELECT uid FROM deferred WHERE did=?", (did2,)).fetchone()["uid"] == "1"
     assert core.get(did2)["status"] == "pending"
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 27, 10))
     assert run(ops.flush_deferred()) == 1
-    assert [o[1] for o in tg.sent("approval")] == ["9", "9"]
+    assert [o[1] for o in tg.sent("approval")] == ["1", "1"]
     assert core.get(did2)["last_sent"] == ts(2026, 10, 27, 10)
 
 
 def test_deferred_draft_is_dropped_if_resolved_and_sent_at_once_when_mode_changes(tg, llm, png, monkeypatch):
     a = tg
+    a.admins = ["1"]
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 26, 22))
-    ops.set_mode(a, "9", "defer")
+    ops.set_mode(a, "1", "defer")
     run(core.submit(a, "9", "Анна", "Заменили масло и фильтры", png))
     draft_id()
-    run(core.on_menu(a, "9", "m:nset:normal"))  # передумал: всё придержанное приходит сразу
-    assert [o[1] for o in a.sent("approval")] == ["9"]
+    run(core.on_menu(a, "1", "m:nset:normal"))  # передумал: всё придержанное приходит сразу
+    assert [o[1] for o in a.sent("approval")] == ["1"]
 
     run(core.submit(a, "9", "Анна", "Ещё одно описание", png))
     did2 = draft_id()
-    ops.set_mode(a, "9", "defer")
+    ops.set_mode(a, "1", "defer")
     core.db.execute("DELETE FROM deferred")
-    ops.enqueue(a, "9", did2)
+    ops.enqueue(a, "1", did2)
     core._set(did2, status="deleted")
     monkeypatch.setattr(time, "time", lambda: ts(2026, 10, 27, 11))
     assert run(ops.flush_deferred()) == 0
@@ -128,10 +130,11 @@ def test_actor_gets_new_variant_immediately_even_in_defer_mode(tg, llm, png, mon
     ops.set_mode(tg, "1", "defer")
     before = len(tg.sent("approval"))
     run(core.on_action(tg, "1", "regen", did, 1))
-    assert [o[1] for o in tg.sent("approval")[before:]] == ["9", "1"]  # автор и действующий администратор: он сам нажал — ждать нечего
+    assert [o[1] for o in tg.sent("approval")[before:]] == ["1", "2"]  # действующий администратор не ждёт своего окна уведомлений
 
 
 def test_reminders_respect_mute_and_pause(tg, llm, png, monkeypatch):
+    tg.admins = ["1"]
     monkeypatch.setenv("NOTIFY_HOURS", "0-24")
     monkeypatch.setenv("NOTIFY_DAYS", "1-7")
     run(core.submit(tg, "9", "Анна", "Заменили масло и фильтры", png))
@@ -144,9 +147,9 @@ def test_reminders_respect_mute_and_pause(tg, llm, png, monkeypatch):
     core.db.execute("UPDATE drafts SET reminded=0,last_sent=0")
     core.db.commit()
     ops.set_setting("paused", "0")
-    ops.set_mode(tg, "9", "muted")
+    ops.set_mode(tg, "1", "muted")
     assert run(core.remind_once()) == 1
-    assert [o[1] for o in tg.sent("silent")] == ["9"]  # «мут» — тихо, второму — со звуком
+    assert [o[1] for o in tg.sent("silent")] == ["1"]  # напоминание администратору в режиме «мут» идёт тихо
 
 
 # ---------- пауза ----------

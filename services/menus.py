@@ -236,6 +236,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     if act == "admin":
         return "Меню администратора:", core.menu_for(adapter, uid)
     if act == "pending":
+        if not core.is_admin(adapter, uid):
+            return "⛔ Посты проверяет и публикует администратор. Присылайте фото или видео с подписью.", None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() and len(parts[2]) < 8 else 0
         return core.pending_view(adapter, page, uid)
     if act in ("inbox", "inretry"):

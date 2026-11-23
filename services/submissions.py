@@ -51,7 +51,7 @@ async def _check_rate(adapter: core.Adapter, author_id: str, author_name: str, s
 def _approval_adapter(d: dict, fallback: core.Adapter) -> core.Adapter:
     """Адаптер доставки черновика: APPROVAL_PLATFORM (если задан), иначе — мессенджер автора."""
     approval = core.ADAPTERS.get(os.getenv("APPROVAL_PLATFORM") or d["platform"])
-    if approval is not None and approval.publish_only:
+    if (approval is not None and approval.publish_only) or (approval is None and d["platform"] == "tg"):
         # Сохраняем доступ к старым черновикам из Telegram после перехода в MAX.
         approval = core.ADAPTERS.get("max")
     return approval or fallback
@@ -59,11 +59,12 @@ def _approval_adapter(d: dict, fallback: core.Adapter) -> core.Adapter:
 
 async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
                       actor: str | None = None) -> tuple[int, Exception | None]:
-    """Доставляем черновик автору; администратор может восстановить недоступный материал.
+    """Доставляем черновик действующим администраторам своего пространства.
     Режим уведомлений у каждого свой: без звука или придержать до рабочего времени. Тому, кто сам
     только что нажал кнопку (actor), новый вариант приходит сразу и обычным образом."""
     approval = core._approval_adapter(d, fallback)
     sent, last = 0, None
+    failed = []
     recipients = core.draft_recipients(d, approval)
     if actor and core.can_manage_draft(approval, actor, d) and actor not in recipients:
         recipients.append(actor)
@@ -85,13 +86,15 @@ async def _send_draft(d: dict, did: int, post: str, fallback: core.Adapter,
             sent += 1
         except Exception as e:
             last = e
-            # Keep a recoverable draft when the author blocked the bot or cannot be reached.
-            for admin in getattr(approval, "admins", []):
-                if admin not in recipients and core.can_manage_draft(approval, admin, d):
-                    recipients.append(admin)
+            failed.append(a)
             core.log.warning("не удалось доставить черновик %s получателю %s: %s", did, a, e)
     if sent:  # от этого момента считаем, сколько черновик ждёт согласования
         core._set(did, last_sent=time.time(), reminded=0)
+        # A successful recipient must not hide a failed recipient. On total
+        # failure leave retry/rollback to the caller, preserving revision semantics.
+        for a in failed:
+            if core.can_manage_draft(approval, a, core.get(did)):
+                ops.enqueue(approval, a, did)
     return sent, last
 
 

@@ -64,19 +64,20 @@ def test_new_draft_attempt_queues_only_older_version_for_same_recipient(monkeypa
         first = core.db.execute("""SELECT u.did,u.attempt,r.uid FROM max_draft_ui u
                                    JOIN max_draft_recipient r ON r.mid=u.mid WHERE u.mid=?""",
                                 (first_mid,)).fetchone()
-        assert tuple(first) == (did, 1, "9")
+        assert tuple(first) == (did, 1, "1")
 
         core._set(did, attempts=2, post="Second version")
-        await ad.send_for_approval("9", did, core.get(did)["photo"], "Second version")
+        await ad.send_for_approval("1", did, core.get(did)["photo"], "Second version")
         second_mid = f"m{api.n}"
         assert second_mid != first_mid
         queued = core.db.execute("SELECT op,mid,uid FROM max_ui_cleanup WHERE op='delete'").fetchall()
-        assert [tuple(r) for r in queued] == [("delete", first_mid, "9")]
+        assert [tuple(r) for r in queued] == [("delete", first_mid, "1")]
 
         # A different recipient gets their own history; delivery to one user must not delete another user's post.
-        await ad.send_for_approval("1", did, core.get(did)["photo"], "Second version")
+        ad.admins.append("2")
+        await ad.send_for_approval("2", did, core.get(did)["photo"], "Second version")
         assert not core.db.execute(
-            "SELECT 1 FROM max_ui_cleanup WHERE uid='1' AND mid=?", (first_mid,)).fetchone()
+            "SELECT 1 FROM max_ui_cleanup WHERE uid='2' AND mid=?", (first_mid,)).fetchone()
         await ad.http.aclose()
 
     run(scenario())
@@ -96,7 +97,7 @@ def test_cleanup_deletes_old_draft_after_new_delivery(monkeypatch, png, llm):
         did = await core.submit(ad, "9", "Author", "Description", png)
         first_mid = f"m{api.n}"
         core._set(did, attempts=2, post="Second version")
-        await ad.send_for_approval("9", did, core.get(did)["photo"], "Second version")
+        await ad.send_for_approval("1", did, core.get(did)["photo"], "Second version")
         await ad._process_ui_cleanup()
         deletes = [c for c in api.of("DELETE") if c[2].get("message_id") == first_mid]
         assert len(deletes) == 1
@@ -223,14 +224,14 @@ def test_partial_comparison_delivery_does_not_retire_previous_version(monkeypatc
 
         monkeypatch.setattr(ad, "_send", flaky_send)
         try:
-            await ad.send_for_approval("9", did, core.get(did)["photo"], core.get(did)["post"], resume=True)
+            await ad.send_for_approval("1", did, core.get(did)["photo"], core.get(did)["post"], resume=True)
         except RuntimeError as exc:
             assert "second option failed" in str(exc)
         else:
             raise AssertionError("comparison delivery must fail")
 
         assert core.db.execute(
-            "SELECT 1 FROM max_draft_recipient WHERE mid=? AND uid='9'", (first_mid,)).fetchone()
+            "SELECT 1 FROM max_draft_recipient WHERE mid=? AND uid='1'", (first_mid,)).fetchone()
         assert not core.db.execute(
             "SELECT 1 FROM max_ui_cleanup WHERE op='delete' AND mid=?", (first_mid,)).fetchone()
         await ad.http.aclose()
@@ -268,23 +269,23 @@ def test_comparison_retry_sends_only_missing_option(monkeypatch, png, llm):
 
         monkeypatch.setattr(ad, "_send", flaky_send)
         try:
-            await ad.send_for_approval("9", did, core.get(did)["photo"], core.get(did)["post"], resume=True)
+            await ad.send_for_approval("1", did, core.get(did)["photo"], core.get(did)["post"], resume=True)
         except RuntimeError:
             pass
         saved = core.db.execute(
-            "SELECT slot,mid FROM max_approval_delivery WHERE did=? AND attempt=2 AND uid='9' ORDER BY slot",
+            "SELECT slot,mid FROM max_approval_delivery WHERE did=? AND attempt=2 AND uid='1' ORDER BY slot",
             (did,)).fetchall()
         assert len(saved) == 1 and saved[0]["slot"] == 0
         first_option_mid = saved[0]["mid"]
 
         monkeypatch.setattr(ad, "_send", original_send)
         before = len(api.of("POST"))
-        await ad.send_for_approval("9", did, core.get(did)["photo"], core.get(did)["post"], resume=True)
+        await ad.send_for_approval("1", did, core.get(did)["photo"], core.get(did)["post"], resume=True)
         assert len(api.of("POST")) == before + 1
         assert core.db.execute(
-            "SELECT COUNT(*) FROM max_approval_delivery WHERE did=? AND attempt=2 AND uid='9'", (did,)).fetchone()[0] == 2
+            "SELECT COUNT(*) FROM max_approval_delivery WHERE did=? AND attempt=2 AND uid='1'", (did,)).fetchone()[0] == 2
         assert core.db.execute(
-            "SELECT 1 FROM max_draft_recipient WHERE mid=? AND uid='9'", (first_option_mid,)).fetchone()
+            "SELECT 1 FROM max_draft_recipient WHERE mid=? AND uid='1'", (first_option_mid,)).fetchone()
 
         await ad.http.aclose()
 
@@ -370,17 +371,17 @@ def test_resume_resends_when_saved_max_message_is_confirmed_missing(monkeypatch,
         monkeypatch.setattr(ad, "_upload_image", upload)
         did = await core.submit(ad, "9", "Author", "Description", png)
         row = core.db.execute("""SELECT mid FROM max_approval_delivery
-                                 WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()
+                                 WHERE did=? AND attempt=1 AND uid='1' AND slot=-1""", (did,)).fetchone()
         assert row
         old_mid = row["mid"]
         api.messages.pop(old_mid)
 
         before = len(api.of("POST"))
         d = core.get(did)
-        await ad.send_for_approval("9", did, d["photo"], d["post"], resume=True)
+        await ad.send_for_approval("1", did, d["photo"], d["post"], resume=True)
         assert len(api.of("POST")) == before + 1
         new_mid = core.db.execute("""SELECT mid FROM max_approval_delivery
-                                     WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()["mid"]
+                                     WHERE did=? AND attempt=1 AND uid='1' AND slot=-1""", (did,)).fetchone()["mid"]
         assert new_mid != old_mid
         assert core.db.execute("SELECT 1 FROM max_draft_ui WHERE mid=?", (old_mid,)).fetchone() is None
         await ad.http.aclose()
@@ -412,10 +413,10 @@ def test_resume_does_not_resend_when_saved_message_check_is_uncertain(monkeypatc
         ad.http = httpx.AsyncClient(base_url=max_.API, transport=httpx.MockTransport(handler))
         d = core.get(did)
         with __import__("pytest").raises(httpx.HTTPStatusError):
-            await ad.send_for_approval("9", did, d["photo"], d["post"], resume=True)
+            await ad.send_for_approval("1", did, d["photo"], d["post"], resume=True)
         assert len(api.of("POST")) == before
         assert core.db.execute("""SELECT 1 FROM max_approval_delivery
-                                  WHERE did=? AND attempt=1 AND uid='9' AND slot=-1""", (did,)).fetchone()
+                                  WHERE did=? AND attempt=1 AND uid='1' AND slot=-1""", (did,)).fetchone()
         await ad.http.aclose()
 
     run(scenario())

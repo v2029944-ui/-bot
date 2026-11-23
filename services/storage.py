@@ -1,4 +1,5 @@
 """Хранилище и очистка черновиков."""
+import json
 import time
 from pathlib import Path
 
@@ -185,3 +186,30 @@ def startup():
     if n:
         core.log.warning("Восстановлено зависших черновиков: %s", n)
     core.LAST_EXPIRED = core.housekeeping()
+    # Recover old author deliveries and incomplete recipient sets, without renewing
+    # the retention period or reminders of already delivered administrator cards.
+    for row in core.db.execute("SELECT * FROM drafts WHERE status='pending'").fetchall():
+        d = dict(row)
+        if d.get("source_key") and not d["last_sent"] and spaces.queue_db().execute(
+                "SELECT 1 FROM max_inbox WHERE event_key=? AND space_id=? AND state IN ('pending','processing')",
+                (d["source_key"], spaces.active_id())).fetchone():
+            continue  # The material worker owns first delivery while its job is active.
+        adapter = core._approval_adapter(d, None)
+        if adapter is not None:
+            options = json.loads(d.get("candidates") or "[]")
+            required = {i for i, option in enumerate(options) if option.get("post")} if options else {-1}
+            for uid in core.draft_recipients(d, adapter):
+                if getattr(adapter, "supports_approval_resume", False):
+                    delivered = {r[0] for r in core.db.execute(
+                        "SELECT slot FROM max_approval_delivery WHERE did=? AND attempt=? AND uid=?",
+                        (d["id"], d["attempts"], uid))}
+                    if required and required <= delivered:
+                        continue
+                    # This journal is recorded only after the complete recipient
+                    # delivery, including comparisons with an unshowable option.
+                    if core.db.execute("""SELECT 1 FROM max_draft_ui u
+                                          JOIN max_draft_recipient r ON r.mid=u.mid
+                                          WHERE u.did=? AND u.attempt=? AND r.uid=? LIMIT 1""",
+                                       (d["id"], d["attempts"], uid)).fetchone():
+                        continue
+                core.ops.enqueue(adapter, uid, d["id"])

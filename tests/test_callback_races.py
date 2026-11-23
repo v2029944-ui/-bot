@@ -22,7 +22,7 @@ def test_edit_delivery_blocks_publication_and_cannot_rollback_published_post(mx,
         edit = asyncio.create_task(core._apply_edit(mx, '5', did, 1, 'Edited text'))
         await asyncio.wait_for(started.wait(), 2)
         assert core.get(did)['status'] == 'regenerating'
-        assert 'обрабатывается' in (await core.on_action(mx, '9', 'okyes', did, 2))[1]
+        assert 'обрабатывается' in (await core.on_action(mx, '5', 'okyes', did, 2))[1]
         assert not mx.sent('publish')
         release.set()
         await edit
