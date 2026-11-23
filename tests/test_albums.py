@@ -71,7 +71,7 @@ def test_mixed_album_max_approval_and_both_channels(png, clip, llm, monkeypatch)
     media = core.draft_media(d)
     assert [i["type"] for i in media] == ["image", "video", "image"]
     assert len(llm.calls) == 1 and "АЛЬБОМ из 3" in llm.calls[0]["text"] and llm.calls[0]["b64"]
-    assert messages[0]["params"] == {"user_id": 9} and not tg.bot.groups
+    assert messages[0]["params"] == {"user_id": 5} and not tg.bot.groups
     assert [a["type"] for a in messages[0]["json"]["attachments"]] == ["image", "video", "image", "inline_keyboard"]
     assert run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert messages[1]["params"] == {"chat_id": -100}

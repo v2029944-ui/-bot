@@ -212,9 +212,18 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
     return "\n".join(lines)
 
 
+async def _send_review_notice(adapter, uid, text, rows, drafts, silent=False):
+    def require_access():
+        if any(not core.can_manage_draft(adapter, uid, core.get(d["id"])) for d in drafts):
+            raise PermissionError("Права на черновик отозваны до отправки уведомления")
+
+    require_access()
+    kw = {"preflight": require_access} if getattr(adapter, "supports_review_preflight", False) else {}
+    await adapter.send_menu(uid, text, rows, silent=silent, **kw)
+
+
 async def remind_once(now: float | None = None) -> int:
-    """Если черновик ждёт дольше REMIND_AFTER_MIN минут (0 — выключено), один раз напоминаем автору.
-    Для старых черновиков Telegram и авторов без доступа получатели — администраторы пространства.
+    """Если черновик ждёт дольше REMIND_AFTER_MIN минут (0 — выключено), напоминаем администраторам пространства.
     Возвращает число черновиков, о которых напомнили."""
     now = now or time.time()
     after = float(core.env("REMIND_AFTER_MIN", "180")) * 60
@@ -232,6 +241,9 @@ async def remind_once(now: float | None = None) -> int:
                 groups.setdefault((id(ad), uid), (ad, []))[1].append(d)
     delivered: set[int] = set()
     for (_, uid), (ad, ds) in groups.items():
+        ds = [d for d in ds if core.can_manage_draft(ad, uid, core.get(d["id"]))]
+        if not ds:
+            continue
         def age(d):
             return now - (d["last_sent"] or d["created"])
         waiting, oldest = len(ds), max(age(d) for d in ds)
@@ -240,8 +252,7 @@ async def remind_once(now: float | None = None) -> int:
                 "Нажмите, чтобы показать пост ещё раз:")
         rows_ = [[(f"📨 {(d['author_name'] or 'Пост')[:14]}, {core._ago(age(d))}", f"d:show:{d['id']}:{d['attempts']}")] for d in ds]
         try:
-            kw = {"silent": True} if ops.delivery_for(ad, uid, now) == "silent" else {}
-            await ad.send_menu(uid, text, rows_, **kw)
+            await _send_review_notice(ad, uid, text, rows_, ds, silent=ops.delivery_for(ad, uid, now) == "silent")
             delivered.update(d["id"] for d in ds)
         except Exception:
             core.log.warning("не удалось напомнить участнику %s", uid, exc_info=True)
@@ -286,11 +297,13 @@ async def warn_expiring_once(now=None):
             continue
         sent = 0
         for uid in recipients:
+            if not core.can_manage_draft(ad, uid, core.get(d["id"])):
+                continue
             try:
-                await ad.send_menu(uid, f"⏳ Пост №{d['id']} от {d['author_name'] or 'сотрудника'} "
+                await _send_review_notice(ad, uid, f"⏳ Пост №{d['id']} от {d['author_name'] or 'сотрудника'} "
                                    f"будет удалён примерно через {core._ago(deadline - now)}.\n"
                                    "Проверьте материал до истечения срока хранения.",
-                                   [[("📨 Открыть пост", f"d:show:{d['id']}:{d['attempts']}")]],
+                                   [[("📨 Открыть пост", f"d:show:{d['id']}:{d['attempts']}")]], [d],
                                    silent=ops.delivery_for(ad, uid, now) != "normal")
                 sent += 1
             except Exception:

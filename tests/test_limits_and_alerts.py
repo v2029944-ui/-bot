@@ -54,9 +54,9 @@ def test_no_deliverable_approver_removes_draft(llm, png):
     assert core.db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
 
 
-def test_other_reviewers_never_receive_authors_draft(llm, png):
+def test_available_administrator_receives_draft_when_another_is_unreachable(llm, png):
     class Half(core.Adapter):
-        name, approvers = "tg", ["1", "2"]
+        name, approvers, admins = "tg", ["1", "2"], ["1", "2"]
 
         def __init__(self):
             self.got = []
@@ -68,4 +68,4 @@ def test_other_reviewers_never_receive_authors_draft(llm, png):
     a = Half()
     core.ADAPTERS["tg"] = a
     run(core.submit(a, "9", "Вася", "x", png))
-    assert a.got == ["9"]
+    assert a.got == ["2"]

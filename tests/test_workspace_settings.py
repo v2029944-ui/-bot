@@ -23,6 +23,7 @@ def runtime(monkeypatch):
     core.ADAPTERS["max"] = ad
     spaces.install()
     root = spaces.root()
+    assert root.adapters["max"] is ad and ad.workspace_id == 0
     waiting_rule = core.WAITING_RULE.root
     try:
         yield ad, messages
@@ -60,6 +61,54 @@ def preview(ad, sid, text, uid="1"):
     run(core.on_menu(ad, uid, f"m:space_edit:{sid}"))
     run(core.on_text(ad, uid, text))
     return spaces.settings_state()[("max", uid)]["payload"]
+
+
+def test_shared_administrator_reviews_members_and_publishes_to_each_spaces_groups(runtime, monkeypatch, llm, png):
+    ad, _ = runtime
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    first = create(ad, 11, -101, "-201")
+    second = create(ad, 22, -102, "-202")
+    deliveries, publications = [], []
+
+    async def approval(adapter, uid, did, photo, post, **kwargs):
+        deliveries.append((spaces.active_id(), str(uid), did))
+
+    async def publish(adapter, photo, post, **kwargs):
+        publications.append((spaces.active_id(), adapter.name, adapter.channel))
+
+    monkeypatch.setattr(max_.Max, "send_for_approval", approval)
+    monkeypatch.setattr(max_.Max, "publish", publish)
+    monkeypatch.setattr(tg.Telegram, "publish", publish)
+    for row, author in [(first, "31"), (second, "32")]:
+        with spaces.enter(spaces.get(row["id"])):
+            adapter = core.ADAPTERS["max"]
+            core._add_person(adapter, "99", "Shared administrator", "adm")
+            core._add_person(adapter, author, "Member", "member")
+            did = run(core.submit(adapter, author, "Member", "Material for this team", png))
+            assert did == 1  # same draft ID in two different databases
+            assert not core.can_manage_draft(adapter, author, core.get(did))
+            assert core.can_manage_draft(adapter, "99", core.get(did))
+            assert not core.can_manage_draft(ad, "1", core.get(did))
+
+    # Opening the callback selects its namespace even if the reviewer last used another team.
+    async def scenario():
+        for row in (second, first):
+            assert spaces.INSTALLED and ad.workspace_id == 0
+            await ad.handle({"update_type": "message_callback", "callback": {
+                "callback_id": f"review-{row['id']}", "user": {"user_id": 99},
+                "payload": f"w:{row['id']}:d:show:1:1"}})
+            assert spaces.for_user("99") == row["id"]
+            with spaces.enter(spaces.get(row["id"])):
+                assert (await core.on_action(core.ADAPTERS["max"], "99", "okyes", 1, 1))[0]
+
+    async def call(adapter, *args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(max_.Max, "call", call)
+    run(scenario())
+    assert {uid for _, uid, _ in deliveries} == {"11", "22", "99"}
+    assert publications == [(second["id"], "max", "-102"), (second["id"], "tg", "-202"),
+                            (first["id"], "max", "-101"), (first["id"], "tg", "-201")]
 
 
 @pytest.mark.parametrize("telegram", [None, "", "-"])

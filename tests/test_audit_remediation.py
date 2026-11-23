@@ -62,7 +62,7 @@ def test_confirmation_binds_its_own_destinations(png, llm, monkeypatch):
 def test_cancelled_deferred_delivery_can_be_retried(tg, llm, png, monkeypatch):
     async def scenario():
         did = await core.submit(tg, "9", "Author", "Private caption", png)
-        ops.enqueue(tg, "9", did)
+        ops.enqueue(tg, "1", did)
         entered = asyncio.Event()
         original = tg.send_for_approval
         async def blocked(*args, **kwargs):
@@ -84,17 +84,17 @@ def test_cancelled_deferred_delivery_can_be_retried(tg, llm, png, monkeypatch):
 
 def test_startup_recovers_delivery_lease(tg, llm, png):
     did = run(core.submit(tg, "9", "Author", "Private caption", png))
-    ops.enqueue(tg, "9", did)
+    ops.enqueue(tg, "1", did)
     core.db.execute("UPDATE deferred SET lease_until=?", (time.time() + 600,))
     core.db.commit()
     core.startup()
-    assert run(ops.flush_deferred()) == 1
+    assert run(ops.flush_deferred()) == 2  # recovered lease plus the other administrator
 
 
 def test_two_deferred_deliveries_share_one_durable_lease(tg, png, llm, monkeypatch):
     async def scenario():
         did = await core.submit(tg, "9", "Author", "Private caption", png)
-        ops.enqueue(tg, "9", did)
+        ops.enqueue(tg, "1", did)
         entered, release = asyncio.Event(), asyncio.Event()
         original = tg.send_for_approval
         async def blocked(*args, **kwargs):

@@ -35,14 +35,11 @@ def can_manage_draft(adapter, uid, draft):
         return False
     if spaces.INSTALLED and getattr(adapter, "workspace_id", None) != spaces.active_id():
         return False
-    return adapter is not None and (is_admin(adapter, uid) or (draft["platform"] == adapter.name and str(draft["author_id"]) == str(uid)))
+    return adapter is not None and is_admin(adapter, uid)
 
 
 def draft_recipients(draft, adapter):
-    uid = str(draft["author_id"])
-    if draft["platform"] == adapter.name and can_manage_draft(adapter, uid, draft):
-        return [uid]
-    # Old Telegram drafts and authors who lost access remain recoverable by admins.
+    # Authorship never grants review rights, including for legacy drafts.
     return [uid for uid in getattr(adapter, "admins", []) if can_manage_draft(adapter, uid, draft)]
 
 
@@ -159,7 +156,8 @@ async def unknown_user(adapter: core.Adapter, uid, name: str, username: str | No
 
 def menu_for(adapter: core.Adapter, uid) -> list:
     rows = [list(r) for r in core.MENU] if core.is_admin(adapter, uid) else [[("🔔 Уведомления", "m:notif")]]
-    rows.append([("📋 На проверке", "m:pending")])
+    if core.is_admin(adapter, uid):
+        rows.append([("📋 На проверке", "m:pending")])
     if spaces.INSTALLED and spaces.active_id() and spaces.global_admin(uid):
         rows.append([("🏠 Главное управление", "w:0:m:admin")])
     if core.is_admin(adapter, uid):

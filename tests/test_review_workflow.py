@@ -20,7 +20,7 @@ def test_pending_list_paginates_and_opens_current_version(mx, llm, png):
     assert f"d:show:{ids[1]}:3" in [b[1] for row in rows for b in row]
     second, rows2 = run(core.on_menu(mx, "5", "m:pending:1"))
     assert f"№{ids[-1]}" in second and "Страница 2" in second
-    assert "На проверке: 9" in run(core.on_menu(mx, "9", "m:pending"))[0]
+    assert "администратор" in run(core.on_menu(mx, "9", "m:pending"))[0]
     run(core.on_action(mx, "5", "show", ids[1], 1))
     assert mx.sent("approval")[-1][2] == ids[1]
 

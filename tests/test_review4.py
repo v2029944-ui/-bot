@@ -179,10 +179,11 @@ def test_bot_refuses_to_start_with_bad_notify_hours(monkeypatch):
 
 
 def test_defer_draft_is_not_lost_when_window_never_opens_with_valid_config(tg, llm, png, monkeypatch):
+    tg.admins = ["1"]
     monkeypatch.setenv("NOTIFY_HOURS", "20-6")
     monkeypatch.setenv("NOTIFY_DAYS", "1-7")
     monkeypatch.setenv("NOTIFY_TZ", "UTC")
-    ops.set_mode(tg, "9", "defer")
+    ops.set_mode(tg, "1", "defer")
     now = __import__("datetime").datetime(2026, 11, 3, 12, 0, tzinfo=__import__("datetime").timezone.utc).timestamp()
     monkeypatch.setattr(time, "time", lambda: now)
     run(core.submit(tg, "9", "Анна", "Заменили масло и фильтры", png))

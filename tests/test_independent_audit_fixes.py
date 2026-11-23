@@ -286,7 +286,7 @@ def test_concurrent_update_notices_deliver_once(mx, monkeypatch, tmp_path):
     run(scenario())
 
 
-def test_pending_page_limits_sql_and_filters_authors(mx):
+def test_pending_page_limits_sql_for_administrator(mx):
     core.refresh_people(mx)
     core._add_person(mx, '9', 'Автор', 'member')
     core._add_person(mx, '8', 'Другой', 'member')
@@ -296,15 +296,15 @@ def test_pending_page_limits_sql_and_filters_authors(mx):
     queries = []
     core.db.set_trace_callback(queries.append)
     try:
-        text, rows = core.pending_view(mx, 2, '9')
+        text, rows = core.pending_view(mx, 2, '5')
     finally:
         core.db.set_trace_callback(None)
-    assert 'На проверке: 500' in text
+    assert 'На проверке: 1000' in text
     assert len([p for row in rows for _, p in row if p.startswith('d:show:')]) == 8
     pages = [sql for sql in queries if sql.startswith('SELECT * FROM drafts')]
-    assert len(pages) == 1 and 'LIMIT 8 OFFSET 16' in pages[0] and "author_id='9'" in pages[0]
+    assert len(pages) == 1 and 'LIMIT 8 OFFSET 16' in pages[0] and "author_id=" not in pages[0]
     shown = [p for row in rows for _, p in row if p.startswith('d:show:')]
-    assert all(core.get(int(p.split(':')[2]))['author_id'] == '9' for p in shown)
+    assert {core.get(int(p.split(':')[2]))['author_id'] for p in shown} == {'8', '9'}
 
 
 def test_pending_admin_page_preserves_old_telegram_and_fallback_platforms(mx, tg):
@@ -313,7 +313,7 @@ def test_pending_admin_page_preserves_old_telegram_and_fallback_platforms(mx, tg
         core.db.execute("INSERT INTO drafts(platform,author_id,author_name,source_text,post,created) VALUES(?,'9','Автор','Описание','Пост',0)", (platform,))
     core.db.commit()
     assert 'На проверке: 3' in core.pending_view(mx, uid='5')[0]
-    assert 'На проверке: 1' in core.pending_view(mx, uid='9')[0]
+    assert 'На проверке: 0' in core.pending_view(mx, uid='9')[0]
 
 
 def test_person_lookup_is_targeted_and_keeps_legacy_roles(mx, monkeypatch):

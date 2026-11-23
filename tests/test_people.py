@@ -47,7 +47,7 @@ def test_admin_approves_as_approver_and_draft_reaches_him(llm, png):
     menu(a, "1", "m:acc:apr:77")
     assert "77" in a.allowed and "77" not in a.approvers
     run(core.submit(a, "2", "Анна", "заменили масло", png))
-    assert {o[1] for o in a.sent("approval")} == {"2"}
+    assert {o[1] for o in a.sent("approval")} == {"1"}
 
 
 def test_reject_is_silent_for_a_week_then_allowed_again():

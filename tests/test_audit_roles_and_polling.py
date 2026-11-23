@@ -114,7 +114,7 @@ def test_send_draft_rechecks_stale_recipient_list_before_delivery(monkeypatch, p
 
 def test_max_rechecks_draft_rights_after_rate_limit_before_http(monkeypatch, png, llm):
     async def scenario():
-        seed = FakeAdapter("max", ["9"], admins=[])
+        seed = FakeAdapter("max", ["5"], admins=["5"])
         core.ADAPTERS["max"] = seed
         did = await core.submit(seed, "9", "Author", "Description", png)
         d = core.get(did)
@@ -160,7 +160,7 @@ def test_max_rechecks_draft_rights_after_rate_limit_before_http(monkeypatch, png
 
 def test_max_rechecks_draft_rights_after_media_upload_before_post(monkeypatch, png, llm):
     async def scenario():
-        seed = FakeAdapter("max", ["9"], admins=[])
+        seed = FakeAdapter("max", ["5"], admins=["5"])
         core.ADAPTERS["max"] = seed
         did = await core.submit(seed, "9", "Author", "Description", png)
         d = core.get(did)

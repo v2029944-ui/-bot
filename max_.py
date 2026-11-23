@@ -104,6 +104,7 @@ def _id(x):
 
 
 class Max(core.Adapter):
+    supports_review_preflight = True
     name = "max"
     supports_approval_resume = True
 
@@ -656,7 +657,9 @@ class Max(core.Adapter):
         finally:
             _NAV.reset(token)
 
-    async def send_menu(self, user_id, text, rows, silent=False):
+    async def send_menu(self, user_id, text, rows, silent=False, preflight=None):
+        if preflight is not None:
+            preflight()
         if spaces.INSTALLED:
             name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name
             titled = f"Пространство: {name}\n\n{text}"
@@ -665,8 +668,8 @@ class Max(core.Adapter):
         buttons = [[{"type": "callback", "text": t, "payload": p} for t, p in row] for row in rows] if rows else None
         nav = _NAV.get()
         if nav is None or str(nav["uid"]) != str(user_id):  # рассылка (напоминания и т. п.): обычное сообщение
-            return await self._send({"user_id": user_id}, text, None, buttons, silent=silent)
-        if nav.get("inline_mid") and buttons:
+            return await self._send({"user_id": user_id}, text, None, buttons, silent=silent, preflight=preflight)
+        if nav.get("inline_mid") and buttons and preflight is None:
             if await self._strip_admin_button({"mid": nav["inline_mid"]}, replacement=buttons):
                 nav["sent_menu"] = True
                 return {"message": {"body": {"mid": nav["inline_mid"]}}}
@@ -674,7 +677,7 @@ class Max(core.Adapter):
         # Шаг меню: прошлое меню этого человека удаляется — остаётся одно. Кнопка «Меню админа» есть на всех
         # экранах, кроме самой главной страницы меню админа (там она не нужна, а на остальных — путь назад).
         main = bool(rows) and rows == core.menu_for(self, user_id)
-        resp = await self._send({"user_id": user_id}, text, None, buttons, silent=silent, admin_menu=not main)
+        resp = await self._send({"user_id": user_id}, text, None, buttons, silent=silent, admin_menu=not main, preflight=preflight)
         old, new = self._ui(user_id)["menu"], _mid(resp)
         nav["sent_menu"] = True
         self._ui_set(user_id, menu=new)
@@ -786,7 +789,7 @@ class Max(core.Adapter):
             raise  # постоянная очередь должна увидеть ошибку, а не пометить команду выполненной
 
     HELLO = ("Привет! Пришлите фото или короткое видео вашей работы с кратким описанием в подписи — "
-             "я подготовлю пост, который вы сможете отредактировать и опубликовать.")
+             "я подготовлю пост и передам его администратору на проверку и публикацию.")
 
     async def _stranger(self, uid, name, username=None) -> bool:
         """Человека нет в списках: тихо передаём заявку администраторам. True = обработано."""

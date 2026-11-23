@@ -197,8 +197,8 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
     sql = "SELECT * FROM deferred"
     if adapter is not None and uid is not None:
         sql, args = sql + " WHERE platform=? AND uid=?", (adapter.name, str(uid))
-    # Old deferred broadcasts may target former reviewers. Reassign those deliveries
-    # before reading the batch so the author can receive them in the same pass.
+    # Legacy deliveries may target authors or revoked administrators. Reassign them
+    # before reading the batch so current administrators receive them in this pass.
     for r in core.db.execute(sql, args).fetchall():
         ad, d = core.ADAPTERS.get(r["platform"]), core.get(r["did"])
         if ad and d and d["status"] == "pending" and not core.can_manage_draft(ad, r["uid"], d):

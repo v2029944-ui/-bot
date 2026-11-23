@@ -6,9 +6,9 @@ from conftest import run
 import core
 
 
-def test_submit_sends_draft_only_to_author(tg, llm, png):
+def test_submit_sends_draft_only_to_administrators(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "форсунки", png))
-    assert [o[1] for o in tg.sent("approval")] == ["9"]
+    assert [o[1] for o in tg.sent("approval")] == ["1", "2"]
     assert core.get(did)["status"] == "pending"
     call = llm.calls[0]
     assert "форсунки" in call["text"] and call["b64"]  # описание и картинка ушли в нейросеть
@@ -37,12 +37,12 @@ def test_only_approvers_can_press_buttons(tg, llm, png):
     assert not ok and "нет прав" in text and core.get(did)["status"] == "pending"
 
 
-def test_regenerate_sends_to_author_and_acting_admin_and_old_buttons_expire(tg, llm, png):
+def test_regenerate_sends_to_administrators_and_old_buttons_expire(tg, llm, png):
     did = run(core.submit(tg, "9", "Вася", "x", png))
     llm.reply = "Новый вариант"
     run(core.on_action(tg, "1", "regen", did, 1))
     assert core.get(did)["attempts"] == 2 and core.get(did)["post"] == "Новый вариант"
-    assert len(tg.sent("approval")) == 3  # первоначальный автору, новый — автору и действующему администратору
+    assert [o[1] for o in tg.sent("approval")] == ["1", "2", "1", "2"]
     ok, text = run(core.on_action(tg, "1", "okyes", did, 1))  # кнопка под старым вариантом
     assert "устаревший" in text and core.get(did)["status"] == "pending"
 
