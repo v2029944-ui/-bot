@@ -39,8 +39,10 @@ def can_manage_draft(adapter, uid, draft):
 
 
 def draft_recipients(draft, adapter):
-    # Authorship never grants review rights, including for legacy drafts.
-    return [uid for uid in getattr(adapter, "admins", []) if can_manage_draft(adapter, uid, draft)]
+    # Route automatic review to the designated supervisors of the whole bot.
+    reviewers = spaces.global_admin_ids() if adapter.name == "max" else []
+    recipients = reviewers or getattr(adapter, "admins", [])
+    return [uid for uid in recipients if can_manage_draft(adapter, uid, draft)]
 
 
 def requests_enabled(adapter: core.Adapter) -> bool:

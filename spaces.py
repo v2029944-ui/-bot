@@ -143,8 +143,15 @@ def queue_db():
     return root().db if INSTALLED else core.db
 
 
+def global_admin_ids() -> list[str]:
+    if not INSTALLED:
+        return []
+    adapter = root().adapters["max"]
+    return getattr(adapter, "global_admins", getattr(adapter, "base_admins", []))
+
+
 def global_admin(uid):
-    return INSTALLED and str(uid) in getattr(root().adapters["max"], "global_admins", root().adapters["max"].base_admins)
+    return str(uid) in global_admin_ids()
 
 
 def _get(sid):
@@ -195,7 +202,9 @@ def _get(sid):
             core.PHOTOS.mkdir(parents=True, exist_ok=True)
             core.VIDEOS.mkdir(parents=True, exist_ok=True)
             root_max = root().adapters["max"]
-            ad = Max(root_max.http.headers["Authorization"], row["max_channel"], [row["owner"]], [row["owner"]], [row["owner"]])
+            owner = row["owner"]
+            admins = list(dict.fromkeys([*global_admin_ids(), owner]))
+            ad = Max(root_max.http.headers["Authorization"], row["max_channel"], [owner], [owner], admins)
             ad.workspace_id = sid
             memory["ADAPTERS"]["max"] = ad
             import os
@@ -269,6 +278,8 @@ def for_user(uid, continue_input=False):
         return 0
     if selected and selected["sid"] in OPEN and str(uid) in OPEN[selected["sid"]].memory["ADAPTERS"]["max"].allowed:
         return selected["sid"]
+    if global_admin(uid):
+        return 0
     for sid, space in OPEN.items():
         if str(uid) in space.memory["ADAPTERS"]["max"].allowed:
             return sid
@@ -623,7 +634,8 @@ async def settings_save(adapter, uid, payload):
     ad = space.memory["ADAPTERS"]["max"]
     ad.channel = values[2]
     if sid:
-        ad.base_admins, ad.base_approvers, ad.base_employees = [values[1]], [values[1]], [values[1]]
+        ad.base_admins = list(dict.fromkeys([*global_admin_ids(), values[1]]))
+        ad.base_approvers, ad.base_employees = [values[1]], [values[1]]
     else:
         root().name, root().owner = values[:2]
         ad.base_admins = list(dict.fromkeys([*ad.global_admins, values[1]]))

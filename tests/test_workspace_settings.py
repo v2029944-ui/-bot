@@ -6,6 +6,7 @@ from conftest import run
 
 import core
 import max_
+import ops
 import spaces
 import tg
 
@@ -63,11 +64,12 @@ def preview(ad, sid, text, uid="1"):
     return spaces.settings_state()[("max", uid)]["payload"]
 
 
-def test_shared_administrator_reviews_members_and_publishes_to_each_spaces_groups(runtime, monkeypatch, llm, png):
+def test_max_admin_receives_member_drafts_and_publishes_to_each_spaces_groups(runtime, monkeypatch, llm, png):
     ad, _ = runtime
     monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
     first = create(ad, 11, -101, "-201")
     second = create(ad, 22, -102, "-202")
+    assert spaces.for_user("1") == 0
     deliveries, publications = [], []
 
     async def approval(adapter, uid, did, photo, post, **kwargs):
@@ -82,31 +84,35 @@ def test_shared_administrator_reviews_members_and_publishes_to_each_spaces_group
     for row, author in [(first, "31"), (second, "32")]:
         with spaces.enter(spaces.get(row["id"])):
             adapter = core.ADAPTERS["max"]
-            core._add_person(adapter, "99", "Shared administrator", "adm")
             core._add_person(adapter, author, "Member", "member")
             did = run(core.submit(adapter, author, "Member", "Material for this team", png))
             assert did == 1  # same draft ID in two different databases
             assert not core.can_manage_draft(adapter, author, core.get(did))
-            assert core.can_manage_draft(adapter, "99", core.get(did))
+            assert core.can_manage_draft(adapter, "1", core.get(did))
             assert not core.can_manage_draft(ad, "1", core.get(did))
+            ops.enqueue(adapter, row["owner"], did)  # legacy queued delivery to the local owner
+            assert run(ops.flush_deferred()) == 1
+            assert not core.db.execute("SELECT 1 FROM deferred").fetchone()
 
     # Opening the callback selects its namespace even if the reviewer last used another team.
     async def scenario():
         for row in (second, first):
             assert spaces.INSTALLED and ad.workspace_id == 0
             await ad.handle({"update_type": "message_callback", "callback": {
-                "callback_id": f"review-{row['id']}", "user": {"user_id": 99},
+                "callback_id": f"review-{row['id']}", "user": {"user_id": 1},
                 "payload": f"w:{row['id']}:d:show:1:1"}})
-            assert spaces.for_user("99") == row["id"]
+            assert spaces.for_user("1") == row["id"]
             with spaces.enter(spaces.get(row["id"])):
-                assert (await core.on_action(core.ADAPTERS["max"], "99", "okyes", 1, 1))[0]
+                assert (await core.on_action(core.ADAPTERS["max"], "1", "okyes", 1, 1))[0]
 
     async def call(adapter, *args, **kwargs):
         return {}
 
     monkeypatch.setattr(max_.Max, "call", call)
     run(scenario())
-    assert {uid for _, uid, _ in deliveries} == {"11", "22", "99"}
+    assert deliveries == [(first["id"], "1", 1), (first["id"], "1", 1),
+                          (second["id"], "1", 1), (second["id"], "1", 1),
+                          (second["id"], "1", 1), (first["id"], "1", 1)]
     assert publications == [(second["id"], "max", "-102"), (second["id"], "tg", "-202"),
                             (first["id"], "max", "-101"), (first["id"], "tg", "-201")]
 
@@ -149,6 +155,7 @@ def test_edit_preview_confirmation_replay_and_owner_revocation(runtime):
     with spaces.enter(space):
         assert not core.is_member(old_adapter, "11")
         assert core.is_admin(old_adapter, "22")
+        assert core.is_admin(old_adapter, "1")
         assert core.role_of(old_adapter, "33") == "member"
         assert ("max", "11") not in core.WAITING_EDIT
         assert "нет прав" in run(core.on_menu(old_adapter, "11", "m:people"))[0]
@@ -190,7 +197,7 @@ def test_duplicate_owner_or_group_does_not_change_runtime_or_database(runtime):
     create(ad, 22, -102)
     payload = preview(ad, row["id"], "Дубль\n22\n-103\n-")
     assert "привязаны" in run(core.on_menu(ad, "1", payload))[0]
-    assert spaces.get(row["id"]).memory["ADAPTERS"]["max"].admins == ["11"]
+    assert spaces.get(row["id"]).memory["ADAPTERS"]["max"].admins == ["1", "11"]
     saved = spaces.root().db.execute("SELECT * FROM workspaces WHERE id=?", (row["id"],)).fetchone()
     assert spaces.settings_values(saved) == spaces.settings_values(row)
 
