@@ -235,6 +235,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return post_footer.view()
     if act == "admin":
         return "Меню администратора:", core.menu_for(adapter, uid)
+    if act == "menu" and not core.is_admin(adapter, uid):
+        return core.SUBMISSION_HELP, None
     if act == "pending":
         if not core.is_admin(adapter, uid):
             return "⛔ Посты проверяет и публикует администратор. Присылайте фото или видео с подписью.", None
@@ -262,6 +264,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         command_context.mutate("rule_delete_button", remove)
         page = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() and len(parts[3]) < 8 else 0
         return core.rules_view(page)
+    if act in ("notif", "nset") and not core.is_admin(adapter, uid):
+        return "⛔ Уведомления о черновиках настраивает администратор.", None
     if act == "notif":
         return ops.notif_view(adapter, uid)
     if act == "nset":

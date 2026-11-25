@@ -58,7 +58,7 @@ def test_max_ignores_group_and_stays_quiet_for_employee(monkeypatch):
     core.ADAPTERS["max"] = m
     run(m.on_message({"recipient": {"chat_type": "chat"}, "sender": {"user_id": 9}, "body": {"text": "привет"}}))
     run(m.on_message({"recipient": {"chat_type": "dialog"}, "sender": {"user_id": 9}, "body": {"text": "привет"}}))
-    assert sent == [(9, "Меню участника:")]  # в группе — игнор, сотруднику в личке — тишина
+    assert sent == [(9, core.SUBMISSION_HELP)]  # в группе — игнор, в личке — подсказка
 
 
 # ---------- main ----------

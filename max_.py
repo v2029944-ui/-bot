@@ -778,7 +778,7 @@ class Max(core.Adapter):
                     return
                 if not core.quiet(self, uid):
                     await self.notify(uid, self.HELLO)
-                if core.is_member(self, uid):
+                if core.is_admin(self, uid):
                     await self.send_menu(uid, "Меню участника:", core.menu_for(self, uid))
             elif kind == "message_created":
                 await self.on_message(u["message"])
@@ -827,7 +827,8 @@ class Max(core.Adapter):
                     if await core.on_text(self, uid, body["text"]):
                         return
                     if core.is_member(self, uid):
-                        return await self.send_menu(uid, "Меню участника:", core.menu_for(self, uid))
+                        rows = core.menu_for(self, uid)
+                        return await self.send_menu(uid, "Меню администратора:" if rows else core.SUBMISSION_HELP, rows)
                 finally:
                     _NAV.reset(token)
             return None if quiet else await self.notify(uid, "Пришлите, пожалуйста, фото или видео с описанием в подписи 📷")

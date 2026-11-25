@@ -155,20 +155,20 @@ async def unknown_user(adapter: core.Adapter, uid, name: str, username: str | No
 
 
 def menu_for(adapter: core.Adapter, uid) -> list:
-    rows = [list(r) for r in core.MENU] if core.is_admin(adapter, uid) else [[("🔔 Уведомления", "m:notif")]]
-    if core.is_admin(adapter, uid):
-        rows.append([("📋 На проверке", "m:pending")])
+    if not core.is_admin(adapter, uid):
+        return []
+    rows = [list(r) for r in core.MENU]
+    rows.append([("📋 На проверке", "m:pending")])
     if spaces.INSTALLED and spaces.active_id() and spaces.global_admin(uid):
         rows.append([("🏠 Главное управление", "w:0:m:admin")])
-    if core.is_admin(adapter, uid):
-        if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
-            rows.append([("🏢 Рабочие пространства", "m:spaces")])
-        rows.append([("👥 Люди", "m:people"), ("📊 Статус", "m:status")])
-        if not spaces.active_id() and core.is_global_admin(adapter, uid):
-            rows.append([("🔄 Обновить", "m:upd")])
-        rows.append([("📥 Обработка материалов", "m:inbox")])
-        rows.append([("🔗 Ссылка в постах", "m:footer")])
-        rows.append([("🤖 Модели генерации", "m:compare")])
+    if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
+        rows.append([("🏢 Рабочие пространства", "m:spaces")])
+    rows.append([("👥 Люди", "m:people"), ("📊 Статус", "m:status")])
+    if not spaces.active_id() and core.is_global_admin(adapter, uid):
+        rows.append([("🔄 Обновить", "m:upd")])
+    rows.append([("📥 Обработка материалов", "m:inbox")])
+    rows.append([("🔗 Ссылка в постах", "m:footer")])
+    rows.append([("🤖 Модели генерации", "m:compare")])
     return rows
 
 

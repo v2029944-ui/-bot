@@ -75,15 +75,24 @@ def test_default_mode_comes_from_settings(monkeypatch):
     assert ops.get_mode(a, "2") == "silent"
 
 
-def test_menu_lets_every_approver_choose_mode():
-    a = admin_adapter()
-    text, rows = run(core.on_menu(a, "2", "m:notif"))  # обычный согласующий
+def test_admin_can_choose_notification_mode():
+    a = admin_adapter(admins=("1", "2"))
+    text, rows = run(core.on_menu(a, "2", "m:notif"))
     assert "Уведомления" in text and len(rows) == 4
     text, rows = run(core.on_menu(a, "2", "m:nset:defer"))
     assert "Сохранено" in text and ops.get_mode(a, "2") == "defer"
     assert any(b[0].startswith("✓ ⏳") for r in rows for b in [r[0]])
     run(core.on_menu(a, "2", "m:nset:мусор"))
     assert ops.get_mode(a, "2") == "defer"  # неизвестный режим не принимается
+
+
+def test_member_cannot_open_or_change_notification_settings_with_old_buttons():
+    a = admin_adapter()
+    assert core.menu_for(a, "2") == []
+    for payload in ("m:notif", "m:nset:defer"):
+        text, rows = run(core.on_menu(a, "2", payload))
+        assert "администратор" in text and not rows
+    assert ops.get_mode(a, "2") == "normal"
 
 
 def test_draft_goes_silent_outside_hours_and_waits_in_defer_mode(tg, llm, png, monkeypatch):
