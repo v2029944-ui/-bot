@@ -427,7 +427,7 @@ def test_two_spaces_isolate_data_callbacks_settings_and_both_destinations(monkey
                 """SELECT kind,uid,space_id,state,text FROM max_handoff_notices
                    WHERE event_key='expired-a' ORDER BY kind,uid""").fetchall()
             assert [(r["kind"], r["uid"], r["space_id"], r["state"]) for r in expiry_notices] == [
-                ("staff", "11", aid, "pending"), ("user", "11", aid, "pending")]
+                ("staff", "1", aid, "pending"), ("staff", "11", aid, "pending"), ("user", "11", aid, "pending")]
             assert all("Истёк срок обработки" in r["text"] or "не удалось обработать за 7 дней" in r["text"]
                        for r in expiry_notices)
             assert not root.db.execute(

@@ -201,7 +201,7 @@ async def flush_deferred(now: float | None = None, adapter=None, uid=None) -> in
     # before reading the batch so current administrators receive them in this pass.
     for r in core.db.execute(sql, args).fetchall():
         ad, d = core.ADAPTERS.get(r["platform"]), core.get(r["did"])
-        if ad and d and d["status"] == "pending" and not core.can_manage_draft(ad, r["uid"], d):
+        if ad and d and d["status"] == "pending" and r["uid"] not in core.draft_recipients(d, ad):
             core.db.execute("DELETE FROM deferred WHERE platform=? AND uid=? AND did=?", (r["platform"], r["uid"], r["did"]))
             for recipient in core.draft_recipients(d, ad):
                 enqueue(ad, recipient, d["id"])
