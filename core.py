@@ -94,6 +94,9 @@ db.execute("""CREATE TABLE IF NOT EXISTS drafts (
     source_text TEXT, photo TEXT, post TEXT,
     status TEXT DEFAULT 'pending', attempts INTEGER DEFAULT 1, created REAL)""")
 db.execute("CREATE TABLE IF NOT EXISTS rules (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, created REAL)")
+db.execute("""CREATE TABLE IF NOT EXISTS common_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, created REAL,
+    enabled INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 0)""")
 db.execute("CREATE INDEX IF NOT EXISTS drafts_status ON drafts(status)")
 # люди, добавленные кнопками в мессенджере (дополняют списки из настроек)
 db.execute("""CREATE TABLE IF NOT EXISTS people (

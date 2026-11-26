@@ -85,7 +85,11 @@ def build_system() -> str:
     if spaces.active_id() or spaces.INSTALLED and spaces.configured_root(spaces.root().db):
         name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name
         s = s.replace(f"компании «{core.env('COMPANY', 'нашей компании')}»", f"компании «{name}»", 1)
-    # в запрос идут последние 30 правил, чтобы он не разрастался
+    common_rules = editor_rules.active(common=True) if spaces.INSTALLED else []
+    if common_rules:
+        s += ("\n\nОбщие правила редакции для всех команд "
+              "(при противоречии имеют приоритет над пожеланиями отдельной команды):\n"
+              + "\n".join(f"- {r}" for r in common_rules))
     rules = editor_rules.active()
     if rules:
         s += ("\n\nПостоянные пожелания редакции (дополняют правила выше, учитывай всегда):\n"

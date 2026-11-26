@@ -163,6 +163,7 @@ def menu_for(adapter: core.Adapter, uid) -> list:
         return []
     if spaces.INSTALLED and core.is_global_admin(adapter, uid):
         rows = [[("🏢 Рабочие пространства", "m:spaces")],
+                [("📝 Общие правила", "m:common_rules")],
                 [("📊 Общий статус", "m:status"), ("📥 Общая очередь", "m:inbox")],
                 [("🔄 Обновить", "m:upd"), ("⚙️ Режим №0", "m:root_mode")]]
         if not spaces.management_only():

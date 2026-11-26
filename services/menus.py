@@ -15,6 +15,7 @@ MANAGEMENT_ACTIONS = {
     "spaces", "space_add", "space", "space_fields", "space_edit", "space_save",
     "spaces_archive", "space_archive", "space_restore", "space_apply",
 }
+COMMON_RULE_ACTIONS = {"common_rules", "common_rules_set", "common_rule_set", "common_add", "common_del"}
 
 
 def input_snapshot(adapter, uid):
@@ -25,7 +26,7 @@ def input_snapshot(adapter, uid):
         if value is not None:
             state[name] = value
     if key in core.WAITING_RULE:
-        state["rule"] = True
+        state["rule"] = core.WAITING_RULE.get(key)
     if key in post_footer.WAITING:
         state["footer"] = post_footer.WAITING[key]
     if (spaces.active_id(), str(uid)) in spaces.WAITING_MEMBER:
@@ -82,6 +83,10 @@ def cancel_input(adapter, uid, payload):
     if "footer" in state:
         return post_footer.view()
     if "rule" in state:
+        if state["rule"] == "common":
+            if not core.is_global_admin(adapter, uid):
+                return "⛔ Общими правилами управляет главный администратор.", None
+            return rules_view(common=True)
         return core.rules_view()
     if "member" in state:
         return core.people_view(adapter)
@@ -118,42 +123,46 @@ def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
 
 
 
-def rules_view(page=0) -> tuple[str, list]:
-    enabled, revision = editor_rules.mode()
-    total = core.db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
+def rules_view(page=0, *, common=False) -> tuple[str, list]:
+    enabled, revision = editor_rules.mode(common)
+    table = editor_rules.table(common)
+    prefix = "m:common_" if common else "m:"
+    total = core.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     page = min(max(0, page), max(0, (total - 1) // 40))
     offset = page * 40
-    rows = list(reversed(core.db.execute("SELECT id,text,enabled,revision FROM rules ORDER BY id DESC LIMIT 40 OFFSET ?", (offset,)).fetchall()))
+    rows = list(reversed(core.db.execute(f"SELECT id,text,enabled,revision FROM {table} ORDER BY id DESC LIMIT 40 OFFSET ?", (offset,)).fetchall()))
     numbered = list(enumerate(rows, total - offset - len(rows) + 1))
     body = "\n".join(f"{n}. {'' if r['enabled'] else '⏸ '}{r['text']}" for n, r in numbered) or "Пока пусто."
     if len(body.encode("utf-16-le")) // 2 > 3500:
         body = body.encode("utf-16-le")[:3500 * 2].decode("utf-16-le", errors="ignore") + "\n…"
-    status = "применяются" if enabled else "отключены для всех постов"
-    text = f"📝 Правила стиля · {status}\n\n{body}"
+    status = "применяются" if enabled else "отключены"
+    title = "Общие правила для всех пространств" if common else "Правила стиля пространства"
+    text = f"📝 {title} · {status}\n\n{body}"
     if enabled:
         text += "\n\nВ генерации участвуют до 30 последних включённых правил в пределах 12 000 знаков."
     if total > len(rows):
         text += f"\n\nСтраница {page + 1}. Показаны {len(rows)} из {total}."
     if rows:
         text += "\n\n⏸ — отключить правило · ▶️ — включить · 🗑 — удалить."
-    dels = [(f"🗑 {n}", f"m:del:{row['id']}" + (f":{page}" if page else "")) for n, row in numbered]
+    dels = [(f"🗑 {n}", f"{prefix}del:{row['id']}" + (f":{page}" if page else "")) for n, row in numbered]
     buttons = [dels[i:i + 4] for i in range(0, len(dels), 4)]
     switches = []
     for n, row in numbered:
         rule_id = row["id"]
         label = "⏸" if row["enabled"] else "▶️"
-        switches.append((f"{label} {n}", f"m:rule_set:{rule_id}:{int(not row['enabled'])}:{row['revision']}:{page}"))
+        switches.append((f"{label} {n}", f"{prefix}rule_set:{rule_id}:{int(not row['enabled'])}:{row['revision']}:{page}"))
     buttons.extend(switches[i:i + 4] for i in range(0, len(switches), 4))
     nav = []
     if page:
-        nav.append(("Новые →", f"m:rules:{page - 1}"))
+        nav.append(("Новые →", f"{prefix}rules:{page - 1}"))
     if offset + 40 < total:
-        nav.append(("← Более ранние", f"m:rules:{page + 1}"))
+        nav.append(("← Более ранние", f"{prefix}rules:{page + 1}"))
     if nav:
         buttons.append(nav)
-    label = "⏸ Отключить все правила" if enabled else "▶️ Включить правила"
-    buttons.append([(label, f"m:rules_set:{int(not enabled)}:{revision}:{page}")])
-    buttons.append([("➕ Добавить правило", "m:add")])
+    scope = "общие правила" if common else "правила пространства"
+    label = f"⏸ Отключить {scope}" if enabled else f"▶️ Включить {scope}"
+    buttons.append([(label, f"{prefix}rules_set:{int(not enabled)}:{revision}:{page}")])
+    buttons.append([("➕ Добавить правило", f"{prefix}add")])
     return text, buttons
 
 
@@ -168,11 +177,16 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return cancel_input(adapter, uid, payload)
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    common = act in COMMON_RULE_ACTIONS
+    if common and (not spaces.INSTALLED or not core.is_global_admin(adapter, uid)):
+        return "⛔ Общие правила меняет только главный администратор из панели управления.", None
     if spaces.in_management_only():
         if not core.is_global_admin(adapter, uid):
             return "Откройте рабочее пространство или попросите администратора добавить вас в команду.", None
-        if act not in MANAGEMENT_ACTIONS:
+        if act not in MANAGEMENT_ACTIONS and not common:
             return "Служебный режим №0. Действия с постами доступны в рабочих пространствах.", core.menu_for(adapter, uid)
+    if common:
+        act = act.removeprefix("common_")
     if act == "space_save":
         return await spaces.settings_menu(adapter, uid, payload, parts)
     if act == "space_apply":
@@ -296,7 +310,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return max_queue.view(all_spaces=core.is_global_admin(adapter, uid))
     if act == "rules":
         page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
-        return core.rules_view(page)
+        return rules_view(page, common=common)
     if act in ("rules_set", "rule_set"):
         expected = 6 if act == "rule_set" else 5
         number_parts = parts[2:]
@@ -305,17 +319,18 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         state, rule_revision, page = map(int, parts[-3:])
         if state not in (0, 1):
             return "Настройка правила не найдена.", None
-        result = (editor_rules.set_rule(int(parts[2]), bool(state), rule_revision) if act == "rule_set"
-                  else editor_rules.set_mode(bool(state), rule_revision))
-        text, rows = core.rules_view(page)
+        result = (editor_rules.set_rule(int(parts[2]), bool(state), rule_revision, common) if act == "rule_set"
+                  else editor_rules.set_mode(bool(state), rule_revision, common))
+        text, rows = rules_view(page, common=common)
         return f"{result}\n\n{text}", rows
-    if act == "del" and len(parts) > 2 and parts[2].isdigit():
+    if act == "del" and len(parts) > 2 and parts[2].isascii() and parts[2].isdigit() and len(parts[2]) <= 18:
+        table = editor_rules.table(common)
         def remove():
-            core.db.execute("DELETE FROM rules WHERE id=?", (int(parts[2]),))
+            core.db.execute(f"DELETE FROM {table} WHERE id=?", (int(parts[2]),))
             return "removed"
         command_context.mutate("rule_delete_button", remove)
         page = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() and len(parts[3]) < 8 else 0
-        return core.rules_view(page)
+        return rules_view(page, common=common)
     if act in ("notif", "nset") and not core.is_admin(adapter, uid):
         return "⛔ Уведомления о черновиках настраивает администратор.", None
     if act == "notif":
@@ -337,8 +352,9 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     if act == "add":
         core.WAITING.pop((adapter.name, uid), None)
         core.WAITING_EDIT.pop((adapter.name, uid), None)
-        core.WAITING_RULE.add((adapter.name, uid))
-        return "✏️ Напишите текст нового правила одним сообщением.", input_rows(adapter, uid)
+        core.WAITING_RULE.add((adapter.name, uid), "common" if common else True)
+        prompt = "Напишите общее правило для всех пространств." if common else "Напишите текст нового правила одним сообщением."
+        return "✏️ " + prompt, input_rows(adapter, uid)
     return "Выберите действие:", core.menu_for(adapter, uid)
 
 
@@ -386,6 +402,20 @@ def pending_view(adapter, page=0, uid=None):
     return "\n".join(lines), rows
 
 
+async def save_rule_input(adapter, uid, text, common=False):
+    key = (adapter.name, uid)
+    core.WAITING_RULE.discard(key)
+    if text.lower().startswith("/cancel"):
+        await adapter.notify(uid, "Отменено.")
+        return True
+    result = editor_rules.add(text, common=common)
+    if result.startswith("Пришлите"):
+        core.WAITING_RULE.add(key, "common" if common else True)
+    message, rows = rules_view(common=common)
+    await adapter.send_menu(uid, result + "\n\n" + message, rows)
+    return True
+
+
 async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
     """Текст от участника или администратора: кнопки нижнего меню, текст нового правила, комментарий к посту, старые команды.
     True = сообщение обработано."""
@@ -403,10 +433,19 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         message, rows = await core.on_menu(adapter, uid, action)
         await adapter.send_menu(uid, message, rows)
         return True
+    key = (adapter.name, uid)
+    if core.WAITING_RULE.get(key) == "common" and t != "/status":
+        if not core.is_global_admin(adapter, uid):
+            core.WAITING_RULE.discard(key)
+            await adapter.notify(uid, "⛔ Общие правила меняет только главный администратор.")
+            return True
+        if t.startswith("/") and t != "/cancel":
+            await adapter.notify(uid, "Пришлите текст общего правила или нажмите «Отмена».")
+            return True
+        return await save_rule_input(adapter, uid, t, common=True)
     if spaces.in_management_only() and t != "/status":
         await adapter.send_menu(uid, "Управление ботом", core.menu_for(adapter, uid))
         return True
-    key = (adapter.name, uid)
     if t == "/cancel":
         dialog_state.PendingMap(core.db, "people_confirmation").pop(key, None)
     if key in post_footer.WAITING:
@@ -471,16 +510,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         await adapter.notify(uid, "⛔ Настройки меняет только администратор.")
         return True
     if key in core.WAITING_RULE and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
-        core.WAITING_RULE.discard(key)
-        if t.lower().startswith("/cancel"):
-            await adapter.notify(uid, "Отменено.")
-            return True
-        result = editor_rules.add(t)
-        if result.startswith("Пришлите"):
-            core.WAITING_RULE.add(key)
-        msg, rows = core.rules_view()
-        await adapter.send_menu(uid, result + "\n\n" + msg, rows)
-        return True
+        return await save_rule_input(adapter, uid, t)
     if t.lower().startswith("/cancel") and await core.on_comment(adapter, uid, t):
         return True
     reply = core.rules_command(adapter, uid, t)  # команды важнее ожидания комментария: не улетают в LLM

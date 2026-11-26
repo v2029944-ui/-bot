@@ -72,7 +72,7 @@ def test_management_panel_has_global_tools_and_separates_workspace_actions(runti
     text, rows = run(core.on_menu(ad, "1", "m:admin"))
     assert text == "Управление ботом"
     assert {payload for line in rows for _, payload in line} == {
-        "m:spaces", "m:status", "m:inbox", "m:upd", "m:root_mode", "m:root_workspace",
+        "m:spaces", "m:status", "m:inbox", "m:upd", "m:root_mode", "m:root_workspace", "m:common_rules",
     }
     with spaces.enter(spaces.get(child["id"])):
         text, rows = run(core.on_menu(core.ADAPTERS["max"], "1", "m:admin"))
@@ -98,6 +98,40 @@ def test_disabled_rules_persist_and_do_not_affect_another_workspace(runtime):
     for sid, expected in [(first, []), (second, ["Правило команды"])]:
         with spaces.enter(spaces.get(sid)):
             assert editor_rules.active() == expected
+
+
+def test_common_rules_apply_in_each_space_and_only_global_admin_changes_them(runtime):
+    ad, _ = runtime
+    first, second = create(ad)["id"], create(ad, 22, -102)["id"]
+    run(core.on_menu(ad, "1", "m:root_mode:enable"))
+    text, rows = run(core.on_menu(ad, "1", "m:common_rules"))
+    assert "Общие правила" in text
+    add = next(payload for line in rows for _, payload in line if payload == "m:common_add")
+    run(core.on_menu(ad, "1", add))
+    run(core.on_text(ad, "1", "Общее правило для двух команд"))
+    assert editor_rules.active() == []
+
+    with spaces.enter(spaces.get(first)):
+        adapter = core.ADAPTERS["max"]
+        assert "главный администратор" in run(core.on_menu(adapter, "11", add))[0]
+        editor_rules.add("Правило только первой команды")
+        prompt = core.build_system()
+        assert "Общее правило для двух команд" in prompt
+        assert "Правило только первой команды" in prompt
+        _, rows = run(core.on_menu(adapter, "11", "m:rules"))
+        toggle = next(payload for line in rows for _, payload in line if payload.startswith("m:rules_set:"))
+        run(core.on_menu(adapter, "11", toggle))
+        assert "Общее правило для двух команд" in core.build_system()
+        assert "Правило только первой команды" not in core.build_system()
+
+    with spaces.enter(spaces.get(second)):
+        assert "Общее правило для двух команд" in core.build_system()
+        assert "Правило только первой команды" not in core.build_system()
+    _, rows = run(core.on_menu(ad, "1", "m:common_rules"))
+    toggle = next(payload for line in rows for _, payload in line if payload.startswith("m:common_rules_set:"))
+    run(core.on_menu(ad, "1", toggle))
+    with spaces.enter(spaces.get(second)):
+        assert "Общее правило для двух команд" not in core.build_system()
 
 
 def test_management_only_refuses_pending_root_work_then_blocks_new_root_material(runtime):
