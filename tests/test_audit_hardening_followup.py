@@ -82,7 +82,7 @@ def test_publication_persists_partial_telegram_stage_and_resumes(monkeypatch, ll
     assert tg.calls == [{}, {"media": True}]
 
 
-def test_recovery_skips_confirmed_telegram_text_and_keeps_channel_history():
+def test_recovery_skips_confirmed_telegram_text_without_saving_channel_history():
     mx = FakeAdapter("max", ["5", "9"], admins=["5"])
     mx.channel = "-100"
     sender = Telegram.__new__(Telegram)
@@ -99,18 +99,28 @@ def test_recovery_skips_confirmed_telegram_text_and_keeps_channel_history():
     core.startup()
     assert "Telegram — ✅ опубликовано" in core.publication_view(core.get(1), mx)[0]
     assert run(core.on_action(mx, "5", "okyes", 1, 1))[0]
+    assert core.get(1)["publication_receipt"] == "{}"
     core.startup()
     saved = core.get(1)
     assert saved["post"] == "" and saved["author_id"] == ""
-    assert json.loads(saved["publication_receipt"]) == {"max": "-100", "tg": "-200"}
-    sender.channel = "-300"
-    _, rows = run(core.on_menu(mx, "5", "m:published"))
-    assert rows[0][0][1] == "d:pubstatus:1:1"
-    run(core.on_action(mx, "5", "pubstatus", 1, 1))
     status = mx.sent("menu")[-1][2]
-    assert "Telegram — ✅ опубликовано (канал -200)" in status and "-300" not in status
-    assert run(core.on_menu(mx, "9", "m:published"))[1] is None
-    assert "нет прав" in run(core.on_action(mx, "9", "pubstatus", 1, 1))[1]
+    assert "Telegram — ✅ опубликовано (канал -200)" in status
+    assert saved["publication_receipt"] == saved["publication_channels"] == "{}"
+    assert all(payload != "m:published" for row in core.menu_for(mx, "5") for _, payload in row)
+    assert "Этот пост уже обработан." in run(core.on_action(mx, "5", "pubstatus", 1, 1))[1]
+
+
+def test_startup_clears_old_publication_receipts_and_keeps_deduplication():
+    core.db.execute("""INSERT INTO drafts(id, platform, status, cleaned, source_key,
+                                           published_at, publication_receipt)
+                       VALUES(1,'max','published',2,'source',42,'{"max":"-100"}')""")
+    core.db.commit()
+    core.startup()
+    saved = core.get(1)
+    assert saved["publication_receipt"] == "{}"
+    assert saved["status"] == "published"
+    assert saved["source_key"] == "source"
+    assert saved["published_at"] == 42
 
 
 def test_rate_limit_survives_in_memory_reset(monkeypatch, tg, llm, png):

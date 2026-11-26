@@ -6,13 +6,16 @@ from contextvars import ContextVar
 
 import core
 import post_footer
+from tg import media_chat_id
 
 EXPECTED_CHANNELS: ContextVar[dict | None] = ContextVar("confirmed_channels", default=None)
 PROMPT_CHANNELS: ContextVar[dict | None] = ContextVar("prompt_channels", default=None)
+CLOSURE_SNAPSHOT: ContextVar[dict | None] = ContextVar("closure_snapshot", default=None)
 
 
-async def _publish(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
-    return await core._guard(core._publish_safe(adapter, user_id, did, attempt, force))
+async def _publish(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False,
+                   *, text_only: bool = False) -> tuple[bool, str]:
+    return await core._guard(core._publish_safe(adapter, user_id, did, attempt, force, text_only=text_only))
 
 
 def publication_channels(targets):
@@ -35,74 +38,145 @@ def _recover_telegram_mark(marks, progress):
     return False
 
 
-def publication_view(d, adapter):
-    if d["status"] == "published":
-        receipt = json.loads(d.get("publication_receipt") or "{}")
-        if receipt:
-            names = {"max": "MAX", "tg": "Telegram"}
-            lines = [f"✅ Пост №{d['id']} опубликован."]
-            for kind, channel in receipt.items():
-                destination = f" (канал {channel})" if channel else ""
-                lines.append(f"{names.get(kind, kind)} — ✅ опубликовано{destination}")
-            return "\n".join(lines), []
-        if not d.get("published_to"):
-            return f"✅ Пост №{d['id']} опубликован. Данные по каналам не сохранились.", []
+def text_pending(mark, progress):
+    return mark == "unknown" and progress.get("media") and not (progress.get("text") or progress.get("text_started"))
+
+
+def text_unknown(mark, progress):
+    return mark == "unknown" and progress.get("media") and progress.get("text_started") and not progress.get("text")
+
+
+def _saved_channels(d):
+    return json.loads(d.get("publication_channels") or "{}")
+
+
+def _remaining_channels(channels, marks):
+    return [kind for kind in dict.fromkeys((*channels, *marks)) if marks.get(kind) != "done"]
+
+
+def publication_complete(d, adapter, marks):
+    channels = _saved_channels(d) or core.publication_channels(core.publication_targets(d, adapter))
+    return bool(channels or marks) and not _remaining_channels(channels, marks)
+
+
+def closure_snapshot(d):
+    return {key: d.get(key) for key in ("published_to", "publication_channels", "publish_progress")}
+
+
+def publication_view(d, adapter, *, title=None):
     marks = core._parse_marks(d.get("published_to"))
     errors = json.loads(d.get("publish_errors") or "{}")
     progress = json.loads(d.get("publish_progress") or "{}")
     _recover_telegram_mark(marks, progress)
     names = {"max": "MAX", "tg": "Telegram"}
-    lines = [f"Публикация поста №{d['id']}:"]
+    lines = [title or f"Публикация поста №{d['id']}:"]
     rows = []
-    channels = json.loads(d.get("publication_channels") or "{}")
-    for target in core.publication_targets(d, adapter):
-        name = names.get(target.name, target.name)
-        mark = marks.get(target.name)
-        channel_progress = progress.get(target.name) or {}
-        partial = channel_progress.get("media") and not channel_progress.get("text") and not channel_progress.get("text_started")
-        text_unknown = channel_progress.get("media") and channel_progress.get("text_started") and not channel_progress.get("text")
+    targets = {target.name: target for target in core.publication_targets(d, adapter)}
+    saved = _saved_channels(d)
+    configured = core.publication_channels(targets.values())
+    channels = saved or configured
+    can_send_text = False
+    telegram_resume_blocked = False
+    for kind in dict.fromkeys((*channels, *marks, *errors)):
+        name = names.get(kind, kind)
+        mark = marks.get(kind)
+        channel_progress = progress.get(kind) or {}
+        partial = text_pending(mark, channel_progress)
+        unknown_text = text_unknown(mark, channel_progress)
+        destination_id = channels.get(kind)
+        if kind == "tg" and channel_progress.get("media"):
+            pinned_chat = media_chat_id(saved.get(kind, ""), channel_progress)
+            destination_id = channel_progress.get("media_chat_id") or destination_id
+            telegram_resume_blocked = mark != "done" and pinned_chat is None
+            can_send_text = (partial and pinned_chat is not None and saved.get(kind) == configured.get(kind)
+                             and getattr(targets.get(kind), "supports_publish_resume", False))
         status = ("✅ опубликовано" if mark == "done" else
-                  "⚠️ медиа опубликовано, текст не отправлен" if mark == "unknown" and partial else
-                  "❓ медиа опубликовано, результат отправки текста неизвестен" if mark == "unknown" and text_unknown else
+                  "⚠️ медиа опубликовано, текст не отправлен" if partial else
+                  "❓ медиа опубликовано, результат отправки текста неизвестен" if unknown_text else
                   "❓ результат неизвестен" if mark == "unknown" else
-                  "❌ ошибка" if target.name in errors else "⏳ не отправлено")
-        destination = f" (канал {channels[target.name]})" if channels.get(target.name) else ""
+                  "❌ ошибка" if kind in errors else "⏳ не отправлено")
+        destination = f" (канал {destination_id})" if destination_id else ""
         lines.append(f"{name} — {status}{destination}")
-        if mark != "done" and target.name in errors:
-            lines.append(errors[target.name][:180])
+        if not title and mark != "done" and kind in errors:
+            lines.append(errors[kind][:180])
         if mark == "unknown" and not partial:
-            rows.append([(f"Проверил: пост есть в {name}", f"d:seen_{target.name}:{d['id']}:{d['attempts']}")])
-    if d["status"] == "pending":
-        rows.append([("🔁 Отправить в оставшиеся каналы", f"d:ok:{d['id']}:{d['attempts']}")])
+            part = "текст" if unknown_text else "пост"
+            action = "seen_tg_text" if kind == "tg" and unknown_text else f"seen_{kind}"
+            rows.append([(f"Проверил: {part} есть в {name}", f"d:{action}:{d['id']}:{d['attempts']}")])
+    if d["status"] != "pending" or title:
+        return "\n".join(lines), []
+    suffix = f"{d['id']}:{d['attempts']}"
+    if can_send_text:
+        rows.append([("Дослать текст", f"d:sendtext:{suffix}")])
+    remaining = _remaining_channels(channels, marks)
+    if remaining and marks:
+        rows.append([("Закрыть незавершённую публикацию", f"d:pubclose:{suffix}")])
+    if telegram_resume_blocked:
+        lines.append("Числовой ID прежнего канала Telegram не сохранился. Автоматическая досылка недоступна.")
+    if (not telegram_resume_blocked and (not saved or configured == saved)
+            and set(remaining) <= configured.keys() and not (can_send_text and remaining == ["tg"])):
+        rows.append([("🔁 Отправить в оставшиеся каналы", f"d:ok:{suffix}")])
     return "\n".join(lines), rows
 
 
 async def finish_publication(d, adapter=None, user_id=None):
     snapshot = core.get(d["id"])
-    channels = json.loads(snapshot.get("publication_channels") or "{}")
-    marks = core._parse_marks(snapshot.get("published_to"))
-    receipt = {kind: channel for kind, channel in channels.items() if marks.get(kind) == "done"}
-    core._set(d["id"], status="published", publication_receipt=json.dumps(receipt, ensure_ascii=False))
-    snapshot = core.get(d["id"])
+    core._set(d["id"], status="published")
+    _scrub_publication(snapshot)
+    await core._safe_notify(core.ADAPTERS.get(d["platform"]), d["author_id"], "✅ Ваш пост опубликован. Спасибо!")
+    if adapter is not None:
+        await _send_final_status(snapshot, adapter, user_id, f"✅ Пост №{d['id']} опубликован.")
+
+
+def _scrub_publication(d):
     for path in core.draft_files(d):
         core._unlink(path)
     core.clear_source_cache(d)
-    core.scrub_published(snapshot)
-    await core._safe_notify(core.ADAPTERS.get(d["platform"]), d["author_id"], "✅ Ваш пост опубликован. Спасибо!")
-    if adapter is not None:
+    core.scrub_published(d)
+
+
+async def _send_final_status(d, adapter, user_id, title):
+    try:
+        text, rows = core.publication_view(d, adapter, title=title)
+        await adapter.send_menu(str(user_id), text, rows)
+    except Exception:
+        core.log.warning("не удалось отправить статус публикации", exc_info=True)
+
+
+async def close_publication(d, adapter, user_id, *, confirm):
+    marks = core._parse_marks(d.get("published_to"))
+    _recover_telegram_mark(marks, json.loads(d.get("publish_progress") or "{}"))
+    if not marks or publication_complete(d, adapter, marks):
+        return False, "Закрыть можно только начатую и незавершённую публикацию."
+    did, attempt = d["id"], d["attempts"]
+    snapshot = closure_snapshot(d)
+    if not confirm:
+        text, _ = core.publication_view(d, adapter)
+        token = CLOSURE_SNAPSHOT.set(snapshot)
         try:
-            text, rows = core.publication_view(snapshot, adapter)
-            await adapter.send_menu(str(user_id), text, rows)
-        except Exception:
-            core.log.warning("не удалось отправить статус публикации", exc_info=True)
+            await adapter.send_menu(str(user_id), text + "\n\nЕсли прежний канал больше недоступен, можно закрыть публикацию. "
+                                    "Бот прекратит отправку и удалит черновик. Уже отправленные сообщения останутся в каналах.",
+                                    [[("Подтверждаю закрытие", f"d:pubcloseyes:{did}:{attempt}")],
+                                     [("Отмена", f"d:pubstatus:{did}:{attempt}")]])
+        finally:
+            CLOSURE_SNAPSHOT.reset(token)
+        return False, ""
+    if CLOSURE_SNAPSHOT.get() != snapshot:
+        return False, "Результат изменился или подтверждение устарело. Откройте статус публикации заново."
+    if not core._claim(did, "pending", "expired"):
+        return False, core.BUSY
+    _scrub_publication(d)
+    await _send_final_status(d, adapter, user_id, f"Публикация поста №{did} закрыта. Повторной отправки не будет.")
+    return True, ""
 
 
-async def _publish_safe(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
+async def _publish_safe(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False,
+                        *, text_only: bool = False) -> tuple[bool, str]:
     """Обёртка: непредвиденный сбой не должен оставить черновик навсегда в статусе «publishing»."""
     if not core.can_manage_draft(adapter, user_id, core.get(did)):
         return False, "⛔ У вас нет прав на этот пост."
     try:
-        result = await core._publish_inner(adapter, user_id, did, attempt, force)
+        result = await core._publish_inner(adapter, user_id, did, attempt, force, text_only=text_only)
         d = core.get(did)
         if result[1] and d and (d.get("published_to") or d.get("publish_errors") != "{}"):
             try:
@@ -122,7 +196,8 @@ async def _publish_safe(adapter: core.Adapter, user_id, did: int, attempt: int, 
                        "(пометки о публикации сохранены, дубль не выйдет без подтверждения).")
 
 
-async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False) -> tuple[bool, str]:
+async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int, force: bool = False,
+                         *, text_only: bool = False) -> tuple[bool, str]:
     """Публикация с защитой от дублей: перед отправкой в канал ставим пометку «могло уйти»,
     после успеха — «опубликовано». Если ответ потерялся, повтор спросит подтверждение."""
     if not core.can_manage_draft(adapter, user_id, core.get(did)):
@@ -138,16 +213,44 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
 
     targets = core.publication_targets(d, adapter)
     channels = core.publication_channels(targets)
+    saved = _saved_channels(d)
+    marks = core._parse_marks(d.get("published_to"))
+    progress = json.loads(d.get("publish_progress") or "{}")
+    telegram_progress = progress.get("tg") or {}
+    if _recover_telegram_mark(marks, progress):
+        core._set(did, published_to=core._dump_marks(marks))
+    if text_only:
+        tg = next((t for t in targets if t.name == "tg" and getattr(t, "supports_publish_resume", False)), None)
+        if not text_pending(marks.get("tg"), telegram_progress):
+            core._set(did, status="pending")
+            return False, "Досылка текста недоступна. Проверьте текущий статус публикации."
+        if tg is None or not saved.get("tg") or saved["tg"] != channels.get("tg"):
+            core._set(did, status="pending")
+            return False, "Прежний канал Telegram недоступен в настройках. Верните его или закройте публикацию."
+        targets = [tg]
+    elif publication_complete(d, adapter, marks):
+        await core.finish_publication(d, adapter, user_id)
+        return True, "✅ Опубликовано."
     expected = EXPECTED_CHANNELS.get()
     if expected is not None and channels != expected:
         core._set(did, status="pending")
         return False, "Каналы публикации изменились. Откройте новое подтверждение."
-    saved = json.loads(d.get("publication_channels") or "{}")
-    if saved and channels != saved:
+    if not text_only and saved and channels != saved:
         core._set(did, status="pending")
         return False, ("⛔ Каналы публикации изменились после подтверждения или начала отправки. "
                        "Верните прежние настройки каналов и проверьте результат в них. "
                        "Автоматическая отправка в новые каналы заблокирована.")
+    if not text_only and set(_remaining_channels(saved or channels, marks)) - channels.keys():
+        core._set(did, status="pending")
+        return False, "Прежний канал недоступен в настройках. Верните его или закройте публикацию."
+    if telegram_progress.get("media") and marks.get("tg") != "done":
+        if media_chat_id(saved.get("tg", ""), telegram_progress) is None:
+            core._set(did, status="pending")
+            return False, ("Числовой ID прежнего канала Telegram не сохранился. "
+                           "Проверьте результат вручную или закройте публикацию.")
+        if not any(t.name == "tg" and getattr(t, "supports_publish_resume", False) for t in targets):
+            core._set(did, status="pending")
+            return False, "Досылка текста в прежний канал Telegram недоступна."
     if not saved:
         core._set(did, publication_channels=json.dumps(channels, ensure_ascii=False))
     footer = json.loads(d["footer"]) if d.get("footer") is not None else post_footer.config()
@@ -155,21 +258,21 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
     if d.get("footer") is None:
         core._set(did, footer=json.dumps(footer, ensure_ascii=False))
 
-    marks = core._parse_marks(d.get("published_to"))
-    progress = json.loads(d.get("publish_progress") or "{}")
-    if _recover_telegram_mark(marks, progress):
-        core._set(did, published_to=core._dump_marks(marks))
     todo = [t for t in targets if marks.get(t.name) != "done"]
-    risky = [t.name for t in todo if marks.get(t.name) == "unknown"]
+    risky = [t.name for t in todo if marks.get(t.name) == "unknown"
+             and not (t.name == "tg" and getattr(t, "supports_publish_resume", False) and
+                      text_pending(marks.get("tg"), telegram_progress))]
     if risky and not force:
         core._set(did, status="pending")  # черновик снова рабочий: кнопки ниже
         summary, rows = core.publication_view(core.get(did), adapter)
         await adapter.send_menu(
             str(user_id),
             summary + f"\n\n⚠️ Прошлая публикация в {', '.join(risky)} оборвалась: пост мог выйти.\n"
-            "Проверьте канал. Если пост уже там — подтвердите это кнопкой. Если его нет — разрешите повторную отправку.",
+            "Проверьте канал. Если пост или недостающий текст уже там — подтвердите это кнопкой. "
+            "Если его нет — разрешите повторную отправку.",
             [[("✅ Опубликовать ещё раз", f"d:okforce:{did}:{attempt}")],
-             *rows[:-1], [("↩️ Не публиковать (пост остаётся на согласовании)", f"d:delno:{did}:{attempt}")]])
+             *(row for row in rows if row[0][1] != f"d:ok:{did}:{attempt}"),
+             [("↩️ Не публиковать (пост остаётся на согласовании)", f"d:delno:{did}:{attempt}")]])
         return False, ""
 
     for t in todo:
@@ -185,8 +288,10 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
                 def record(stage, value=True):
                     current = json.loads(core.get(did).get("publish_progress") or "{}")
                     channel = dict(current.get(t.name) or {})
+                    if stage == "media_chat_id":
+                        channel["media"] = True
                     if value:
-                        channel[stage] = True
+                        channel[stage] = value
                     else:
                         channel.pop(stage, None)
                     current[t.name] = channel
@@ -211,7 +316,10 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
             core._set(did, status="pending")
             done = [k for k, v in marks.items() if v == "done"]
             part = f"\nУже опубликовано: {', '.join(done)}." if done else ""
-            tail = ("Пост не вышел: исправьте причину и нажмите ✅ ещё раз." if sure else
+            tg_progress = json.loads(core.get(did).get("publish_progress") or "{}").get("tg") or {}
+            tail = ("Медиа опубликовано. После устранения ошибки нажмите «Дослать текст»." if t.name == "tg" and text_pending(marks.get("tg"), tg_progress) else
+                    "Медиа опубликовано. Проверьте, появился ли текст, прежде чем подтверждать повтор." if t.name == "tg" and tg_progress.get("media") else
+                    "Пост не вышел: исправьте причину и нажмите ✅ ещё раз." if sure else
                     "Пост мог всё же выйти — проверьте канал, прежде чем нажимать ✅ снова.")
             return False, f"⚠️ Не удалось опубликовать в {t.name}: {core.err(e)}{part}\n{tail}"
         finally:
@@ -221,5 +329,8 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
         errors.pop(t.name, None)
         core._set(did, published_to=core._dump_marks(marks), publish_errors=json.dumps(errors, ensure_ascii=False))
 
-    await core.finish_publication(d, adapter, user_id)
-    return True, "✅ Опубликовано."
+    if publication_complete(core.get(did), adapter, marks):
+        await core.finish_publication(d, adapter, user_id)
+        return True, "✅ Опубликовано."
+    core._set(did, status="pending")
+    return True, "✅ Текст отправлен в Telegram."

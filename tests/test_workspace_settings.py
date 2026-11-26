@@ -798,6 +798,52 @@ def test_primary_owner_cannot_view_or_retry_foreign_queue_or_see_global_balance(
     assert "Общий баланс" in run(core.on_menu(ad, "1", "m:status"))[0]
 
 
+@pytest.mark.parametrize("service_only", [False, True])
+def test_status_aggregates_active_spaces_and_scopes_workspace_view(runtime, llm, monkeypatch, service_only):
+    ad, _ = runtime
+    first = spaces.get(create(ad)["id"])
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    second = spaces.get(create(ad, 22, -102, "-202")["id"])
+    archived = spaces.get(create(ad, 33, -103)["id"])
+    now = time.time()
+    monkeypatch.setitem(spaces.root().memories["LLM_STATE"], "ok", 0)
+    monkeypatch.setitem(spaces.root().memories["LLM_STATE"], "err", 0)
+    first.memory["LLM_STATE"]["ok"] = now - 100
+    second.memory["LLM_STATE"].update(err=now - 20, msg="ОШИБКА ВТОРОЙ КОМАНДЫ")
+    archived.memory["LLM_STATE"].update(err=now, msg="ОШИБКА АРХИВА")
+    for db in (spaces.root().db, first.db, second.db, archived.db):
+        db.executemany("INSERT INTO drafts(status,created,published_at) VALUES(?,?,?)", [
+            ("pending", now - 48 * 3600, 0), ("published", now - 600, now - 600),
+            ("regenerating", now - 1000, 0), ("published", now - 14 * 86400, 0),
+        ])
+        db.commit()
+    # Older/archived records stay on disk but no longer belong to the active registry.
+    spaces.root().db.execute("DELETE FROM workspaces WHERE id=?", (archived.id,))
+    if service_only:
+        spaces.root().db.execute("INSERT INTO settings(key,value) VALUES('root_management_only','1')")
+    spaces.root().db.commit()
+    expected = 2 if service_only else 3
+    whole, rows = run(core.on_menu(ad, "1", "m:status"))
+    assert "Мессенджеры: max, tg" in whole
+    assert "ОШИБКА ВТОРОЙ КОМАНДЫ" in whole and "ОШИБКА АРХИВА" not in whole
+    assert f"На согласовании: {expected}" in whole
+    assert "старейший ждёт 2 дн" in whole
+    assert f"За сутки создано черновиков: {expected * 2}, опубликовано за неделю: {expected}" in whole
+    assert f"Зависших черновиков: {expected}" in whole and f"У {expected} старых публикаций" in whole
+    assert any(payload == "m:check_llm" for row in rows for _, payload in row)
+    with spaces.enter(first):
+        own, _ = run(core.on_menu(core.ADAPTERS["max"], "11", "m:status"))
+        assert "Мессенджеры: max\n" in own
+        assert "последний пост написан" in own and "ОШИБКА ВТОРОЙ КОМАНДЫ" not in own
+        assert "На согласовании: 1" in own and "опубликовано за неделю: 1" in own
+    if not service_only:
+        _, rows = run(core.on_menu(ad, "1", "m:root_workspace"))
+        status = next(payload for row in rows for label, payload in row if label == "📊 Статус")
+        work_zero, _ = run(core.on_menu(ad, "1", status))
+        assert "На согласовании: 1" in work_zero and "опубликовано за неделю: 1" in work_zero
+    assert not llm.calls
+
+
 def test_primary_space_preserves_telegram_username_and_rejects_corrupt_config(runtime, monkeypatch):
     ad, _ = runtime
     monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")

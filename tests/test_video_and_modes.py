@@ -110,6 +110,7 @@ class RecBot:
     def __getattr__(self, name):
         async def f(*a, **k):
             self.calls.append((name, a, k))
+            return S(chat=S(id=-200))
         return f
 
 
@@ -128,6 +129,7 @@ def test_telegram_sends_video_file_not_the_preview(tmp_path):
     t.bot.calls.clear()
     run(t.publish(str(photo), "д" * 1500, video=str(video)))  # длинный пост: видео, затем отдельное сообщение
     assert [c[0] for c in t.bot.calls] == ["send_video", "send_message"]
+    assert t.bot.calls[1][1][0] == -200
 
 
 def test_publish_only_telegram_does_not_poll_and_gets_every_post(llm, png, monkeypatch):

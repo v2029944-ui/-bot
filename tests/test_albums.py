@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
@@ -33,15 +34,18 @@ def files():
 
 
 class RecordingBot:
-    def __init__(self, fail_text=False):
+    def __init__(self, fail_text=None):
         self.groups, self.texts = [], []
         self.fail_text = fail_text
 
     async def send_media_group(self, **kw):
         self.groups.append(kw)
+        return [SimpleNamespace(chat=SimpleNamespace(id=-200)) for _ in kw["media"]]
 
     async def send_message(self, chat, text):
-        if self.fail_text:
+        if self.fail_text is TimeoutError:
+            raise TimeoutError("lost reply")
+        if self.fail_text is TelegramBadRequest:
             raise TelegramBadRequest(method=SendMessage(chat_id=chat, text=text), message="refused")
         self.texts.append(text)
 
@@ -141,20 +145,22 @@ def test_album_housekeeping_protects_active_media_then_expires(png, llm):
     assert all(not Path(p).exists() for p in paths)
 
 
-def test_partial_telegram_album_requires_confirmation_and_does_not_repeat_max(png, llm):
+@pytest.mark.parametrize("failure", [TelegramBadRequest, TimeoutError])
+def test_partial_telegram_album_resumes_text_without_resending_media_or_max(png, llm, failure):
     mx = FakeAdapter("max", ["5"], admins=["5"])
     tg = telegram.Telegram("123456:ABCDEF", "@channel")
-    tg.bot = RecordingBot(fail_text=True)
+    tg.bot = RecordingBot(fail_text=failure)
     core.ADAPTERS.update(max=mx, tg=tg)
     llm.reply = "Пост " * 300
     did = run(core.submit_album(mx, "9", "Анна", "Заменили насос", photos(png)))
     assert not run(core.on_action(mx, "5", "okyes", did, 1))[0]
     assert core._parse_marks(core.get(did)["published_to"]) == {"max": "done", "tg": "unknown"}
-    run(core.on_action(mx, "5", "okyes", did, 1))
-    assert len(tg.bot.groups) == 1 and len(mx.sent("publish_media")) == 1
-    tg.bot.fail_text = False
-    assert run(core.on_action(mx, "5", "okforce", did, 1))[0]
-    assert len(mx.sent("publish_media")) == 1 and tg.bot.texts == [llm.reply]
+    if failure is TimeoutError:
+        assert not run(core.on_action(mx, "5", "okyes", did, 1))[0]
+        assert any(data == f"d:okforce:{did}:1" for row in mx.sent("menu")[-1][3] for _, data in row)
+    tg.bot.fail_text = None
+    assert run(core.on_action(mx, "5", "okforce" if failure is TimeoutError else "sendtext", did, 1))[0]
+    assert len(tg.bot.groups) == len(mx.sent("publish_media")) == 1 and tg.bot.texts == [llm.reply]
 
 
 @pytest.mark.parametrize("count", [0, 1, 11])

@@ -175,12 +175,12 @@ def menu_for(adapter: core.Adapter, uid) -> list:
 def workspace_menu(adapter, uid):
     rows = [list(r) for r in core.MENU]
     rows.append([("📋 На проверке", "m:pending")])
-    rows.append([("📚 История публикаций", "m:published")])
     if spaces.INSTALLED and spaces.active_id() and spaces.global_admin(uid):
         rows.append([("🏠 Главное управление", "w:0:m:admin")])
     if spaces.INSTALLED and not spaces.active_id() and core.is_global_admin(adapter, uid):
         rows.append([("🏠 Управление ботом", "m:admin")])
-    rows.append([("👥 Люди", "m:people"), ("📊 Статус", "m:status")])
+    status = "m:status:workspace" if spaces.INSTALLED and core.is_global_admin(adapter, uid) else "m:status"
+    rows.append([("👥 Люди", "m:people"), ("📊 Статус", status)])
     if not spaces.INSTALLED and core.is_global_admin(adapter, uid):
         rows.append([("🔄 Обновить", "m:upd")])
     rows.append([("📥 Обработка материалов", "m:inbox")])

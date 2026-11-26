@@ -17,6 +17,7 @@ from urllib.parse import quote
 import httpx
 
 import comparison
+import configuration
 import core
 import dialog_state
 import max_actions
@@ -122,7 +123,7 @@ class Max(core.Adapter):
         self._upload_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._rate_token = hashlib.sha256(token.encode()).hexdigest()
 
-    CONFIRM_ACTIONS = {"okyes", "okforce", "delyes", "rejectphoto", "rejecttext", "rejectcustom"}
+    CONFIRM_ACTIONS = {"okyes", "okforce", "pubcloseyes", "delyes", "rejectphoto", "rejecttext", "rejectcustom"}
 
     def _confirmations(self):
         return dialog_state.PendingMap(core.db, "max_confirmation")
@@ -172,6 +173,62 @@ class Max(core.Adapter):
             # SimpleQueryResult допускает отказ операции даже при HTTP 200.
             raise RuntimeError("MAX не выполнил запрос: " + str(result.get("message") or "success=false"))
         return result
+
+    async def check_channel(self, channel: str) -> str:
+        if not configuration.chat_id(channel):
+            return "MAX: не задан корректный ID группы или канала."
+        path = f"/chats/{int(channel)}"
+        try:
+            async with asyncio.timeout(5):
+                chat = await self.call("GET", path)
+        except httpx.HTTPStatusError as exc:
+            detail = {
+                401: "MAX отклонил авторизацию бота.",
+                403: "MAX запретил боту доступ к чату.",
+                404: "Чат не найден в MAX.",
+            }.get(exc.response.status_code, "не удалось получить сведения о чате.")
+            return f"MAX (ID {channel}): {detail}"
+        except (httpx.HTTPError, TimeoutError, RuntimeError, ValueError):
+            return f"MAX (ID {channel}): не удалось получить сведения о чате."
+        if not isinstance(chat, dict) or chat.get("chat_id") != int(channel):
+            return f"MAX (ID {channel}): API не подтвердил ID чата."
+        title = " ".join(str(chat.get("title") or "").split())[:200] or "без названия"
+        report = f"MAX: «{title}» (ID {chat['chat_id']})"
+        status = chat.get("status")
+        if status != "active":
+            status = {"removed": "удалён", "left": "бот вышел", "closed": "закрыт", "suspended": "приостановлен"}.get(
+                status if isinstance(status, str) else "", "неизвестен",
+            )
+            return f"{report}\nЧат недоступен боту (статус: {status})."
+        if chat.get("type") not in ("chat", "channel"):
+            return f"{report}\nУказанный чат не является группой или каналом."
+        try:
+            async with asyncio.timeout(5):
+                member = await self.call("GET", f"{path}/members/me")
+        except (httpx.HTTPError, TimeoutError, RuntimeError, ValueError):
+            return f"{report}\nНе удалось проверить права бота."
+        if not isinstance(member, dict) or not isinstance(member.get("is_admin"), bool):
+            return f"{report}\nAPI не вернул сведения о роли бота."
+
+        role = "владелец" if member.get("is_owner") else "администратор" if member["is_admin"] else "участник"
+        reported = member.get("permissions")
+        permissions = None
+        if isinstance(reported, list) and len(reported) <= 20 and all(
+            isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,39}", value) for value in reported
+        ):
+            permissions = list(dict.fromkeys(reported))
+        report += f"\nРоль бота: {role}."
+        if permissions is not None:
+            report += f" Права API: {', '.join(permissions) or 'нет'}."
+        if chat["type"] == "channel" and not member.get("is_owner"):
+            can_publish = None if permissions is None else bool({"write", "post_edit_delete_message"}.intersection(permissions))
+            if not member["is_admin"] or can_publish is False:
+                return f"{report}\nУ бота нет права публикации в канале."
+            if can_publish is None:
+                return f"{report}\nMAX не сообщил право публикации."
+        if permissions is None:
+            return f"{report}\nMAX не сообщил список прав."
+        return report
 
     # --- отправка ---
     def forget_uploads(self, paths):
@@ -421,7 +478,8 @@ class Max(core.Adapter):
                 if channels is None:
                     draft = core.get(int(issued[0].split(":")[2]))
                     channels = json.loads((draft or {}).get("publication_channels") or "{}")
-                dialog_state.PendingMap(core.db, "confirmation_channels")[key] = {p: channels for p in issued}
+                dialog_state.PendingMap(core.db, "confirmation_channels")[key] = {
+                    p: publication.CLOSURE_SNAPSHOT.get() if p.startswith("d:pubcloseyes:") else channels for p in issued}
         buttons = [list(row) for row in base_buttons]
         if with_admin and not any(b.get("payload") == "m:admin" for row in buttons for b in row):
             # Кнопка стоит только под последним сообщением: при отправке нового она убирается из прежнего.
@@ -973,6 +1031,7 @@ class Max(core.Adapter):
         if not payload.startswith(("m:compare", "m:models_")):
             comparison.picker_state().pop((self.name, str(uid)), None)
         expected_channels = None
+        closure_snapshot = None
         if not payload.startswith(("m:proleok:", "m:pdelok:")):
             dialog_state.PendingMap(core.db, "people_confirmation").pop((self.name, str(uid)), None)
         parts = payload.split(":")
@@ -987,6 +1046,8 @@ class Max(core.Adapter):
                     self._clear_confirmation(uid)
                     await self.notify(uid, "Откройте новое подтверждение публикации: прежнее не содержит получателей.")
                     return
+            elif parts[1] == "pubcloseyes":
+                closure_snapshot = dialog_state.PendingMap(core.db, "confirmation_channels").get((self.name, str(uid)), {}).get(payload)
             self._clear_confirmation(uid)  # consume before the first await/mutation
             payload = ":".join(parts[:4])
         else:
@@ -998,6 +1059,7 @@ class Max(core.Adapter):
             ctx["inline_mid"] = pressed
         token = _NAV.set(ctx)
         channel_token = publication.EXPECTED_CHANNELS.set(expected_channels)
+        closure_token = publication.CLOSURE_SNAPSHOT.set(closure_snapshot)
         if pressed and pressed == self._ui(uid)["menu"] and payload.startswith("d:"):
             await self._delete(pressed, uid)
             self._ui_set(uid, menu=None)
@@ -1021,6 +1083,7 @@ class Max(core.Adapter):
         finally:
             _NAV.reset(token)
             publication.EXPECTED_CHANNELS.reset(channel_token)
+            publication.CLOSURE_SNAPSHOT.reset(closure_token)
         if text:
             await self.notify(uid, text)
         # Прошлый шаг не должен висеть. Пост на согласование (кнопки d:) не трогаем: удаляем только сообщения-меню.
