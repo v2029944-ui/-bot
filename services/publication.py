@@ -41,7 +41,9 @@ def publication_view(d, adapter):
         if receipt:
             names = {"max": "MAX", "tg": "Telegram"}
             lines = [f"✅ Пост №{d['id']} опубликован."]
-            lines.extend(f"{names.get(kind, kind)} — опубликовано (канал {channel})" for kind, channel in receipt.items())
+            for kind, channel in receipt.items():
+                destination = f" (канал {channel})" if channel else ""
+                lines.append(f"{names.get(kind, kind)} — ✅ опубликовано{destination}")
             return "\n".join(lines), []
         if not d.get("published_to"):
             return f"✅ Пост №{d['id']} опубликован. Данные по каналам не сохранились.", []

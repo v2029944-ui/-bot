@@ -108,7 +108,7 @@ def test_recovery_skips_confirmed_telegram_text_and_keeps_channel_history():
     assert rows[0][0][1] == "d:pubstatus:1:1"
     run(core.on_action(mx, "5", "pubstatus", 1, 1))
     status = mx.sent("menu")[-1][2]
-    assert "Telegram — опубликовано (канал -200)" in status and "-300" not in status
+    assert "Telegram — ✅ опубликовано (канал -200)" in status and "-300" not in status
     assert run(core.on_menu(mx, "9", "m:published"))[1] is None
     assert "нет прав" in run(core.on_action(mx, "9", "pubstatus", 1, 1))[1]
 
