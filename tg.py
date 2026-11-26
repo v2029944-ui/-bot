@@ -65,6 +65,8 @@ class Telegram(core.Adapter):
         elif self.channel.lstrip("-").isdigit():   # id пользователя, группы или канала
             ch = int(ch)
         resume = resume or {}
+        if resume.get("media") and resume.get("text"):
+            return
         progress = progress or (lambda stage, value=True: None)
         formatting: dict[str, Any] = {"parse_mode": "HTML"} if isinstance(post, post_footer.LinkedPost) else {}
         short = _tg_len(post) <= CAPTION_LIMIT

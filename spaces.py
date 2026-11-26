@@ -336,6 +336,37 @@ def select_for_user(uid, sid):
     db.commit()
 
 
+def select_draft_workspace(uid, *, for_input=False):
+    if not INSTALLED:
+        return
+    uid = str(uid)
+    sid = active_id()
+    selected = root().db.execute("SELECT sid FROM workspace_routes WHERE uid=?", (uid,)).fetchone()
+    key = ("max", uid)
+    memories = {0: root().memories, **{space_id: space.memory for space_id, space in OPEN.items()}}
+    waits = ("WAITING", "WAITING_EDIT", "WAITING_REJECT")
+    if for_input:
+        for space_id, memory in memories.items():
+            if space_id != sid:
+                for name in waits:
+                    memory[name].pop(key, None)
+    elif selected and selected["sid"] != sid:
+        old = memories.get(selected["sid"], {})
+        if any(key in old.get(name, {}) for name in waits):
+            return
+    select_for_user(uid, sid)
+
+
+def archived_selection(uid):
+    return root().db.execute("""SELECT 1 FROM workspace_routes r
+                                JOIN archived_workspaces a ON a.id=r.sid WHERE r.uid=?""", (str(uid),)).fetchone() is not None
+
+
+def workspace_choices(uid):
+    return [[(space.name[:40], f"w:{space.id}:m:menu")] for space in OPEN.values()
+            if str(uid) in space.memory["ADAPTERS"]["max"].allowed][:20]
+
+
 def for_user(uid, continue_input=False):
     uid = str(uid)
     management = management_only()
@@ -362,6 +393,8 @@ def for_user(uid, continue_input=False):
             if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or workspace_form):
                 return sid
         return owner["id"]
+    if selected and archived_selection(uid):
+        return 0
     if selected and selected["sid"] == 0 and _root_allows(uid) and (not management or global_admin(uid)):
         return 0
     if selected and selected["sid"] in OPEN and str(uid) in OPEN[selected["sid"]].memory["ADAPTERS"]["max"].allowed:
@@ -407,6 +440,9 @@ def stamp(update):
         clear_root_workspace_input(uid)
     continuing = bool(text) and not body.get("attachments") and (not text.startswith("/") or text == "/cancel")
     message = {**message, "_space": for_user((message.get("sender") or {}).get("user_id"), continue_input=continuing)}
+    if not message["_space"] and archived_selection(uid) and any(
+            a.get("type") in ("image", "video") for a in body.get("attachments") or []):
+        message["_workspace_selection_required"] = True
     if (message.get("body") or {}).get("text", "").strip() == "/admin" and global_admin((message.get("sender") or {}).get("user_id")):
         message["_space"] = 0
         select_for_user(uid, 0)
@@ -471,7 +507,8 @@ async def route_update(adapter, update):
                 return True
             # A confirmation or cancel button belongs to its original dialog.
             # An old button must not redirect text away from the current space.
-            if _root_allows(uid) and not payload.startswith(("m:space_save:", "m:space_apply:", "m:cancel")):
+            if _root_allows(uid) and not payload.startswith(("d:", "m:space_save:", "m:space_apply:", "m:cancel")) and (
+                    not archived_selection(uid) or (global_admin(uid) and payload == "m:root_workspace")):
                 select_for_user(uid, 0)
             # Разворачиваем namespace основного пространства, не перенаправляя по владельцу.
             await adapter.handle({**update, "_routed": True})
@@ -485,7 +522,7 @@ async def route_update(adapter, update):
             return True
         space = get(sid)
         if uid in space.memory["ADAPTERS"]["max"].allowed and not (
-                kind == "message_callback" and payload.startswith("m:cancel")):
+                kind == "message_callback" and payload.startswith(("d:", "m:cancel"))):
             select_for_user(uid, sid)
         with handling(space):
             await space.memory["ADAPTERS"]["max"].handle({**update, "_routed": True})
@@ -918,9 +955,11 @@ async def apply_lifecycle(saved):
         if ACTIVE[sid] or settings_busy(space) or unfinished or failed or notices:
             return "Завершите обработку материалов и разберите черновики на проверке перед архивацией.", None
         try:
+            affected = [uid for uid in space.memory["ADAPTERS"]["max"].allowed if for_user(uid) == sid]
+            db.executemany("INSERT OR REPLACE INTO workspace_routes(uid,sid) VALUES(?,?)",
+                           [(uid, sid) for uid in affected])
             db.execute("INSERT INTO archived_workspaces VALUES(?,?,?,?,?)", (sid, *settings_values(row)))
             db.execute("DELETE FROM workspaces WHERE id=?", (sid,))
-            db.execute("DELETE FROM workspace_routes WHERE sid=?", (sid,))
             db.commit()
         except BaseException:
             db.rollback()
