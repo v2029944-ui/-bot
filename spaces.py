@@ -560,8 +560,8 @@ def validate_settings(values, sid, before):
         if field not in changed or value is None:
             continue
         if sid != 0:
-            primary_value = settings_record(0)[field]
-            if primary_value and value == normalize_field(field, primary_value):
+            primary_adapter = root().adapters.get("max" if field == "max_channel" else "tg")
+            if primary_adapter and value == str(primary_adapter.channel).strip().lower():
                 raise ValueError(f"{FIELD_LABELS[field]} уже используется в основном пространстве №0. "
                                  "Выберите другую группу. Для переноса сначала измените группу в карточке №0.")
         if sid is not None:
