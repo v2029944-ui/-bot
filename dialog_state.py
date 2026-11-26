@@ -69,6 +69,7 @@ class PendingSet(MutableSet):
     def __contains__(self, key): return key in self.values
     def __iter__(self): return iter(self.values)
     def __len__(self): return len(self.values)
-    def add(self, key): self.values[key] = True
+    def add(self, key, value=True): self.values[key] = value
+    def get(self, key): return self.values.get(key)
     def discard(self, key): self.values.pop(key, None)
     def clear(self): self.values.clear()

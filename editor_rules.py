@@ -10,36 +10,49 @@ RULE_CHARS = 1000
 STALE = "Эта кнопка устарела. Используйте обновлённый список правил."
 
 
-def mode() -> tuple[bool, int]:
-    import core
+def table(common: bool) -> str:
+    return "common_rules" if common else "rules"
 
-    row = core.db.execute("SELECT value FROM settings WHERE key='editor_rules_mode'").fetchone()
+
+def _database(common: bool):
+    import core
+    import spaces
+
+    return spaces.root().db if common and spaces.INSTALLED else core.db
+
+
+def _mode_key(common: bool) -> str:
+    return "common_editor_rules_mode" if common else "editor_rules_mode"
+
+
+def mode(common: bool = False) -> tuple[bool, int]:
+    row = _database(common).execute("SELECT value FROM settings WHERE key=?", (_mode_key(common),)).fetchone()
     if row is None:
         return True, 0
     enabled, revision = json.loads(row[0])
     return enabled, revision
 
 
-def set_mode(enabled: bool, revision: int) -> str:
+def set_mode(enabled: bool, revision: int, common: bool = False) -> str:
     import core
 
     def save():
-        current, latest = mode()
+        current, latest = mode(common)
         if revision != latest or current == enabled:
             return STALE
-        core.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('editor_rules_mode',?)",
-                        (json.dumps([enabled, revision + 1]),))
+        core.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                        (_mode_key(common), json.dumps([enabled, revision + 1])))
         return "Правила стиля включены." if enabled else "Правила стиля отключены."
 
     return command_context.mutate("editor_rules_mode", save)
 
 
-def set_rule(rule_id: int, enabled: bool, revision: int) -> str:
+def set_rule(rule_id: int, enabled: bool, revision: int, common: bool = False) -> str:
     import core
 
     def save():
         changed = core.db.execute(
-            "UPDATE rules SET enabled=?, revision=revision+1 WHERE id=? AND revision=? AND enabled!=?",
+            f"UPDATE {table(common)} SET enabled=?, revision=revision+1 WHERE id=? AND revision=? AND enabled!=?",
             (enabled, rule_id, revision, enabled),
         ).rowcount
         if not changed:
@@ -49,11 +62,12 @@ def set_rule(rule_id: int, enabled: bool, revision: int) -> str:
     return command_context.mutate("editor_rule_state", save)
 
 
-def active() -> list[str]:
-    import core
-    if not mode()[0]:
+def active(common: bool = False) -> list[str]:
+    if not mode(common)[0]:
         return []
-    rows = core.db.execute("SELECT text FROM rules WHERE enabled=1 ORDER BY id DESC LIMIT ?", (ACTIVE_COUNT,)).fetchall()
+    rows = _database(common).execute(
+        f"SELECT text FROM {table(common)} WHERE enabled=1 ORDER BY id DESC LIMIT ?", (ACTIVE_COUNT,),
+    ).fetchall()
     result = []
     remaining = ACTIVE_CHARS
     for row in rows:
@@ -65,14 +79,14 @@ def active() -> list[str]:
     return result[::-1]
 
 
-def add(text: str, operation: str = "rule_add") -> str:
+def add(text: str, operation: str = "rule_add", *, common: bool = False) -> str:
     import core
     text = text.strip()
     if not text or len(text.encode("utf-16-le")) // 2 > RULE_CHARS:
         return "Пришлите правило от 1 до 1000 знаков."
     def insert():
-        if core.db.execute("SELECT 1 FROM rules WHERE text=?", (text,)).fetchone():
+        if core.db.execute(f"SELECT 1 FROM {table(common)} WHERE text=?", (text,)).fetchone():
             return "Это правило уже сохранено."
-        core.db.execute("INSERT INTO rules(text,created) VALUES(?,?)", (text, time.time()))
+        core.db.execute(f"INSERT INTO {table(common)}(text,created) VALUES(?,?)", (text, time.time()))
         return "✅ Правило добавлено."
     return command_context.mutate(operation, insert)

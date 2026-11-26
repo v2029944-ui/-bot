@@ -248,7 +248,7 @@ def _get(sid):
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=5000")
-        objects = root().db.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND tbl_name NOT IN ('workspaces','workspace_routes','archived_workspaces') ORDER BY type DESC").fetchall()
+        objects = root().db.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND tbl_name NOT IN ('workspaces','workspace_routes','archived_workspaces','common_rules') ORDER BY type DESC").fetchall()
         for obj in objects:
             if obj["type"] == "table":
                 if not db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (obj["name"],)).fetchone():
