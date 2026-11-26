@@ -116,11 +116,17 @@ async def main():
     if not os.getenv("MAX_TOKEN"):
         raise SystemExit("Для приёма и согласования нужен MAX_TOKEN")
     primary = spaces.configured_root(core.db)
-    telegram = primary["tg_channel"] if primary else need("TG_CHANNEL") if core.env("TG_TOKEN") else None
+    management = spaces.management_only(core.db)
+    if primary:
+        telegram = primary["tg_channel"] if not management or core.env("TG_TOKEN") else None
+        max_channel = primary["max_channel"]
+    else:
+        telegram = (core.env("TG_CHANNEL") if management else need("TG_CHANNEL")) if core.env("TG_TOKEN") else None
+        max_channel = core.env("MAX_CHANNEL") if management else need("MAX_CHANNEL")
     if telegram:
         core.ADAPTERS["tg"] = Telegram(need("TG_TOKEN"), telegram)
     admins = ids("MAX_ADMINS")
-    core.ADAPTERS["max"] = Max(need("MAX_TOKEN"), primary["max_channel"] if primary else need("MAX_CHANNEL"),
+    core.ADAPTERS["max"] = Max(need("MAX_TOKEN"), max_channel,
                                 [] if primary else ids("MAX_APPROVERS"), [] if primary else ids("MAX_EMPLOYEES"),
                                 list(dict.fromkeys([*admins, primary["owner"]])) if primary else admins)
     core.ADAPTERS["max"].global_admins = admins

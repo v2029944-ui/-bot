@@ -35,6 +35,8 @@ def can_manage_draft(adapter, uid, draft):
         return False
     if spaces.INSTALLED and getattr(adapter, "workspace_id", None) != spaces.active_id():
         return False
+    if spaces.in_management_only():
+        return False
     return adapter is not None and is_admin(adapter, uid)
 
 
@@ -159,14 +161,25 @@ async def unknown_user(adapter: core.Adapter, uid, name: str, username: str | No
 def menu_for(adapter: core.Adapter, uid) -> list:
     if not core.is_admin(adapter, uid):
         return []
+    if spaces.INSTALLED and core.is_global_admin(adapter, uid):
+        rows = [[("🏢 Рабочие пространства", "m:spaces")],
+                [("📊 Общий статус", "m:status"), ("📥 Общая очередь", "m:inbox")],
+                [("🔄 Обновить", "m:upd"), ("⚙️ Режим №0", "m:root_mode")]]
+        if not spaces.management_only():
+            rows.append([("📂 Рабочее меню №0", "m:root_workspace")])
+        return rows
+    return workspace_menu(adapter, uid)
+
+
+def workspace_menu(adapter, uid):
     rows = [list(r) for r in core.MENU]
     rows.append([("📋 На проверке", "m:pending")])
     if spaces.INSTALLED and spaces.active_id() and spaces.global_admin(uid):
         rows.append([("🏠 Главное управление", "w:0:m:admin")])
-    if spaces.INSTALLED and spaces.active_id() == 0 and spaces.global_admin(uid):
-        rows.append([("🏢 Рабочие пространства", "m:spaces")])
+    if spaces.INSTALLED and not spaces.active_id() and core.is_global_admin(adapter, uid):
+        rows.append([("🏠 Управление ботом", "m:admin")])
     rows.append([("👥 Люди", "m:people"), ("📊 Статус", "m:status")])
-    if not spaces.active_id() and core.is_global_admin(adapter, uid):
+    if not spaces.INSTALLED and core.is_global_admin(adapter, uid):
         rows.append([("🔄 Обновить", "m:upd")])
     rows.append([("📥 Обработка материалов", "m:inbox")])
     rows.append([("🔗 Ссылка в постах", "m:footer")])

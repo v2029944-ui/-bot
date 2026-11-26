@@ -65,6 +65,54 @@ def preview(ad, sid, text, uid="1"):
     return spaces.settings_state()[("max", uid)]["payload"]
 
 
+def test_management_panel_has_global_tools_and_separates_workspace_actions(runtime):
+    ad, _ = runtime
+    child = create(ad)
+    text, rows = run(core.on_menu(ad, "1", "m:admin"))
+    assert text == "Управление ботом"
+    assert {payload for line in rows for _, payload in line} == {
+        "m:spaces", "m:status", "m:inbox", "m:upd", "m:root_mode", "m:root_workspace",
+    }
+    with spaces.enter(spaces.get(child["id"])):
+        text, rows = run(core.on_menu(core.ADAPTERS["max"], "1", "m:admin"))
+        assert any(payload == "m:pending" for line in rows for _, payload in line)
+        assert any(payload == "w:0:m:admin" for line in rows for _, payload in line)
+
+
+def test_management_only_refuses_pending_root_work_then_blocks_new_root_material(runtime):
+    ad, messages = runtime
+    child = create(ad)
+    core._add_person(ad, "77", "Сотрудник", "member")
+    with spaces.enter(spaces.get(child["id"])):
+        core._add_person(core.ADAPTERS["max"], "77", "Сотрудник", "member")
+    spaces.select_for_user("77", 0)
+    assert spaces.for_user("77") == 0
+    root = spaces.root().db
+    root.execute("INSERT INTO drafts(status) VALUES('pending')")
+    root.commit()
+    text, _ = run(core.on_menu(ad, "1", "m:root_mode:enable"))
+    assert "черновики" in text
+    root.execute("UPDATE drafts SET status='deleted'")
+    root.commit()
+    text, rows = run(core.on_menu(ad, "1", "m:root_mode:enable"))
+    assert "служебный режим включён" in text.lower()
+    assert "m:root_workspace" not in {payload for line in rows for _, payload in line}
+    assert "m:space:0" not in {payload for line in spaces.view()[1] for _, payload in line}
+    assert "служебный режим" in run(core.on_menu(ad, "1", "m:footer"))[0].lower()
+
+    post = {"sender": {"user_id": 1}, "_space": 0, "body": {
+        "text": "Материал с описанием", "attachments": [{"type": "image"}],
+    }}
+    run(ad.on_message(post))
+    assert "рабочее пространство" in messages[-1][1].lower()
+    assert spaces.for_user("11") == child["id"]
+    assert spaces.for_user("77") == child["id"]
+    assert "попросите администратора" in run(core.on_menu(ad, "77", "m:root_mode:disable"))[0]
+    assert spaces.management_only()
+    assert create(ad, 22, -100)["max_channel"] == "-100"
+    assert "занята" in run(core.on_menu(ad, "1", "m:root_mode:disable"))[0]
+
+
 def test_max_admin_receives_member_drafts_and_publishes_to_each_spaces_groups(runtime, monkeypatch, llm, png):
     ad, _ = runtime
     monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
@@ -553,6 +601,39 @@ def test_primary_owner_routes_to_primary_even_if_previously_used_another_space(r
     assert "сохранены" in run(core.on_menu(ad, "1", payload))[0]
     assert spaces.for_user("22") == 0
     assert not spaces.global_admin("22")
+
+
+def test_restart_in_management_mode_with_only_a_child_telegram_group(runtime, monkeypatch, tmp_path):
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+
+    ad, _ = runtime
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    child = create(ad, telegram="-201")
+    assert "служебный режим включён" in run(core.on_menu(ad, "1", "m:root_mode:enable"))[0].lower()
+    target = sqlite3.connect(tmp_path / "drafts.db")
+    spaces.root().db.backup(target)
+    target.close()
+    script = f'''import asyncio
+import core, main, spaces
+async def quiet(*args): pass
+core.announce_start = quiet
+main.ops.announce_update_result = quiet
+async def pilot(workers):
+    assert spaces.management_only()
+    assert core.ADAPTERS['max'].channel == ''
+    assert 'tg' not in core.ADAPTERS
+    assert spaces.get({child["id"]}).memory['ADAPTERS']['tg'].channel == '-201'
+main.serve = pilot
+asyncio.run(main.main())
+'''
+    env = {**os.environ, "DATA_DIR": str(tmp_path), "MAX_TOKEN": "test-token", "MAX_CHANNEL": "", "TG_CHANNEL": "",
+           "MAX_ADMINS": "1", "TG_TOKEN": "123456:ABCDEF", "LLM_API_KEY": "test-key",
+           "LLM_PROVIDER": "openai", "LLM_BASE_URL": "https://llm.example/v1"}
+    result = subprocess.run([sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
 
 
 def test_restart_uses_saved_primary_settings_when_env_channel_ids_are_empty(runtime, monkeypatch, tmp_path):

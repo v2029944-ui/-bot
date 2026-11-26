@@ -661,8 +661,11 @@ class Max(core.Adapter):
         if preflight is not None:
             preflight()
         if spaces.INSTALLED:
-            name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name
-            titled = f"Пространство: {name}\n\n{text}"
+            if not spaces.active_id() and (spaces.management_only() or text == "Управление ботом"):
+                titled = text if text == "Управление ботом" else f"Управление ботом\n\n{text}"
+            else:
+                name = spaces.CURRENT.get().name if spaces.active_id() else spaces.root().name
+                titled = f"Пространство: {name}\n\n{text}"
             if len(titled.encode("utf-16-le")) // 2 <= 4000:
                 text = titled
         buttons = [[{"type": "callback", "text": t, "payload": p} for t, p in row] for row in rows] if rows else None
@@ -773,6 +776,12 @@ class Max(core.Adapter):
             kind = u.get("update_type")
             if kind == "bot_started":
                 uid = u["user"]["user_id"]
+                if spaces.in_management_only():
+                    if core.is_global_admin(self, uid):
+                        await self.send_menu(uid, "Управление ботом", core.menu_for(self, uid))
+                    else:
+                        await self.notify(uid, self.WORKSPACE_REQUIRED)
+                    return
                 if await self._stranger(uid, u["user"].get("name") or u["user"].get("first_name"),
                                         u["user"].get("username")):
                     return
@@ -790,6 +799,7 @@ class Max(core.Adapter):
 
     HELLO = ("Привет! Пришлите фото или короткое видео вашей работы с кратким описанием в подписи — "
              "я подготовлю пост и передам его администратору на проверку и публикацию.")
+    WORKSPACE_REQUIRED = "Откройте рабочее пространство или попросите администратора добавить вас в команду."
 
     async def _stranger(self, uid, name, username=None) -> bool:
         """Человека нет в списках: тихо передаём заявку администраторам. True = обработано."""
@@ -810,15 +820,18 @@ class Max(core.Adapter):
         if not sender.get("user_id"):
             return
         uid = sender["user_id"]
+        body = m.get("body") or {}
+        atts = body.get("attachments") or []
+        videos = [a for a in atts if a.get("type") == "video"]
+        images = [a for a in atts if a.get("type") == "image"]
+        if spaces.in_management_only() and (images or videos or not core.is_global_admin(self, uid)):
+            rows = core.menu_for(self, uid) if core.is_global_admin(self, uid) else None
+            return await self.send_menu(uid, self.WORKSPACE_REQUIRED, rows)
         quiet = core.quiet(self, uid)
         if await self._stranger(uid, sender.get("name") or sender.get("first_name"), sender.get("username")):
             return
         if source_key and await core.resume_submission(self, source_key) is not None:
             return  # готовый черновик уже есть: повтор события не создаёт ещё один
-        body = m.get("body") or {}
-        atts = body.get("attachments") or []
-        videos = [a for a in atts if a.get("type") == "video"]
-        images = [a for a in atts if a.get("type") == "image"]
         if not images and not videos:
             if body.get("text"):
                 self._clear_confirmation(uid)

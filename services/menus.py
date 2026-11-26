@@ -8,6 +8,13 @@ import editor_rules
 import ops
 import post_footer
 import spaces
+from services.people import workspace_menu
+
+MANAGEMENT_ACTIONS = {
+    "admin", "menu", "status", "inbox", "inretry", "upd", "updgo", "root_mode",
+    "spaces", "space_add", "space", "space_fields", "space_edit", "space_save",
+    "spaces_archive", "space_archive", "space_restore", "space_apply",
+}
 
 
 def input_snapshot(adapter, uid):
@@ -150,6 +157,11 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return cancel_input(adapter, uid, payload)
     parts = payload.split(":")
     act = parts[1] if len(parts) > 1 else "menu"
+    if spaces.in_management_only():
+        if not core.is_global_admin(adapter, uid):
+            return "Откройте рабочее пространство или попросите администратора добавить вас в команду.", None
+        if act not in MANAGEMENT_ACTIONS:
+            return "Служебный режим №0. Действия с постами доступны в рабочих пространствах.", core.menu_for(adapter, uid)
     if act == "space_save":
         return await spaces.settings_menu(adapter, uid, payload, parts)
     if act == "space_apply":
@@ -180,6 +192,10 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         parts = parts[:-1]
     else:
         confirmation.pop(key, None)
+    if act == "root_mode":
+        return spaces.management_mode_menu(adapter, uid, parts)
+    if act == "root_workspace" and spaces.INSTALLED and core.is_global_admin(adapter, uid):
+        return "Рабочее меню №0", workspace_menu(adapter, uid)
     if act in ("rules", "del", "add") and not core.is_admin(adapter, uid):
         return "⛔ Настройки меняет только администратор.", None
     if act in ("member", "space_member", "inv", "invn"):  # старые кнопки ведут в действующее добавление
@@ -240,6 +256,8 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return ("Пришлите текст ссылки (до 80 знаков). " if field == "text" else
                     "Пришлите HTTPS-адрес бота или «-», чтобы убрать ссылку для этого канала."), input_rows(adapter, uid)
         return post_footer.view()
+    if act in ("admin", "menu") and spaces.INSTALLED and core.is_global_admin(adapter, uid):
+        return "Управление ботом", core.menu_for(adapter, uid)
     if act == "admin":
         return "Меню администратора:", core.menu_for(adapter, uid)
     if act == "menu" and not core.is_admin(adapter, uid):
@@ -349,7 +367,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         return True
     if spaces.INSTALLED and await spaces.create_input(adapter, uid, t):
         return True
-    if await spaces.member_input(adapter, uid, t):
+    if not spaces.in_management_only() and await spaces.member_input(adapter, uid, t):
         return True
     if not core.is_member(adapter, uid):
         return False
@@ -357,6 +375,9 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         action = "m:admin" if core.is_admin(adapter, uid) else "m:menu"
         message, rows = await core.on_menu(adapter, uid, action)
         await adapter.send_menu(uid, message, rows)
+        return True
+    if spaces.in_management_only() and t != "/status":
+        await adapter.send_menu(uid, "Управление ботом", core.menu_for(adapter, uid))
         return True
     key = (adapter.name, uid)
     if t == "/cancel":
