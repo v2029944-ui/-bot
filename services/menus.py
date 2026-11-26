@@ -136,17 +136,14 @@ def rules_view(page=0) -> tuple[str, list]:
         text += f"\n\nСтраница {page + 1}. Показаны {len(rows)} из {total}."
     if rows:
         text += "\n\n⏸ — отключить правило · ▶️ — включить · 🗑 — удалить."
-    label = "⏸ Отключить все правила" if enabled else "▶️ Включить правила"
-    buttons = [[(label, f"m:rules_set:{int(not enabled)}:{revision}:{page}")]]
-    actions = []
+    dels = [(f"🗑 {n}", f"m:del:{row['id']}" + (f":{page}" if page else "")) for n, row in numbered]
+    buttons = [dels[i:i + 4] for i in range(0, len(dels), 4)]
+    switches = []
     for n, row in numbered:
         rule_id = row["id"]
         label = "⏸" if row["enabled"] else "▶️"
-        actions.extend([
-            (f"{label} {n}", f"m:rule_set:{rule_id}:{int(not row['enabled'])}:{row['revision']}:{page}"),
-            (f"🗑 {n}", f"m:del:{rule_id}" + (f":{page}" if page else "")),
-        ])
-    buttons.extend(actions[i:i + 4] for i in range(0, len(actions), 4))
+        switches.append((f"{label} {n}", f"m:rule_set:{rule_id}:{int(not row['enabled'])}:{row['revision']}:{page}"))
+    buttons.extend(switches[i:i + 4] for i in range(0, len(switches), 4))
     nav = []
     if page:
         nav.append(("Новые →", f"m:rules:{page - 1}"))
@@ -154,6 +151,8 @@ def rules_view(page=0) -> tuple[str, list]:
         nav.append(("← Более ранние", f"m:rules:{page + 1}"))
     if nav:
         buttons.append(nav)
+    label = "⏸ Отключить все правила" if enabled else "▶️ Включить правила"
+    buttons.append([(label, f"m:rules_set:{int(not enabled)}:{revision}:{page}")])
     buttons.append([("➕ Добавить правило", "m:add")])
     return text, buttons
 

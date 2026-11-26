@@ -90,8 +90,7 @@ def test_disabled_rules_persist_and_do_not_affect_another_workspace(runtime):
     with spaces.enter(spaces.get(first)):
         adapter = core.ADAPTERS["max"]
         _, rows = run(core.on_menu(adapter, "1", "m:rules"))
-        toggle = rows[0][0][1]
-        assert toggle.startswith("m:rules_set:")
+        toggle = next(payload for line in rows for _, payload in line if payload.startswith("m:rules_set:"))
         assert "нет прав" in run(core.on_menu(adapter, "22", toggle))[0]
         run(core.on_menu(adapter, "1", toggle))
 
