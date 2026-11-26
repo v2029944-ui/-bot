@@ -4,6 +4,7 @@ import contextvars
 import json
 import sqlite3
 import time
+from collections import Counter
 from collections.abc import MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ CURRENT: contextvars.ContextVar[Any] = contextvars.ContextVar("workspace", defau
 INSTALLED = False
 ROOT: Root | None = None
 OPEN: dict[int, Any] = {}
+ACTIVE: Counter[int] = Counter()
 WAITING_CREATE: set[str] = set()
 WAITING_MEMBER: set[tuple[int, str]] = set()
 
@@ -95,6 +97,18 @@ def enter(space):
         CURRENT.reset(token)
 
 
+@contextmanager
+def handling(space):
+    ACTIVE[space.id] += 1
+    try:
+        with enter(space):
+            yield
+    finally:
+        ACTIVE[space.id] -= 1
+        if not ACTIVE[space.id]:
+            del ACTIVE[space.id]
+
+
 def install():
     global INSTALLED, ROOT
     if INSTALLED:
@@ -106,6 +120,8 @@ def install():
     root().db.execute("""CREATE TABLE IF NOT EXISTS workspaces (
         id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,owner TEXT UNIQUE,max_channel TEXT,tg_channel TEXT)""")
     schema.add_columns(root().db, "workspaces", ("state TEXT DEFAULT 'ready'", "error TEXT DEFAULT ''"))
+    root().db.execute("""CREATE TABLE IF NOT EXISTS archived_workspaces (
+        id INTEGER PRIMARY KEY, name TEXT, owner TEXT, max_channel TEXT, tg_channel TEXT)""")
     root().db.execute("CREATE TABLE IF NOT EXISTS workspace_routes(uid TEXT PRIMARY KEY, sid INTEGER)")
     root().db.execute("CREATE UNIQUE INDEX IF NOT EXISTS workspace_max_group ON workspaces(max_channel)")
     root().db.execute("CREATE UNIQUE INDEX IF NOT EXISTS workspace_tg_group ON workspaces(tg_channel)")
@@ -175,7 +191,7 @@ def _get(sid):
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA busy_timeout=5000")
-        objects = root().db.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND tbl_name NOT IN ('workspaces','workspace_routes') ORDER BY type DESC").fetchall()
+        objects = root().db.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND tbl_name NOT IN ('workspaces','workspace_routes','archived_workspaces') ORDER BY type DESC").fetchall()
         for obj in objects:
             if obj["type"] == "table":
                 if not db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (obj["name"],)).fetchone():
@@ -251,6 +267,18 @@ def _root_allows(uid):
     return allowed is None or str(uid) in allowed
 
 
+def clear_root_workspace_input(uid):
+    if INSTALLED:
+        WAITING_CREATE.discard(str(uid))
+        settings_state().pop(("max", str(uid)), None)
+
+
+def select_for_user(uid, sid):
+    db = root().db
+    db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (str(uid), sid))
+    db.commit()
+
+
 def for_user(uid, continue_input=False):
     uid = str(uid)
     owner = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
@@ -271,7 +299,9 @@ def for_user(uid, continue_input=False):
                 memory, rules, allowed = {}, set(), False
             key = ("max", uid)
             pending = any(key in memory.get(name, {}) for name in ("WAITING", "WAITING_EDIT", "WAITING_REJECT", "footer_waiting"))
-            if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or sid == 0 and uid in WAITING_CREATE):
+            workspace_form = sid == 0 and global_admin(uid) and (
+                uid in WAITING_CREATE or settings_state().get(key, {}).get("waiting"))
+            if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or workspace_form):
                 return sid
         return owner["id"]
     if selected and selected["sid"] == 0 and _root_allows(uid):
@@ -316,23 +346,18 @@ def stamp(update):
         for space in OPEN.values():
             space.waiting_rule.discard(key)
         WAITING_MEMBER.difference_update({k for k in WAITING_MEMBER if k[1] == uid})
-        WAITING_CREATE.discard(uid)
-        settings_state().pop(("max", uid), None)
+        clear_root_workspace_input(uid)
     continuing = bool(text) and not body.get("attachments") and (not text.startswith("/") or text == "/cancel")
     message = {**message, "_space": for_user((message.get("sender") or {}).get("user_id"), continue_input=continuing)}
     if (message.get("body") or {}).get("text", "").strip() == "/admin" and global_admin((message.get("sender") or {}).get("user_id")):
         message["_space"] = 0
-        root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str((message.get("sender") or {}).get("user_id")),))
-        root().db.commit()
+        select_for_user(uid, 0)
     uid = str((message.get("sender") or {}).get("user_id"))
-    if continuing and global_admin(uid) and (uid in WAITING_CREATE or settings_state().get(("max", uid), {}).get("waiting")):
-        message["_space"] = 0
     if (message.get("body") or {}).get("text", "").strip() == "/myspace":
         owner = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
         if owner:
             message["_space"] = owner["id"]
-            root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, owner["id"]))
-            root().db.commit()
+            select_for_user(uid, owner["id"])
     return {**update, "message": message}
 
 
@@ -342,7 +367,7 @@ async def route_message(adapter, message, source_key):
     sid = message.get("_space", for_user((message.get("sender") or {}).get("user_id")))
     if sid:
         space = get(int(sid))
-        with enter(space):
+        with handling(space):
             await space.memory["ADAPTERS"]["max"].on_message({**message, "_routed": True}, source_key=source_key)
         return True
     return False
@@ -379,28 +404,32 @@ async def route_update(adapter, update):
                     if payload in ("m:admin", "m:menu"):
                         # Only navigation may cross a stale root namespace. Never reinterpret draft IDs.
                         action = "m:admin" if core.is_admin(own, uid) else "m:menu"
-                        root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, home))
-                        root().db.commit()
-                        await own.handle({**update, "_routed": True, "callback": {**cb, "payload": action}})
+                        select_for_user(uid, home)
+                        with handling(space):
+                            await own.handle({**update, "_routed": True, "callback": {**cb, "payload": action}})
                     else:
                         await own.send_notice_menu(uid, "Эта кнопка относится к основному пространству. Откройте свой пост заново.",
                                                    [[("Моё пространство", "m:admin" if core.is_admin(own, uid) else "m:menu")]])
                 return True
-            if _root_allows(cb["user"]["user_id"]):
-                root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,0)", (str(cb["user"]["user_id"]),))
-                root().db.commit()
+            # A confirmation or cancel button belongs to its original dialog.
+            # An old button must not redirect text away from the current space.
+            if _root_allows(uid) and not payload.startswith(("m:space_save:", "m:space_apply:", "m:cancel")):
+                select_for_user(uid, 0)
             # Разворачиваем namespace основного пространства, не перенаправляя по владельцу.
             await adapter.handle({**update, "_routed": True})
             return True
     else:
         return False
     if sid:
-        space = get(sid)
         uid = str((update.get("callback", {}).get("user") or update.get("user") or {}).get("user_id"))
-        if uid in space.memory["ADAPTERS"]["max"].allowed:
-            root().db.execute("INSERT OR REPLACE INTO workspace_routes VALUES(?,?)", (uid, sid))
-            root().db.commit()
-        with enter(space):
+        if sid not in OPEN and not settings_record(sid):
+            await adapter.notify(uid, "Это пространство недоступно. Откройте актуальное меню.")
+            return True
+        space = get(sid)
+        if uid in space.memory["ADAPTERS"]["max"].allowed and not (
+                kind == "message_callback" and payload.startswith("m:cancel")):
+            select_for_user(uid, sid)
+        with handling(space):
             await space.memory["ADAPTERS"]["max"].handle({**update, "_routed": True})
         return True
     return False
@@ -515,9 +544,13 @@ def settings_card(sid):
     row = settings_record(sid)
     if not row:
         return "Пространство не найдено.", None
+    buttons = [[("✏️ Изменить настройки", f"m:space_edit:{sid}")]]
+    if sid and row["state"] == "ready":
+        buttons.append([("📂 Открыть меню пространства", f"w:{sid}:m:admin")])
+        buttons.append([("🗃 Архивировать пространство", f"m:space_archive:{sid}")])
+    buttons.append([("← Пространства", "m:spaces")])
     return (f"Пространство №{sid}: {row['name']}\nВладелец MAX: {row['owner']}\n"
-            f"Группа MAX: {row['max_channel']}\nГруппа Telegram: {row['tg_channel'] or 'не подключена'}",
-            [[("✏️ Изменить настройки", f"m:space_edit:{sid}")], [("← Пространства", "m:spaces")]])
+            f"Группа MAX: {row['max_channel']}\nГруппа Telegram: {row['tg_channel'] or 'не подключена'}", buttons)
 
 
 def update_in_progress():
@@ -531,11 +564,13 @@ async def settings_input(adapter, uid, text):
     import secrets
 
     import core
+    if active_id() or adapter.name != "max":
+        return False
     key = (adapter.name, str(uid))
     saved = settings_state().get(key)
     if not saved or not saved.get("waiting"):
         return False
-    if active_id() or not global_admin(uid):
+    if not global_admin(uid):
         settings_state().pop(key, None)
         return False
     if text.strip() in ("/cancel", "/menu", "/admin"):
@@ -586,9 +621,11 @@ async def settings_save(adapter, uid, payload):
     import core
     from tg import Telegram
     key = (adapter.name, str(uid))
-    saved = settings_state().pop(key, None)  # consume before any network operation
+    state = settings_state()
+    saved = state.get(key)
     if not saved or saved.get("payload") != payload:
         return "Подтверждение устарело. Откройте настройки пространства заново.", None
+    state.pop(key)  # consume before any network operation
     sid, values = saved["sid"], saved["values"]
     row = settings_record(sid)
     if not row or settings_values(row) != saved["before"]:
@@ -662,7 +699,7 @@ async def settings_save(adapter, uid, payload):
 
 async def settings_menu(adapter, uid, payload, parts):
     import core
-    if active_id() or not global_admin(uid):
+    if active_id() or adapter.name != "max" or not global_admin(uid):
         return "⛔ Настройки пространств меняет только главный администратор в основном пространстве.", None
     if parts[1] == "space_save":
         return await settings_save(adapter, uid, payload)
@@ -674,15 +711,144 @@ async def settings_menu(adapter, uid, payload, parts):
     row = settings_record(sid)
     if not row:
         return "Пространство не найдено.", None
+    select_for_user(uid, 0)
     settings_state()[(adapter.name, str(uid))] = {"sid": sid, "before": settings_values(row), "waiting": True}
     text, _ = settings_card(sid)
     return text + "\n\n" + INPUT_HELP, core.input_rows(adapter, uid)
 
 
-def view(page=0):
-    total = root().db.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0]
+async def lifecycle_menu(adapter, uid, payload, parts):
+    import secrets
+
+    if active_id() or adapter.name != "max" or not global_admin(uid):
+        return "⛔ Архивом управляет главный администратор.", None
+    action = parts[1]
+    key = ("max", str(uid))
+    state = settings_state()
+    if action == "space_apply":
+        saved = state.get(key, {})
+        if "archive" not in saved or saved.get("payload") != payload:
+            return "Подтверждение устарело. Откройте пространство заново.", None
+        state.pop(key)
+        return await apply_lifecycle(saved)
+    if action == "spaces_archive":
+        page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
+        return view(page, archived=True)
+    if len(parts) != 3 or not parts[2].isdigit() or len(parts[2]) > 9:
+        return "Пространство не найдено.", None
+    sid = int(parts[2])
+    archive = action == "space_archive"
+    row = settings_record(sid) if archive and sid else archived_record(sid)
+    if not row:
+        return "Пространство не найдено.", None
+    payload = f"m:space_apply:{secrets.token_urlsafe(12)}"
+    state[key] = {"sid": sid, "archive": archive, "before": settings_values(row), "payload": payload}
+    if archive:
+        return (f"Архивировать «{row['name']}»? Пространство перестанет принимать материалы. "
+                "Его настройки, база и файлы сохранятся.",
+                [[("Архивировать", payload), ("Отмена", f"m:space:{sid}")]])
+    return (f"Вернуть «{row['name']}» в рабочие пространства?",
+            [[("Восстановить", payload), ("Отмена", "m:spaces_archive")]])
+
+
+def archived_record(sid):
+    return root().db.execute("SELECT * FROM archived_workspaces WHERE id=?", (sid,)).fetchone()
+
+
+def clear_workspace_confirmations(sid):
+    state = settings_state()
+    for key, saved in list(state.items()):
+        if saved.get("sid") == sid:
+            state.pop(key, None)
+
+
+async def apply_lifecycle(saved):
+    import core
+
+    sid, archive = saved["sid"], saved["archive"]
+    row = settings_record(sid) if archive else archived_record(sid)
+    if not sid or not row or settings_values(row) != saved["before"]:
+        return "Пространство уже изменилось. Откройте его заново.", None
+    if update_in_progress():
+        return "Обновление ещё проверяется. Повторите действие через пару минут.", None
+    db = root().db
+    if archive:
+        space = OPEN.get(sid)
+        if space is None:
+            return "Откройте пространство после восстановления его работы, затем повторите архивацию.", None
+        unfinished = space.db.execute("SELECT 1 FROM drafts WHERE status='pending' LIMIT 1").fetchone()
+        failed = db.execute("SELECT 1 FROM max_inbox WHERE space_id=? AND state='failed' LIMIT 1", (sid,)).fetchone()
+        notices = db.execute("SELECT 1 FROM max_handoff_notices WHERE space_id=? AND state IN ('pending','sending') LIMIT 1",
+                             (sid,)).fetchone()
+        if ACTIVE[sid] or settings_busy(space) or unfinished or failed or notices:
+            return "Завершите обработку материалов и разберите черновики на проверке перед архивацией.", None
+        try:
+            db.execute("INSERT INTO archived_workspaces VALUES(?,?,?,?,?)", (sid, *settings_values(row)))
+            db.execute("DELETE FROM workspaces WHERE id=?", (sid,))
+            db.execute("DELETE FROM workspace_routes WHERE sid=?", (sid,))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        OPEN.pop(sid)
+        clear_workspace_confirmations(sid)
+        WAITING_MEMBER.difference_update({key for key in WAITING_MEMBER if key[0] == sid})
+        await close_space(space)
+    else:
+        try:
+            values = parse_settings("\n".join(value or "-" for value in settings_values(row)), sid)
+        except ValueError as exc:
+            return core.err(exc), None
+        try:
+            db.execute("INSERT INTO workspaces(id,name,owner,max_channel,tg_channel,state) VALUES(?,?,?,?,?,'provisioning')",
+                       (sid, *values))
+            db.execute("DELETE FROM archived_workspaces WHERE id=?", (sid,))
+            db.commit()
+        except sqlite3.IntegrityError:
+            db.rollback()
+            return "Владелец или одна из групп уже привязаны к рабочему пространству.", None
+        except BaseException:
+            db.rollback()
+            raise
+        clear_workspace_confirmations(sid)
+        try:
+            get(sid)
+        except Exception:
+            return "Пространство возвращено в список. Бот повторит попытку его запуска.", view()[1]
+        return settings_card(sid)
+    text, rows = view()
+    return "Пространство перемещено в архив.\n\n" + text, rows
+
+
+def view(page=0, archived=False):
+    table = "archived_workspaces" if archived else "workspaces"
+    total = root().db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     page = min(max(0, page), max(0, (total - 1) // 12))
-    rows = root().db.execute("SELECT * FROM workspaces ORDER BY id LIMIT 12 OFFSET ?", (page * 12,)).fetchall()
+    rows = root().db.execute(f"SELECT * FROM {table} ORDER BY id LIMIT 12 OFFSET ?", (page * 12,)).fetchall()
+    if archived:
+        lines, buttons = ["Архив пространств"], []
+        for row in rows:
+            buttons.append([(f"↩️ {row['name'][:40]} · №{row['id']}", f"m:space_restore:{row['id']}")])
+        if not rows:
+            lines.append("Архив пуст.")
+    else:
+        lines, buttons = workspace_rows(rows)
+    action = "m:spaces_archive" if archived else "m:spaces"
+    nav = []
+    if page:
+        nav.append(("← Назад", f"{action}:{page - 1}"))
+    if (page + 1) * 12 < total:
+        nav.append(("Далее →", f"{action}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    if archived:
+        buttons.append([("← Пространства", "m:spaces")])
+    else:
+        buttons.extend([[("➕ Создать пространство", "m:space_add")], [("🗃 Архив пространств", "m:spaces_archive")]])
+    return "\n".join(lines), buttons
+
+
+def workspace_rows(rows):
     primary = settings_record(0)
     source = "настройки в базе" if configured_root(root().db) else "пока из .env"
     lines = ["Рабочие пространства:", f"0 · {primary['name']} ({source})"]
@@ -691,21 +857,14 @@ def view(page=0):
         lines.append(f"{row['id']} · {row['name']} [{row['state']}] · владелец {row['owner']}\n"
                      f"MAX: {row['max_channel']} · Telegram: {row['tg_channel'] or 'не подключена'}")
         buttons.append([(f"⚙ {row['name'][:40]}", f"m:space:{row['id']}")])
-    nav = []
-    if page:
-        nav.append(("← Назад", f"m:spaces:{page - 1}"))
-    if (page + 1) * 12 < total:
-        nav.append(("Далее →", f"m:spaces:{page + 1}"))
-    if nav:
-        buttons.append(nav)
-    return "\n".join(lines), buttons + [[("➕ Создать пространство", "m:space_add")]]
+    return lines, buttons
 
 
 async def create_input(adapter, uid, text):
     import core
-    if str(uid) not in WAITING_CREATE:
+    if active_id() or adapter.name != "max" or str(uid) not in WAITING_CREATE:
         return False
-    if not global_admin(uid) or active_id() != 0:
+    if not global_admin(uid):
         WAITING_CREATE.discard(str(uid))
         return False
     if text.strip() in ("/cancel", "/admin", "/menu"):
@@ -794,7 +953,9 @@ class Maintenance:
                 except Exception:
                     core.log.warning("пространство %s пока недоступно", row["id"], exc_info=True)
             for space in list(OPEN.values()):
-                with enter(space):
+                if space.id not in OPEN:
+                    continue
+                with handling(space):
                     try:
                         await ops.flush_deferred()
                         await core.remind_once()
@@ -808,12 +969,16 @@ class Maintenance:
             await asyncio.sleep(30)
 
 
+async def close_space(space):
+    space.db.close()
+    for adapter in space.memory["ADAPTERS"].values():
+        if adapter.name == "max":
+            await adapter.http.aclose()
+        else:
+            await adapter.bot.session.close()
+
+
 async def close():
     for space in OPEN.values():
-        for adapter in space.memory["ADAPTERS"].values():
-            if adapter.name == "max":
-                await adapter.http.aclose()
-            else:
-                await adapter.bot.session.close()
-        space.db.close()
+        await close_space(space)
     OPEN.clear()
