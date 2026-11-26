@@ -182,8 +182,6 @@ def workspace_menu(adapter, uid):
     if not spaces.INSTALLED and core.is_global_admin(adapter, uid):
         rows.append([("🔄 Обновить", "m:upd")])
     rows.append([("📥 Обработка материалов", "m:inbox")])
-    rows.append([("🔗 Ссылка в постах", "m:footer")])
-    rows.append([("🤖 Модели генерации", "m:compare")])
     return rows
 
 

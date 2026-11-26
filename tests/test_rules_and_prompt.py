@@ -2,6 +2,7 @@
 from conftest import run
 
 import core
+import editor_rules
 
 
 def test_rules_menu_add_and_delete(tg):
@@ -28,6 +29,46 @@ def test_rule_waiting_can_be_cancelled(tg):
 def test_legacy_commands_still_work(tg):
     assert run(core.on_text(tg, "1", "/rule_add без восклицательных знаков")) is True
     assert "без восклицательных" in run(core.on_menu(tg, "1", "m:rules"))[0]
+
+
+def test_admin_can_pause_individual_rules_and_the_whole_list(tg, monkeypatch):
+    def button(rows, prefix):
+        return next(payload for row in rows for _, payload in row if payload.startswith(prefix))
+
+    _, rows = run(core.on_menu(tg, "1", "m:post_settings"))
+    assert {payload for row in rows for _, payload in row} == {"m:rules", "m:compare", "m:footer"}
+    assert "администратор" in run(core.on_menu(tg, "7", "m:post_settings"))[0]
+    editor_rules.add("Сокращать заголовки")
+    editor_rules.add("Писать короткие абзацы")
+    _, rows = run(core.on_menu(tg, "1", "m:rules"))
+    disable_rule = button(rows, "m:rule_set:")
+    assert "администратор" in run(core.on_menu(tg, "7", disable_rule))[0]
+    text, rows = run(core.on_menu(tg, "1", disable_rule))
+    assert "отключено" in text
+    assert "Сокращать заголовки" not in core.build_system()
+    assert "Писать короткие абзацы" in core.build_system()
+    assert core.db.execute("SELECT COUNT(*) FROM rules").fetchone()[0] == 2
+
+    disable_all = button(rows, "m:rules_set:")
+    assert "администратор" in run(core.on_menu(tg, "7", disable_all))[0]
+    _, rows = run(core.on_menu(tg, "1", disable_all))
+    assert editor_rules.active() == []
+    calls = []
+
+    async def complete(*args):
+        calls.append(args)
+        return "Новое правило"
+
+    monkeypatch.setattr(core, "_complete", complete)
+    assert run(core._learn("Сделать заголовки короче", "Пример поста")) is None
+    assert calls == []
+    _, rows = run(core.on_menu(tg, "1", button(rows, "m:rules_set:")))
+    assert editor_rules.active() == ["Писать короткие абзацы"]
+
+    _, rows = run(core.on_menu(tg, "1", button(rows, "m:rule_set:")))
+    assert editor_rules.active() == ["Сокращать заголовки", "Писать короткие абзацы"]
+    assert "устарела" in run(core.on_menu(tg, "1", disable_rule))[0]
+    assert editor_rules.active() == ["Сокращать заголовки", "Писать короткие абзацы"]
 
 
 def test_prompt_contains_rules_but_no_published_examples(tg, llm, png):
