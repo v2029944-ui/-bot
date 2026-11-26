@@ -820,6 +820,13 @@ class Max(core.Adapter):
         if not sender.get("user_id"):
             return
         uid = sender["user_id"]
+        if m.get("_workspace_selection_required") or (
+                spaces.INSTALLED and not spaces.active_id() and spaces.archived_selection(uid)
+                and max_queue.is_material({"update_type": "message_created", "message": m})):
+            return await self.send_menu(
+                uid, "Прежнее пространство в архиве. Выберите рабочее пространство и отправьте материал заново.",
+                spaces.workspace_choices(uid),
+            )
         body = m.get("body") or {}
         atts = body.get("attachments") or []
         videos = [a for a in atts if a.get("type") == "video"]

@@ -27,12 +27,28 @@ def publication_targets(d, adapter):
     return [t for t in targets if t] + [a for a in core.ADAPTERS.values() if a.publish_only and a not in targets]
 
 
+def _recover_telegram_mark(marks, progress):
+    telegram = progress.get("tg") or {}
+    if marks.get("tg") == "unknown" and telegram.get("media") and telegram.get("text"):
+        marks["tg"] = "done"
+        return True
+    return False
+
+
 def publication_view(d, adapter):
-    if d["status"] == "published" and not d.get("published_to"):
-        return f"✅ Пост №{d['id']} опубликован. Содержимое удалено с сервера.", []
+    if d["status"] == "published":
+        receipt = json.loads(d.get("publication_receipt") or "{}")
+        if receipt:
+            names = {"max": "MAX", "tg": "Telegram"}
+            lines = [f"✅ Пост №{d['id']} опубликован."]
+            lines.extend(f"{names.get(kind, kind)} — опубликовано (канал {channel})" for kind, channel in receipt.items())
+            return "\n".join(lines), []
+        if not d.get("published_to"):
+            return f"✅ Пост №{d['id']} опубликован. Данные по каналам не сохранились.", []
     marks = core._parse_marks(d.get("published_to"))
     errors = json.loads(d.get("publish_errors") or "{}")
     progress = json.loads(d.get("publish_progress") or "{}")
+    _recover_telegram_mark(marks, progress)
     names = {"max": "MAX", "tg": "Telegram"}
     lines = [f"Публикация поста №{d['id']}:"]
     rows = []
@@ -60,8 +76,12 @@ def publication_view(d, adapter):
 
 
 async def finish_publication(d, adapter=None, user_id=None):
-    core._set(d["id"], status="published")
-    snapshot = core.get(d["id"])  # статус каналов нужен только для заключительного сообщения
+    snapshot = core.get(d["id"])
+    channels = json.loads(snapshot.get("publication_channels") or "{}")
+    marks = core._parse_marks(snapshot.get("published_to"))
+    receipt = {kind: channel for kind, channel in channels.items() if marks.get(kind) == "done"}
+    core._set(d["id"], status="published", publication_receipt=json.dumps(receipt, ensure_ascii=False))
+    snapshot = core.get(d["id"])
     for path in core.draft_files(d):
         core._unlink(path)
     core.clear_source_cache(d)
@@ -134,6 +154,9 @@ async def _publish_inner(adapter: core.Adapter, user_id, did: int, attempt: int,
         core._set(did, footer=json.dumps(footer, ensure_ascii=False))
 
     marks = core._parse_marks(d.get("published_to"))
+    progress = json.loads(d.get("publish_progress") or "{}")
+    if _recover_telegram_mark(marks, progress):
+        core._set(did, published_to=core._dump_marks(marks))
     todo = [t for t in targets if marks.get(t.name) != "done"]
     risky = [t.name for t in todo if marks.get(t.name) == "unknown"]
     if risky and not force:

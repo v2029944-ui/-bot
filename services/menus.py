@@ -296,6 +296,11 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Посты проверяет и публикует администратор. Присылайте фото или видео с подписью.", None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() and len(parts[2]) < 8 else 0
         return core.pending_view(adapter, page, uid)
+    if act == "published":
+        if not core.is_admin(adapter, uid):
+            return "⛔ История публикаций доступна администратору.", None
+        page = int(parts[2]) if len(parts) == 3 and parts[2].isascii() and parts[2].isdecimal() and len(parts[2]) < 8 else 0
+        return published_view(page)
     if act in ("inbox", "inretry"):
         if not core.is_admin(adapter, uid):
             return "⛔ Очередь доступна только администратору.", None
@@ -356,6 +361,27 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         prompt = "Напишите общее правило для всех пространств." if common else "Напишите текст нового правила одним сообщением."
         return "✏️ " + prompt, input_rows(adapter, uid)
     return "Выберите действие:", core.menu_for(adapter, uid)
+
+
+def published_view(page):
+    from datetime import datetime
+
+    total = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status='published'").fetchone()[0]
+    page = min(page, max(0, (total - 1) // 10))
+    posts = core.db.execute("""SELECT id, attempts, published_at FROM drafts WHERE status='published'
+                               ORDER BY published_at DESC, id DESC LIMIT 10 OFFSET ?""", (page * 10,)).fetchall()
+    buttons = []
+    for post in posts:
+        date = datetime.fromtimestamp(post["published_at"], ops._tz()).strftime("%d.%m.%Y %H:%M") if post["published_at"] else "дата неизвестна"
+        buttons.append([(f"№{post['id']} · {date}", f"d:pubstatus:{post['id']}:{post['attempts']}")])
+    nav = []
+    if page:
+        nav.append(("← Новее", f"m:published:{page - 1}"))
+    if (page + 1) * 10 < total:
+        nav.append(("Раньше →", f"m:published:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    return (f"История публикаций · страница {page + 1}" if posts else "Опубликованных постов пока нет."), buttons
 
 
 def pending_view(adapter, page=0, uid=None):

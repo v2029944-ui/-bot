@@ -300,6 +300,11 @@ def test_global_admin_can_open_archive_and_restore_workspace(runtime, monkeypatc
     row = create(ad)
     sid = row["id"]
     space = spaces.get(sid)
+    other = spaces.get(create(ad, 22, -102)["id"])
+    for candidate in (space, other):
+        with spaces.enter(candidate):
+            core._add_person(core.ADAPTERS["max"], "33", "Участник", "member")
+    assert spaces.for_user("33") == sid
     space.db.execute("INSERT INTO drafts(status,post,created) VALUES('pending','Сохранённый черновик',?)", (time.time(),))
     space.db.commit()
 
@@ -334,6 +339,14 @@ def test_global_admin_can_open_archive_and_restore_workspace(runtime, monkeypatc
         assert spaces.settings_record(sid) is None and sid not in spaces.OPEN
         assert "недоступно" in (await press(1, open_menu))[0]
         assert spaces.for_user("11") == 0
+        material = {"update_type": "message_created", "message": {"sender": {"user_id": 33},
+                    "body": {"attachments": [{"type": "image"}]}}}
+        await ad.handle(spaces.stamp(material))
+        message, choices = messages[-1][1:]
+        assert "в архиве" in message
+        assert choices == [[(other.name, f"w:{other.id}:m:menu")]]
+        await press(33, choices[0][0][1])
+        assert spaces.stamp(material)["message"]["_space"] == other.id
 
         await spaces.close()
         _, rows = await press(1, "w:0:m:spaces_archive")
@@ -348,6 +361,34 @@ def test_global_admin_can_open_archive_and_restore_workspace(runtime, monkeypatc
             assert core.get(1)["post"] == "Сохранённый черновик"
 
     run(scenario())
+
+
+def test_stale_draft_button_cannot_move_active_edit_to_another_workspace(runtime, monkeypatch):
+    ad, _ = runtime
+    first, second = create(ad)["id"], create(ad, 22, -102)["id"]
+
+    async def no_network(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(max_.Max, "call", no_network)
+    monkeypatch.setattr(max_.Max, "send_for_approval", no_network)
+    for sid in (first, second):
+        db = spaces.get(sid).db
+        db.execute("""INSERT INTO drafts(id,platform,post,status,attempts,created)
+                      VALUES(1,'max',?,'pending',2,?)""", (f"Пост {sid}", time.time()))
+        db.commit()
+
+    async def scenario():
+        for sid, revision in [(first, 2), (second, 2), (first, 1)]:
+            await ad.handle({"update_type": "message_callback", "callback": {
+                "user": {"user_id": 1}, "callback_id": "test", "payload": f"w:{sid}:d:edit:1:{revision}"}})
+        assert spaces.for_user("1", continue_input=True) == second
+        await ad.handle(spaces.stamp({"update_type": "message_created", "message": {
+            "sender": {"user_id": 1}, "body": {"text": "Правка второй команды"}}}))
+
+    run(scenario())
+    assert spaces.get(first).db.execute("SELECT post FROM drafts WHERE id=1").fetchone()[0] == f"Пост {first}"
+    assert spaces.get(second).db.execute("SELECT post FROM drafts WHERE id=1").fetchone()[0] == "Правка второй команды"
 
 
 def test_edit_preview_confirmation_replay_and_owner_revocation(runtime):

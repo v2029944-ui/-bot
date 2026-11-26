@@ -71,9 +71,14 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         return True, "Черновик не найден."
     if d["status"] in ("publishing", "regenerating"):
         return False, core.BUSY
+    if d["status"] == "published" and action == "pubstatus":
+        await adapter.send_menu(str(user_id), *core.publication_view(d, adapter))
+        return False, ""
     if d["status"] != "pending":
         return True, "Этот пост уже обработан."
     if action == "show":  # из напоминания: показываем актуальный вариант, даже если пост уже пересоздали
+        if adapter.name == "max":
+            spaces.select_draft_workspace(user_id)
         await adapter.send_for_approval(str(user_id), did, d["photo"], d["post"], **core.media_kw(d))
         return False, ""
     if d["attempts"] != attempt:
@@ -128,6 +133,7 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
     if action in ("edit", "rejectcustom", "redoc"):
         if adapter.name == "max":
             spaces.clear_root_workspace_input(user_id)
+            spaces.select_draft_workspace(user_id, for_input=True)
         post_footer.WAITING.pop((adapter.name, str(user_id)), None)
 
     if action in ("redo", "change", "length", "back"):
