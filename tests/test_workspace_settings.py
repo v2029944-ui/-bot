@@ -313,6 +313,73 @@ def test_duplicate_owner_or_group_does_not_change_runtime_or_database(runtime):
     assert spaces.settings_values(saved) == spaces.settings_values(row)
 
 
+def test_rename_only_with_existing_main_group_overlap_and_unfinished_publication(runtime):
+    ad, _ = runtime
+    row = create(ad)
+    sid = row["id"]
+    space = spaces.get(sid)
+    # The bootstrap MAX_CHANNEL can be changed after a child space is created.
+    ad.channel = row["max_channel"]
+    space.db.execute("INSERT INTO drafts(status,published_to) VALUES('pending','max?')")
+    space.db.commit()
+    space.memory["ADAPTERS"]["max"]._confirmations()[("max", "1")] = ["existing"]
+
+    _, card = run(core.on_menu(ad, "1", f"m:space:{sid}"))
+    _, fields = run(core.on_menu(ad, "1", card[0][0][1]))
+    rename = next(payload for line in fields for label, payload in line if "Название" in label)
+    run(core.on_menu(ad, "1", rename))
+    run(core.on_text(ad, "1", "Новое название"))
+    confirmation = spaces.settings_state()[("max", "1")]["payload"]
+    assert "сохранены" in run(core.on_menu(ad, "1", confirmation))[0]
+    assert spaces.settings_values(spaces.settings_record(sid)) == ["Новое название", "11", "-101", None]
+    assert space.name == "Новое название"
+    assert space.memory["ADAPTERS"]["max"]._confirmations()[("max", "1")] == ("existing",)
+
+
+def test_edit_max_group_only_explains_main_conflict_and_keeps_form_open(runtime):
+    ad, messages = runtime
+    sid = create(ad)["id"]
+    root_before = spaces.settings_values(spaces.settings_record(0))
+    run(core.on_menu(ad, "1", f"m:space_edit:{sid}:max_channel"))
+    run(core.on_text(ad, "1", "-100"))
+    assert "основном пространстве №0" in messages[-1][1]
+    assert spaces.settings_state()[("max", "1")]["waiting"]
+
+    run(core.on_text(ad, "1", "-102"))
+    confirmation = spaces.settings_state()[("max", "1")]["payload"]
+    assert "сохранены" in run(core.on_menu(ad, "1", confirmation))[0]
+    assert spaces.settings_record(sid)["max_channel"] == "-102"
+    assert ad.channel == "-100"
+
+    run(core.on_menu(ad, "1", "m:space_edit:0:max_channel"))
+    run(core.on_text(ad, "1", "-103"))
+    confirmation = spaces.settings_state()[("max", "1")]["payload"]
+    assert "сохранены" in run(core.on_menu(ad, "1", confirmation))[0]
+    root_before[2] = "-103"
+    assert spaces.settings_values(spaces.settings_record(0)) == root_before
+
+    run(core.on_menu(ad, "1", f"m:space_edit:{sid}:max_channel"))
+    run(core.on_text(ad, "1", "-100"))
+    confirmation = spaces.settings_state()[("max", "1")]["payload"]
+    assert "сохранены" in run(core.on_menu(ad, "1", confirmation))[0]
+    assert spaces.settings_record(sid)["max_channel"] == "-100"
+    assert ad.channel == "-103"
+
+
+@pytest.mark.parametrize(("field", "new", "expected"),
+                         [("owner", "22", ["Компания 11", "22", "-101", "-201"]),
+                          ("tg_channel", "-", ["Компания 11", "11", "-101", None])])
+def test_edit_workspace_owner_or_telegram_only(runtime, monkeypatch, field, new, expected):
+    monkeypatch.setenv("TG_TOKEN", "123456:ABCDEF")
+    ad, _ = runtime
+    sid = create(ad, telegram="-201")["id"]
+    run(core.on_menu(ad, "1", f"m:space_edit:{sid}:{field}"))
+    run(core.on_text(ad, "1", new))
+    confirmation = spaces.settings_state()[("max", "1")]["payload"]
+    assert "сохранены" in run(core.on_menu(ad, "1", confirmation))[0]
+    assert spaces.settings_values(spaces.settings_record(sid)) == expected
+
+
 def test_stale_confirmation_and_navigation_cannot_overwrite_settings(runtime):
     ad, _ = runtime
     row = create(ad)
