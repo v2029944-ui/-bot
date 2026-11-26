@@ -170,6 +170,63 @@ def global_admin(uid):
     return str(uid) in global_admin_ids()
 
 
+def management_only(db=None):
+    if db is None:
+        if not INSTALLED:
+            return False
+        db = root().db
+    return db.execute("SELECT 1 FROM settings WHERE key='root_management_only' AND value='1'").fetchone() is not None
+
+
+def in_management_only():
+    return not active_id() and management_only()
+
+
+def management_mode_menu(adapter, uid, parts):
+    import core
+
+    if not INSTALLED or active_id() or not core.is_global_admin(adapter, uid):
+        return "⛔ Режим меняет главный администратор в управлении ботом.", None
+    enabled = management_only()
+    if len(parts) == 2:
+        action = "disable" if enabled else "enable"
+        label = "Вернуть рабочее меню №0" if enabled else "Включить служебный режим"
+        text = ("Служебный режим включён. Приём материалов и публикации доступны в рабочих пространствах."
+                if enabled else "В служебном режиме №0 используется для управления ботом. "
+                "Приём материалов и публикации в №0 отключатся. Данные сохранятся.")
+        return text, [[(label, f"m:root_mode:{action}")], [("← Управление ботом", "m:admin")]]
+    if len(parts) != 3 or parts[2] not in ("enable", "disable"):
+        return "Режим не найден.", None
+    requested = parts[2] == "enable"
+    if requested == enabled:
+        return "Этот режим уже установлен.", core.menu_for(adapter, uid)
+    if update_in_progress():
+        return "Обновление ещё проверяется. Повторите действие позже.", None
+    db = root().db
+    if requested:
+        unfinished = db.execute("SELECT 1 FROM drafts WHERE status='pending' LIMIT 1").fetchone()
+        failed = db.execute("SELECT 1 FROM max_inbox WHERE space_id=0 AND state='failed' LIMIT 1").fetchone()
+        if unfinished or failed or settings_busy(root_context()):
+            return "Перед включением служебного режима разберите черновики и очередь материалов №0.", None
+        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('root_management_only','1')")
+        text = "Служебный режим включён. Выберите рабочее пространство для материалов и публикаций."
+    else:
+        if not str(adapter.channel or "").strip():
+            return "Для возврата рабочего меню №0 сначала задайте MAX_CHANNEL и пересоздайте контейнер.", None
+        telegram = root().adapters.get("tg")
+        conflict = db.execute(
+            "SELECT id FROM workspaces WHERE max_channel=? OR LOWER(tg_channel)=? LIMIT 1",
+            (str(adapter.channel), str(telegram.channel).lower() if telegram else None),
+        ).fetchone()
+        if conflict:
+            return f"Группа для №0 занята пространством №{conflict['id']}. Сначала измените его группу.", None
+        db.execute("DELETE FROM settings WHERE key='root_management_only'")
+        text = "Рабочее меню №0 снова доступно."
+    db.commit()
+    clear_workspace_confirmations(0)
+    return text, core.menu_for(adapter, uid)
+
+
 def _get(sid):
     if not sid:
         return None
@@ -281,8 +338,9 @@ def select_for_user(uid, sid):
 
 def for_user(uid, continue_input=False):
     uid = str(uid)
+    management = management_only()
     owner = root().db.execute("SELECT id FROM workspaces WHERE owner=?", (uid,)).fetchone()
-    if not owner and root().owner == uid:
+    if not owner and root().owner == uid and not management:
         owner = {"id": 0}
     selected = root().db.execute("SELECT sid FROM workspace_routes WHERE uid=?", (str(uid),)).fetchone()
     if owner:
@@ -304,7 +362,7 @@ def for_user(uid, continue_input=False):
             if allowed and (pending or key in rules or (sid, uid) in WAITING_MEMBER or workspace_form):
                 return sid
         return owner["id"]
-    if selected and selected["sid"] == 0 and _root_allows(uid):
+    if selected and selected["sid"] == 0 and _root_allows(uid) and (not management or global_admin(uid)):
         return 0
     if selected and selected["sid"] in OPEN and str(uid) in OPEN[selected["sid"]].memory["ADAPTERS"]["max"].allowed:
         return selected["sid"]
@@ -559,7 +617,7 @@ def validate_settings(values, sid, before):
     for field, value in (("max_channel", maximum), ("tg_channel", telegram)):
         if field not in changed or value is None:
             continue
-        if sid != 0:
+        if sid != 0 and not management_only():
             primary_adapter = root().adapters.get("max" if field == "max_channel" else "tg")
             if primary_adapter and value == str(primary_adapter.channel).strip().lower():
                 raise ValueError(f"{FIELD_LABELS[field]} уже используется в основном пространстве №0. "
@@ -767,6 +825,8 @@ async def settings_menu(adapter, uid, payload, parts):
     import core
     if active_id() or adapter.name != "max" or not global_admin(uid):
         return "⛔ Настройки пространств меняет только главный администратор в основном пространстве.", None
+    if management_only() and len(parts) > 2 and parts[2] and not parts[2].strip("0"):
+        return "Настройки публикации №0 скрыты в служебном режиме.", None
     if parts[1] == "space_save":
         return await settings_save(adapter, uid, payload)
     if len(parts) not in (3, 4) or not parts[2].isdigit() or len(parts[2]) > 9:
@@ -924,14 +984,17 @@ def view(page=0, archived=False):
 
 
 def workspace_rows(rows):
-    primary = settings_record(0)
-    source = "настройки в базе" if configured_root(root().db) else "пока из .env"
-    lines = ["Рабочие пространства:", f"0 · {primary['name']} ({source})"]
-    buttons = [[(f"⚙ {primary['name'][:40]} · №0", "m:space:0")]]
+    lines = ["Рабочие пространства:"]
+    buttons = []
     for row in rows:
         lines.append(f"{row['id']} · {row['name']} [{row['state']}] · владелец {row['owner']}\n"
                      f"MAX: {row['max_channel']} · Telegram: {row['tg_channel'] or 'не подключена'}")
         buttons.append([(f"⚙ {row['name'][:40]}", f"m:space:{row['id']}")])
+    if not management_only():
+        primary = settings_record(0)
+        source = "настройки в базе" if configured_root(root().db) else "пока из .env"
+        lines.append(f"\nРабочее меню №0 · {primary['name']} ({source})")
+        buttons.append([("⚙ Настройки публикации №0", "m:space:0")])
     return lines, buttons
 
 
