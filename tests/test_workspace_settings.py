@@ -5,6 +5,7 @@ import pytest
 from conftest import run
 
 import core
+import editor_rules
 import max_
 import ops
 import spaces
@@ -77,6 +78,26 @@ def test_management_panel_has_global_tools_and_separates_workspace_actions(runti
         text, rows = run(core.on_menu(core.ADAPTERS["max"], "1", "m:admin"))
         assert any(payload == "m:pending" for line in rows for _, payload in line)
         assert any(payload == "w:0:m:admin" for line in rows for _, payload in line)
+
+
+def test_disabled_rules_persist_and_do_not_affect_another_workspace(runtime):
+    ad, _ = runtime
+    first, second = create(ad)["id"], create(ad, 22, -102)["id"]
+    for sid in (first, second):
+        with spaces.enter(spaces.get(sid)):
+            editor_rules.add("Правило команды")
+
+    with spaces.enter(spaces.get(first)):
+        adapter = core.ADAPTERS["max"]
+        _, rows = run(core.on_menu(adapter, "1", "m:rules"))
+        toggle = next(payload for line in rows for _, payload in line if payload.startswith("m:rules_set:"))
+        assert "нет прав" in run(core.on_menu(adapter, "22", toggle))[0]
+        run(core.on_menu(adapter, "1", toggle))
+
+    run(spaces.close())
+    for sid, expected in [(first, []), (second, ["Правило команды"])]:
+        with spaces.enter(spaces.get(sid)):
+            assert editor_rules.active() == expected
 
 
 def test_management_only_refuses_pending_root_work_then_blocks_new_root_material(runtime):

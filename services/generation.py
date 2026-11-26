@@ -213,6 +213,9 @@ async def generate_options(*args, previous=None, **kwargs):
 async def _learn(comment: str, old_post: str) -> str | None:
     """Если комментарий — общее пожелание к стилю, сохраняем его как правило."""
     try:
+        rules_mode = editor_rules.mode()
+        if not rules_mode[0]:
+            return None
         rules = editor_rules.active()
         prompt = (f"Редактор оставил комментарий к посту.\nПост: {old_post}\nКомментарий: {comment}\n\n"
                   f"Уже сохранённые правила:\n{chr(10).join(rules) or '(нет)'}\n\n"
@@ -221,7 +224,7 @@ async def _learn(comment: str, old_post: str) -> str | None:
                   "одной короткой строкой-инструкцией. Иначе ответь ровно: НЕТ")
         out = (await core._complete("Ты ведёшь свод правил стиля для корпоративного канала.", prompt)).strip()
         out = out.lstrip("-• ").strip()
-        if out and not re.match(r"^\W*нет\b", out, re.I) and len(out) < 300:  # «НЕТ», «Нет.», «НЕТ, это разовая…»
+        if editor_rules.mode() == rules_mode and out and not re.match(r"^\W*нет\b", out, re.I) and len(out) < 300:
             if editor_rules.add(out, "rule_learn") == "✅ Правило добавлено.":
                 return out
     except Exception:

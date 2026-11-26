@@ -119,22 +119,31 @@ def rules_command(adapter: core.Adapter, user_id, text: str) -> str | None:
 
 
 def rules_view(page=0) -> tuple[str, list]:
+    enabled, revision = editor_rules.mode()
     total = core.db.execute("SELECT COUNT(*) FROM rules").fetchone()[0]
     page = min(max(0, page), max(0, (total - 1) // 40))
     offset = page * 40
-    rows = list(reversed(core.db.execute("SELECT id,text FROM rules ORDER BY id DESC LIMIT 40 OFFSET ?", (offset,)).fetchall()))
+    rows = list(reversed(core.db.execute("SELECT id,text,enabled,revision FROM rules ORDER BY id DESC LIMIT 40 OFFSET ?", (offset,)).fetchall()))
     numbered = list(enumerate(rows, total - offset - len(rows) + 1))
-    body = "\n".join(f"{n}. {r['text']}" for n, r in numbered) or "Пока пусто."
+    body = "\n".join(f"{n}. {'' if r['enabled'] else '⏸ '}{r['text']}" for n, r in numbered) or "Пока пусто."
     if len(body.encode("utf-16-le")) // 2 > 3500:
         body = body.encode("utf-16-le")[:3500 * 2].decode("utf-16-le", errors="ignore") + "\n…"
-    text = "📝 Правила стиля:\n" + body
-    text += "\n\nВ генерации активны последние 30 правил в пределах 12 000 знаков (до 1000 на правило)."
+    status = "применяются" if enabled else "отключены для всех постов"
+    text = f"📝 Правила стиля · {status}\n\n{body}"
+    if enabled:
+        text += "\n\nВ генерации участвуют до 30 последних включённых правил в пределах 12 000 знаков."
     if total > len(rows):
         text += f"\n\nСтраница {page + 1}. Показаны {len(rows)} из {total}."
     if rows:
-        text += "\n\nНажмите 🗑 с номером, чтобы удалить правило."
-    dels = [(f"🗑 {n}", f"m:del:{r['id']}" + (f":{page}" if page else "")) for n, r in numbered]
+        text += "\n\n⏸ — отключить правило · ▶️ — включить · 🗑 — удалить."
+    dels = [(f"🗑 {n}", f"m:del:{row['id']}" + (f":{page}" if page else "")) for n, row in numbered]
     buttons = [dels[i:i + 4] for i in range(0, len(dels), 4)]
+    switches = []
+    for n, row in numbered:
+        rule_id = row["id"]
+        label = "⏸" if row["enabled"] else "▶️"
+        switches.append((f"{label} {n}", f"m:rule_set:{rule_id}:{int(not row['enabled'])}:{row['revision']}:{page}"))
+    buttons.extend(switches[i:i + 4] for i in range(0, len(switches), 4))
     nav = []
     if page:
         nav.append(("Новые →", f"m:rules:{page - 1}"))
@@ -142,6 +151,8 @@ def rules_view(page=0) -> tuple[str, list]:
         nav.append(("← Более ранние", f"m:rules:{page + 1}"))
     if nav:
         buttons.append(nav)
+    label = "⏸ Отключить все правила" if enabled else "▶️ Включить правила"
+    buttons.append([(label, f"m:rules_set:{int(not enabled)}:{revision}:{page}")])
     buttons.append([("➕ Добавить правило", "m:add")])
     return text, buttons
 
@@ -196,8 +207,12 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return spaces.management_mode_menu(adapter, uid, parts)
     if act == "root_workspace" and spaces.INSTALLED and core.is_global_admin(adapter, uid):
         return "Рабочее меню №0", workspace_menu(adapter, uid)
-    if act in ("rules", "del", "add") and not core.is_admin(adapter, uid):
+    if act in ("post_settings", "rules", "rules_set", "rule_set", "del", "add") and not core.is_admin(adapter, uid):
         return "⛔ Настройки меняет только администратор.", None
+    if act == "post_settings":
+        return "Настройки постов", [[("📝 Правила стиля", "m:rules")],
+                                    [("🤖 Модели генерации", "m:compare")],
+                                    [("🔗 Ссылка в постах", "m:footer")]]
     if act in ("member", "space_member", "inv", "invn"):  # старые кнопки ведут в действующее добавление
         if not core.is_admin(adapter, uid):
             return "⛔ Людей добавляет только администратор пространства.", None
@@ -282,6 +297,18 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     if act == "rules":
         page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0
         return core.rules_view(page)
+    if act in ("rules_set", "rule_set"):
+        expected = 6 if act == "rule_set" else 5
+        number_parts = parts[2:]
+        if len(parts) != expected or not all(p.isascii() and p.isdecimal() and len(p) <= 18 for p in number_parts):
+            return "Настройка правила не найдена.", None
+        state, rule_revision, page = map(int, parts[-3:])
+        if state not in (0, 1):
+            return "Настройка правила не найдена.", None
+        result = (editor_rules.set_rule(int(parts[2]), bool(state), rule_revision) if act == "rule_set"
+                  else editor_rules.set_mode(bool(state), rule_revision))
+        text, rows = core.rules_view(page)
+        return f"{result}\n\n{text}", rows
     if act == "del" and len(parts) > 2 and parts[2].isdigit():
         def remove():
             core.db.execute("DELETE FROM rules WHERE id=?", (int(parts[2]),))
