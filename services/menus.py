@@ -148,6 +148,12 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         return "⛔ Меню доступно только администратору.", None
     if payload == "m:cancel" or payload.startswith("m:cancel:"):
         return cancel_input(adapter, uid, payload)
+    parts = payload.split(":")
+    act = parts[1] if len(parts) > 1 else "menu"
+    if act == "space_save":
+        return await spaces.settings_menu(adapter, uid, payload, parts)
+    if act == "space_apply":
+        return await spaces.lifecycle_menu(adapter, uid, payload, parts)
     if not payload.startswith(("m:compare", "m:models_")):
         comparison.picker_state().pop((adapter.name, uid), None)
     dialog_state.PendingMap(core.db, "input_cancel").pop((adapter.name, uid), None)
@@ -155,13 +161,12 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         waiting.pop((adapter.name, uid), None)
     core.WAITING_RULE.discard((adapter.name, uid))
     post_footer.WAITING.pop((adapter.name, uid), None)
-    if spaces.INSTALLED and not payload.startswith("m:space_save:"):
+    if spaces.INSTALLED:
         spaces.settings_state().pop((adapter.name, uid), None)
     spaces.WAITING_CREATE.discard(uid)
     spaces.WAITING_MEMBER.discard((spaces.active_id(), uid))
     confirmation = dialog_state.PendingMap(core.db, "people_confirmation")
     key = (adapter.name, uid)
-    parts = payload.split(":")
     if len(parts) > 1 and parts[1] in ("proleok", "pdelok"):
         if not core.is_admin(adapter, uid):
             return "⛔ Людей добавляет только администратор.", None
@@ -175,7 +180,6 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
         parts = parts[:-1]
     else:
         confirmation.pop(key, None)
-    act = parts[1] if len(parts) > 1 else "menu"
     if act in ("rules", "del", "add") and not core.is_admin(adapter, uid):
         return "⛔ Настройки меняет только администратор.", None
     if act in ("member", "space_member", "inv", "invn"):  # старые кнопки ведут в действующее добавление
@@ -183,12 +187,15 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
         return "Отправьте ID человека в MAX. Он будет добавлен как участник.", input_rows(adapter, uid)
-    if act in ("space", "space_edit", "space_save"):
+    if act in ("space", "space_edit"):
         return await spaces.settings_menu(adapter, uid, payload, parts)
+    if act in ("spaces_archive", "space_archive", "space_restore"):
+        return await spaces.lifecycle_menu(adapter, uid, payload, parts)
     if act in ("spaces", "space_add"):
         if spaces.active_id() != 0 or not spaces.global_admin(uid):
             return "⛔ Пространства создаёт главный администратор.", None
         if act == "space_add":
+            spaces.select_for_user(uid, 0)
             spaces.WAITING_CREATE.add(uid)
             return spaces.INPUT_HELP, input_rows(adapter, uid)
         page = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) < 8 else 0

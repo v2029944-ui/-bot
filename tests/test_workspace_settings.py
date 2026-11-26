@@ -38,6 +38,7 @@ def runtime(monkeypatch):
         core.db = root.db
         core.DATA, core.PHOTOS, core.VIDEOS = root.folder, root.folder / "photos", root.folder / "videos"
         root.db.execute("DELETE FROM workspaces")
+        root.db.execute("DELETE FROM archived_workspaces")
         root.db.execute("DELETE FROM workspace_routes")
         root.db.commit()
         spaces.INSTALLED, spaces.ROOT = False, None
@@ -129,11 +130,121 @@ def test_create_max_only_with_omitted_blank_or_dash_telegram(runtime, telegram):
     assert set(spaces.get(row["id"]).memory["ADAPTERS"]) == {"max"}
 
 
+@pytest.mark.parametrize("form", ["edit", "create"])
+@pytest.mark.parametrize("target", ["root", "child"])
+def test_admin_can_edit_and_reject_draft_after_opening_workspace_form(runtime, monkeypatch, llm, png, form, target):
+    ad, _ = runtime
+    row = create(ad)
+    sid = row["id"] if target == "child" else 0
+    obsolete_save = preview(ad, row["id"], "Устаревшее название\n11\n-101")
+
+    async def no_network(*args, **kwargs):
+        return {}
+
+    async def send_menu(adapter, uid, text, rows=None, **kwargs):
+        buttons = [[{"type": "callback", "text": label, "payload": payload}
+                    for label, payload in line] for line in (rows or [])]
+        await adapter._send({"user_id": uid}, text, buttons=buttons)
+
+    monkeypatch.setattr(max_.Max, "call", no_network)
+    monkeypatch.setattr(max_.Max, "send_menu", send_menu)
+    monkeypatch.setattr(max_.Max, "send_for_approval", no_network)
+
+    async def scenario():
+        async def press(payload):
+            await ad.handle({"update_type": "message_callback", "callback": {
+                "user": {"user_id": 1}, "callback_id": "test", "payload": payload}})
+
+        async def reply(text):
+            await ad.handle(spaces.stamp({"update_type": "message_created", "message": {
+                "sender": {"user_id": 1}, "body": {"text": text}}}))
+
+        with spaces.enter(spaces.get(sid)):
+            did = await core.submit(core.ADAPTERS["max"], "1", "Автор", "Описание", png)
+
+        form_payload = "m:space_add" if form == "create" else f"m:space_edit:{row['id']}"
+        await press(f"w:0:{form_payload}")
+        await press(f"w:{sid}:d:edit:{did}:1")
+        await press(f"w:0:{obsolete_save}")
+        await reply("Исправленный текст")
+        with spaces.enter(spaces.get(sid)):
+            assert core.get(did)["post"] == "Исправленный текст"
+            attempt = core.get(did)["attempts"]
+
+        await press(f"w:0:{form_payload}")
+        await press(f"w:{sid}:d:del:{did}:{attempt}")
+        with spaces.enter(spaces.get(sid)):
+            confirmation = next(p for p in core.ADAPTERS["max"]._confirmations()[("max", "1")]
+                                if p.startswith("d:rejectcustom:"))
+        await press(f"w:{sid}:{confirmation}")
+        await reply("Причина отклонения")
+        with spaces.enter(spaces.get(sid)):
+            assert core.get(did)["status"] == "deleted"
+            assert core.get(did)["rejection_reason"] == "Причина отклонения"
+
+    run(scenario())
+
+
 def test_telegram_requires_configuration_but_dash_does_not(runtime):
     ad, messages = runtime
     assert create(ad, telegram="-201") is None
     assert "TG_TOKEN" in messages[-1][1]
     assert create(ad, telegram="-") is not None
+
+
+def test_global_admin_can_open_archive_and_restore_workspace(runtime, monkeypatch):
+    ad, messages = runtime
+    row = create(ad)
+    sid = row["id"]
+    space = spaces.get(sid)
+    space.db.execute("INSERT INTO drafts(status,post,created) VALUES('pending','Сохранённый черновик',?)", (time.time(),))
+    space.db.commit()
+
+    async def call(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(max_.Max, "call", call)
+
+    async def scenario():
+        async def press(uid, payload):
+            await ad.handle({"update_type": "message_callback", "callback": {
+                "user": {"user_id": uid}, "callback_id": "test", "payload": payload}})
+            return messages[-1][1:]
+
+        _, rows = await press(1, f"w:0:m:space:{sid}")
+        open_menu = next(payload for line in rows for _, payload in line if payload == f"w:{sid}:m:admin")
+        _, rows = await press(1, open_menu)
+        assert any(payload == "m:pending" for line in rows for _, payload in line)
+        assert spaces.for_user("1") == sid
+        message, _ = await press(11, f"w:{sid}:m:space_archive:{sid}")
+        assert "главный администратор" in message
+
+        async def archive():
+            _, rows = await press(1, f"w:0:m:space_archive:{sid}")
+            return await press(1, f"w:0:{rows[0][0][1]}")
+
+        assert "черновики" in (await archive())[0]
+        assert spaces.settings_record(sid)
+        space.db.execute("UPDATE drafts SET status='deleted',closed_at=?", (time.time(),))
+        space.db.commit()
+        assert "перемещено в архив" in (await archive())[0]
+        assert spaces.settings_record(sid) is None and sid not in spaces.OPEN
+        assert "недоступно" in (await press(1, open_menu))[0]
+        assert spaces.for_user("11") == 0
+
+        await spaces.close()
+        _, rows = await press(1, "w:0:m:spaces_archive")
+        assert rows[0][0][1] == f"m:space_restore:{sid}"
+        _, rows = await press(1, f"w:0:{rows[0][0][1]}")
+        restore = f"w:0:{rows[0][0][1]}"
+        await press(1, restore)
+        assert "устарело" in (await press(1, restore))[0]
+        assert spaces.settings_values(spaces.settings_record(sid)) == spaces.settings_values(row)
+        assert spaces.archived_record(sid) is None and spaces.for_user("11") == sid
+        with spaces.enter(spaces.get(sid)):
+            assert core.get(1)["post"] == "Сохранённый черновик"
+
+    run(scenario())
 
 
 def test_edit_preview_confirmation_replay_and_owner_revocation(runtime):

@@ -4,6 +4,7 @@ import json
 import comparison
 import core
 import post_footer
+import spaces
 from services import publication
 
 
@@ -123,6 +124,11 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
 
     if (action in ("redo", "regen", "redoc", "edit", "change", "length") or action.startswith("len_")) and core._parse_marks(d.get("published_to")):
         return False, core.PARTIAL_EDIT_BLOCKED
+
+    if action in ("edit", "rejectcustom", "redoc"):
+        if adapter.name == "max":
+            spaces.clear_root_workspace_input(user_id)
+        post_footer.WAITING.pop((adapter.name, str(user_id)), None)
 
     if action in ("redo", "change", "length", "back"):
         key = (adapter.name, str(user_id))
