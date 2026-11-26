@@ -676,12 +676,41 @@ def settings_card(sid):
     if not row:
         return "Пространство не найдено.", None
     buttons = [[("✏️ Изменить настройки", f"m:space_fields:{sid}")]]
+    if sid or not management_only():
+        buttons.append([("Проверить каналы", f"m:space_check:{sid}")])
     if sid and row["state"] == "ready":
         buttons.append([("📂 Открыть меню пространства", f"w:{sid}:m:admin")])
         buttons.append([("🗃 Архивировать пространство", f"m:space_archive:{sid}")])
     buttons.append([("← Пространства", "m:spaces")])
     return (f"Пространство №{sid}: {row['name']}\nВладелец MAX: {row['owner']}\n"
             f"Группа MAX: {row['max_channel']}\nГруппа Telegram: {row['tg_channel'] or 'не подключена'}", buttons)
+
+
+async def check_telegram_channel(sid, channel):
+    import os
+
+    from aiogram.utils.token import TokenValidationError
+
+    from tg import Telegram
+
+    if not channel:
+        return "Telegram: не подключён."
+    space = OPEN.get(sid)
+    telegram = (space.memory["ADAPTERS"] if space else root().adapters).get("tg")
+    if isinstance(telegram, Telegram):
+        return await telegram.check_channel(channel)
+
+    token = os.getenv("TG_TOKEN", "").strip()
+    if not token:
+        return "Telegram: для проверки нужен TG_TOKEN."
+    try:
+        telegram = Telegram(token, channel)
+    except TokenValidationError:
+        return "Telegram: TG_TOKEN задан в неверном формате."
+    try:
+        return await telegram.check_channel(channel)
+    finally:
+        await telegram.bot.session.close()
 
 
 def update_in_progress():
@@ -862,18 +891,29 @@ async def settings_menu(adapter, uid, payload, parts):
     import core
     if active_id() or adapter.name != "max" or not global_admin(uid):
         return "⛔ Настройки пространств меняет только главный администратор в основном пространстве.", None
-    if management_only() and len(parts) > 2 and parts[2] and not parts[2].strip("0"):
-        return "Настройки публикации №0 скрыты в служебном режиме.", None
     if parts[1] == "space_save":
         return await settings_save(adapter, uid, payload)
-    if len(parts) not in (3, 4) or not parts[2].isdigit() or len(parts[2]) > 9:
+    if len(parts) not in (3, 4) or not parts[2].isascii() or not parts[2].isdigit() or len(parts[2]) > 9:
         return "Пространство не найдено.", None
     sid = int(parts[2])
+    if not sid and management_only():
+        return "Настройки публикации №0 скрыты в служебном режиме.", None
     if parts[1] == "space":
         return settings_card(sid)
     row = settings_record(sid)
     if not row:
         return "Пространство не найдено.", None
+    if parts[1] == "space_check":
+        if len(parts) != 3:
+            return "Пространство не найдено.", None
+        maximum, telegram = await asyncio.gather(
+            adapter.check_channel(row["max_channel"]), check_telegram_channel(sid, row["tg_channel"]),
+        )
+        current = settings_record(sid)
+        if not current or settings_values(current) != settings_values(row) or (not sid and management_only()):
+            return "Пространство изменилось. Откройте актуальную карточку и повторите проверку.", None
+        return (f"Каналы пространства №{sid} · {row['name']}\n\n{maximum}\n\n{telegram}",
+                [[("← К пространству", f"m:space:{sid}")]])
     if parts[1] == "space_fields":
         rows = [[(label, f"m:space_edit:{sid}:{field}")] for field, label in FIELD_LABELS.items()]
         return f"Что изменить в «{row['name']}»?", rows + [[("← К пространству", f"m:space:{sid}")]]

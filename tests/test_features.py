@@ -5,6 +5,7 @@ import types
 import pytest
 from conftest import FakeAdapter, draft_id, run
 
+import command_context
 import core
 import main
 import max_
@@ -197,30 +198,54 @@ def admin_tg():
     return a
 
 
-def test_status_text_and_access(llm, png):
+def test_status_text_and_access(llm, monkeypatch):
     a = admin_tg()
-    run(core.submit(a, "2", "Анна", "Заменили масло", png))
+    core.db.execute("INSERT INTO drafts(status,created) VALUES('pending',?)", (time.time(),))
+    monkeypatch.setattr(core, "LLM_STATE", {"ok": time.time(), "err": 0, "msg": ""})
     assert run(core.on_text(a, "1", "/status")) is True
-    text = a.sent("notify")[-1][2]
-    assert "Бот работает" in text and "✅ отвечает" in text and "На согласовании: 1" in text
+    text, rows = a.sent("menu")[-1][2:]
+    assert "Бот работает" in text and "последний пост написан" in text and "На согласовании: 1" in text
+    assert any(payload == "m:check_llm" for row in rows for _, payload in row)
     run(core.on_text(a, "2", "/status"))  # обычный согласующий при заданном админе: отказ, а не молчание
-    assert len(a.sent("notify")) == 2 and "администратору" in a.sent("notify")[-1][2]
+    assert "администратору" in a.sent("notify")[-1][2]
     assert "администратору" in run(core.on_menu(a, "2", "m:status"))[0]
     assert "Бот работает" in run(core.on_menu(a, "1", "m:status"))[0]
+    assert not llm.calls
 
 
-def test_status_shows_llm_failure(llm):
+def test_explicit_llm_check_shows_failure_and_requires_admin(llm):
     a = admin_tg()
     llm.reply = RuntimeError("insufficient funds")
-    run(core.on_text(a, "1", "/status"))
-    assert "❌" in a.sent("notify")[-1][2] and "insufficient funds" in a.sent("notify")[-1][2]
+    denied, _ = run(core.on_menu(a, "2", "m:check_llm"))
+    assert "администратору" in denied and not llm.calls
+    text, _ = run(core.on_menu(a, "1", "m:check_llm"))
+    assert "❌" in text and "insufficient funds" in text and len(llm.calls) == 1
+
+
+def test_explicit_llm_check_replays_same_max_command_without_another_call(llm):
+    adapter = FakeAdapter("max", ["1"], admins=["1"])
+    event = command_context.EVENT.set("callback:test-llm")
+    try:
+        checked, _ = run(core.on_menu(adapter, "1", "m:check_llm"))
+        replayed, _ = run(core.on_menu(adapter, "1", "m:check_llm"))
+    finally:
+        command_context.EVENT.reset(event)
+    assert checked == replayed and "Нейросеть отвечает" in checked and len(llm.calls) == 1
+
+
+def test_status_during_footer_input_preserves_pending_edit(llm):
+    a = admin_tg()
+    core.post_footer.WAITING[(a.name, "1")] = "text"
+    assert run(core.on_text(a, "1", "/status")) is True
+    assert "Бот работает" in a.sent("menu")[-1][2]
+    assert core.post_footer.WAITING[(a.name, "1")] == "text" and not llm.calls
 
 
 def test_status_for_approver_when_no_admins_configured(llm):
     a = FakeAdapter("tg", ["1"], admins=["1"])
     core.ADAPTERS["tg"] = a
     run(core.on_text(a, "1", "/status"))
-    assert "Бот работает" in a.sent("notify")[-1][2]
+    assert "Бот работает" in a.sent("menu")[-1][2]
 
 
 def test_generation_failure_is_tracked(tg, llm, png):

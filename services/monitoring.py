@@ -1,5 +1,6 @@
 """Статус, уведомления и напоминания."""
 import asyncio
+import json
 import os
 import shutil
 import time
@@ -7,6 +8,7 @@ from typing import Any
 
 import httpx
 
+import command_context
 import comparison
 import core
 import ops
@@ -148,19 +150,56 @@ async def aitunnel_balance() -> str | None:
         return "💰 Баланс AITunnel: сервис вернул неожиданный ответ."
 
 
+async def check_llm() -> str:
+    """Выполняет проверку по кнопке, сохраняя результат для повтора доставки команды MAX."""
+    event = command_context.EVENT.get()
+    operation = "llm_status_check"
+    if event:
+        # Commit before contacting the provider so a restart cannot repeat a paid request.
+        pending = "Результат проверки нейросети неизвестен. Для новой проверки откройте статус."
+        inserted = core.db.execute("INSERT OR IGNORE INTO command_results VALUES(?,?,?,?)",
+                                   (event, operation, json.dumps(pending), time.time())).rowcount
+        core.db.commit()
+        if not inserted:
+            return json.loads(core.db.execute("SELECT result FROM command_results WHERE event_key=? AND operation=?",
+                                              (event, operation)).fetchone()[0])
+    try:
+        await asyncio.wait_for(core._complete("Отвечай одним словом.", "Ответь: ОК"), 30)
+        result = "✅ Нейросеть отвечает."
+    except Exception as exc:
+        result = f"❌ Ошибка проверки нейросети: {type(exc).__name__}: {core.err(exc)[:150]}"
+    if event:
+        core.db.execute("UPDATE command_results SET result=? WHERE event_key=? AND operation=?",
+                        (json.dumps(result), event, operation))
+        core.db.commit()
+    return result
+
+
 async def status_text(adapter: core.Adapter, include_global=True) -> str:
-    """Сводка для /status: жив ли бот, что в очереди, отвечает ли нейросеть (проверка стоит доли копейки)."""
+    """Сводка по черновикам и последним запускам генерации."""
     now = time.time()
-    def one(sql, *a):
-        return core.db.execute(sql, a).fetchone()[0]
-    pend = one("SELECT COUNT(*) FROM drafts WHERE status='pending'")
-    oldest = one("SELECT MIN(COALESCE(NULLIF(last_sent,0), created)) FROM drafts WHERE status='pending'")
-    stuck = one("SELECT COUNT(*) FROM drafts WHERE status IN ('publishing','regenerating')")
-    day = one("SELECT COUNT(*) FROM drafts WHERE created > ?", now - 86400)
-    pub7 = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND published_at > ?", now - 7 * 86400)
-    undated = one("SELECT COUNT(*) FROM drafts WHERE status='published' AND COALESCE(published_at,0)=0")
-    root_db = spaces.root().db if spaces.INSTALLED else core.db
     sid = spaces.active_id()
+    include_global = include_global and not sid
+    global_view = include_global and spaces.INSTALLED
+    sources = [(core.db, core.LLM_STATE)]
+    platforms = set(core.ADAPTERS)
+    if global_view:
+        sources = [] if spaces.management_only() else sources
+        for row in spaces.root().db.execute("SELECT id FROM workspaces WHERE state='ready'").fetchall():
+            if (space := spaces.OPEN.get(row["id"])) is not None:
+                sources.append((space.db, space.memory["LLM_STATE"]))
+                platforms.update(space.memory["ADAPTERS"])
+    counts = [db.execute("""SELECT COUNT(*) FILTER (WHERE status='pending') AS pending,
+        MIN(COALESCE(NULLIF(last_sent,0), created)) FILTER (WHERE status='pending') AS oldest,
+        COUNT(*) FILTER (WHERE status IN ('publishing','regenerating')) AS stuck,
+        COUNT(*) FILTER (WHERE created > ?) AS day,
+        COUNT(*) FILTER (WHERE status='published' AND published_at > ?) AS published,
+        COUNT(*) FILTER (WHERE status='published' AND COALESCE(published_at,0)=0) AS undated
+        FROM drafts""", (now - 86400, now - 7 * 86400)).fetchone() for db, _ in sources]
+    pend, stuck, day, pub7, undated = (sum(row[key] for row in counts)
+                                      for key in ("pending", "stuck", "day", "published", "undated"))
+    oldest = min((row["oldest"] for row in counts if row["oldest"] is not None), default=None)
+    root_db = spaces.root().db if spaces.INSTALLED else core.db
     handoff_where, handoff_args = ("", ()) if include_global else (" WHERE space_id=?", (sid,))
     handoff_failed = root_db.execute(
         "SELECT COUNT(*) FROM max_handoff_failures" + handoff_where, handoff_args).fetchone()[0]
@@ -169,28 +208,26 @@ async def status_text(adapter: core.Adapter, include_global=True) -> str:
     notice_issues = root_db.execute(
         "SELECT COUNT(*) FROM max_handoff_notices WHERE state IN ('pending','unknown','failed')" + notice_where,
         notice_args).fetchone()[0]
-    async def check_llm():
-        try:
-            await asyncio.wait_for(core._complete("Отвечай одним словом.", "Ответь: ОК"), 30)
-            return "✅ отвечает"
-        except Exception as e:
-            return f"❌ {type(e).__name__}: {core.err(e)[:150]}"
-    async def balance_for_space():
-        return await core.aitunnel_balance() if include_global and not spaces.active_id() else None
-    llm, balance = await asyncio.gather(check_llm(), balance_for_space())
-    last = ("нет данных" if not (core.LLM_STATE["ok"] or core.LLM_STATE["err"]) else
-            f"последний пост написан {core._ago(now - core.LLM_STATE['ok'])} назад" if core.LLM_STATE["ok"] >= core.LLM_STATE["err"] else
-            f"последняя генерация закончилась ошибкой {core._ago(now - core.LLM_STATE['err'])} назад: {core.LLM_STATE['msg'][:100]}")
+    state = max((state for _, state in sources), key=lambda state: max(state["ok"], state["err"]), default=None)
+    last = "нет данных"
+    if state is not None:
+        if state["err"] > state["ok"]:
+            last = f"последняя генерация закончилась ошибкой {core._ago(now - state['err'])} назад: {state['msg'][:100]}"
+        elif state["ok"]:
+            last = f"последний пост написан {core._ago(now - state['ok'])} назад"
+    balance = await core.aitunnel_balance() if include_global else None
     try:
         free = f"{shutil.disk_usage(core.DATA).free / 1e9:.1f} ГБ"
     except OSError:
         free = "неизвестно"
     lines = [f"🟢 Бот работает {core._ago(now - core.STARTED)}.",
              f"Версия: {await ops.version()}",
-             f"Мессенджеры: {', '.join(core.ADAPTERS) or 'нет'}",
-             f"Нейросеть ({comparison.default_model()}): {llm}", f"Генерация: {last}",
-             f"На согласовании: {pend}" + (f" (старейший ждёт {core._ago(now - oldest)})" if pend and oldest else ""),
-             f"За сутки получено фото: {day}, опубликовано за неделю: {pub7}"]
+             f"Мессенджеры: {', '.join(sorted(platforms)) or 'нет'}",
+             f"Модель для проверки: {comparison.default_model()}", f"Генерация: {last}",
+             f"На согласовании: {pend}" + (f" (старейший ждёт {core._ago(now - oldest)})" if oldest is not None else ""),
+             f"За сутки создано черновиков: {day}, опубликовано за неделю: {pub7}"]
+    if global_view:
+        lines.insert(1, f"Рабочих пространств в сводке: {len(sources)}")
     if stuck:
         lines.append(f"⚠️ Зависших черновиков: {stuck} (после перезапуска вернутся в работу)")
     if undated:

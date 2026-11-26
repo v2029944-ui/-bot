@@ -22,6 +22,7 @@ def add_columns(db: Connection, table: str, definitions: tuple[str, ...]) -> Non
 
 def audit_tables(db: Connection) -> None:
     add_columns(db, "drafts", ("cleaned INTEGER DEFAULT 0", "closed_at REAL DEFAULT 0", "published_at REAL DEFAULT 0"))
+    # Keep the old column for rollback. Current releases clear its values at startup.
     add_columns(db, "drafts", ("publication_receipt TEXT NOT NULL DEFAULT '{}'",))
     add_columns(db, "rules", ("enabled INTEGER NOT NULL DEFAULT 1", "revision INTEGER NOT NULL DEFAULT 0"))
     db.execute("CREATE INDEX IF NOT EXISTS drafts_cleanup ON drafts(cleaned,status,id)")

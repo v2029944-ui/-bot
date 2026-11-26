@@ -8,11 +8,12 @@ import editor_rules
 import ops
 import post_footer
 import spaces
+from services import monitoring
 from services.people import workspace_menu
 
 MANAGEMENT_ACTIONS = {
-    "admin", "menu", "status", "inbox", "inretry", "upd", "updgo", "root_mode",
-    "spaces", "space_add", "space", "space_fields", "space_edit", "space_save",
+    "admin", "menu", "status", "check_llm", "inbox", "inretry", "upd", "updgo", "root_mode",
+    "spaces", "space_add", "space", "space_fields", "space_edit", "space_save", "space_check",
     "spaces_archive", "space_archive", "space_restore", "space_apply",
 }
 COMMON_RULE_ACTIONS = {"common_rules", "common_rules_set", "common_rule_set", "common_add", "common_del"}
@@ -183,8 +184,12 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     if spaces.in_management_only():
         if not core.is_global_admin(adapter, uid):
             return "Откройте рабочее пространство или попросите администратора добавить вас в команду.", None
-        if act not in MANAGEMENT_ACTIONS and not common:
+        if (act not in MANAGEMENT_ACTIONS and not common) or payload == "m:status:workspace":
             return "Служебный режим №0. Действия с постами доступны в рабочих пространствах.", core.menu_for(adapter, uid)
+    if payload == "m:check_llm":
+        if not core.can_status(adapter, uid):
+            return "⛔ Проверка нейросети доступна администратору.", None
+        return await monitoring.check_llm(), None
     if common:
         act = act.removeprefix("common_")
     if act == "space_save":
@@ -232,7 +237,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
         return "Отправьте ID человека в MAX. Он будет добавлен как участник.", input_rows(adapter, uid)
-    if act in ("space", "space_fields", "space_edit"):
+    if act in ("space", "space_fields", "space_edit", "space_check"):
         return await spaces.settings_menu(adapter, uid, payload, parts)
     if act in ("spaces_archive", "space_archive", "space_restore"):
         return await spaces.lifecycle_menu(adapter, uid, payload, parts)
@@ -296,11 +301,6 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Посты проверяет и публикует администратор. Присылайте фото или видео с подписью.", None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() and len(parts[2]) < 8 else 0
         return core.pending_view(adapter, page, uid)
-    if act == "published":
-        if not core.is_admin(adapter, uid):
-            return "⛔ История публикаций доступна администратору.", None
-        page = int(parts[2]) if len(parts) == 3 and parts[2].isascii() and parts[2].isdecimal() and len(parts[2]) < 8 else 0
-        return published_view(page)
     if act in ("inbox", "inretry"):
         if not core.is_admin(adapter, uid):
             return "⛔ Очередь доступна только администратору.", None
@@ -347,9 +347,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             await ops.flush_deferred(adapter=adapter, uid=uid)  # сменил режим — придержанное придёт сразу
         return ops.notif_view(adapter, uid, saved=mode in ops.MODES)
     if act == "status":
-        if not core.can_status(adapter, uid):
-            return "⛔ Статус показывается администратору.", None
-        return await core.status_text(adapter, include_global=core.is_global_admin(adapter, uid)), None
+        return await status_view(adapter, uid, workspace=payload == "m:status:workspace")
     if act in core.PEOPLE_ACTS:
         if not core.is_admin(adapter, uid):
             return "⛔ Людей добавляет только администратор.", None
@@ -363,25 +361,11 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
     return "Выберите действие:", core.menu_for(adapter, uid)
 
 
-def published_view(page):
-    from datetime import datetime
-
-    total = core.db.execute("SELECT COUNT(*) FROM drafts WHERE status='published'").fetchone()[0]
-    page = min(page, max(0, (total - 1) // 10))
-    posts = core.db.execute("""SELECT id, attempts, published_at FROM drafts WHERE status='published'
-                               ORDER BY published_at DESC, id DESC LIMIT 10 OFFSET ?""", (page * 10,)).fetchall()
-    buttons = []
-    for post in posts:
-        date = datetime.fromtimestamp(post["published_at"], ops._tz()).strftime("%d.%m.%Y %H:%M") if post["published_at"] else "дата неизвестна"
-        buttons.append([(f"№{post['id']} · {date}", f"d:pubstatus:{post['id']}:{post['attempts']}")])
-    nav = []
-    if page:
-        nav.append(("← Новее", f"m:published:{page - 1}"))
-    if (page + 1) * 10 < total:
-        nav.append(("Раньше →", f"m:published:{page + 1}"))
-    if nav:
-        buttons.append(nav)
-    return (f"История публикаций · страница {page + 1}" if posts else "Опубликованных постов пока нет."), buttons
+async def status_view(adapter, uid, *, workspace=False):
+    if not core.can_status(adapter, uid):
+        return "⛔ Статус показывается администратору.", None
+    text = await core.status_text(adapter, include_global=not workspace and core.is_global_admin(adapter, uid))
+    return text, [[("🧪 Проверить нейросеть (платно)", "m:check_llm")]]
 
 
 def pending_view(adapter, page=0, uid=None):
@@ -446,6 +430,16 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
     """Текст от участника или администратора: кнопки нижнего меню, текст нового правила, комментарий к посту, старые команды.
     True = сообщение обработано."""
     uid, t = str(user_id), text.strip()
+    cmd = t.split(maxsplit=1)[0].split("@")[0].lower() if t.startswith("/") else ""
+    if cmd == "/status":
+        if not core.is_member(adapter, uid):
+            return False
+        message, rows = await status_view(adapter, uid)
+        if rows:
+            await adapter.send_menu(uid, message, rows)
+        else:
+            await adapter.notify(uid, message)
+        return True
     if spaces.INSTALLED and await spaces.settings_input(adapter, uid, t):
         return True
     if spaces.INSTALLED and await spaces.create_input(adapter, uid, t):
@@ -460,7 +454,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         await adapter.send_menu(uid, message, rows)
         return True
     key = (adapter.name, uid)
-    if core.WAITING_RULE.get(key) == "common" and t != "/status":
+    if core.WAITING_RULE.get(key) == "common":
         if not core.is_global_admin(adapter, uid):
             core.WAITING_RULE.discard(key)
             await adapter.notify(uid, "⛔ Общие правила меняет только главный администратор.")
@@ -469,7 +463,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
             await adapter.notify(uid, "Пришлите текст общего правила или нажмите «Отмена».")
             return True
         return await save_rule_input(adapter, uid, t, common=True)
-    if spaces.in_management_only() and t != "/status":
+    if spaces.in_management_only():
         await adapter.send_menu(uid, "Управление ботом", core.menu_for(adapter, uid))
         return True
     if t == "/cancel":
@@ -499,8 +493,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         msg, rows = await core.on_menu(adapter, uid, core.LABELS[t])
         await adapter.send_menu(uid, msg, rows)
         return True
-    cmd = t.split(maxsplit=1)[0].split("@")[0].lower() if t.startswith("/") else ""
-    if key in core.WAITING_REJECT and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
+    if key in core.WAITING_REJECT and cmd not in ("/rules", "/rule_add", "/rule_del"):
         if cmd == "/cancel":
             core.WAITING_REJECT.pop(key, None)
             await adapter.notify(uid, "Отклонение отменено. Пост остался на проверке.")
@@ -512,15 +505,11 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         _, message = await core.reject_post(adapter, uid, did, attempt, t)
         await adapter.notify(uid, message)
         return True
-    if cmd == "/status":  # ни при каких условиях не должна уходить дальше как комментарий к посту
-        await adapter.notify(uid, await core.status_text(adapter, include_global=core.is_global_admin(adapter, uid)) if core.can_status(adapter, uid)
-                             else "⛔ Статус показывается администратору.")
-        return True
     if cmd and cmd not in core.SAFE_CMDS and (key in core.WAITING_EDIT or key in core.WAITING_RULE or key in core.WAITING):
         # неизвестная команда не должна стать ни текстом поста, ни правилом, ни комментарием для нейросети
         await adapter.notify(uid, "Неизвестная команда. Пришлите текст или нажмите «Отмена».")
         return True
-    if key in core.WAITING_EDIT and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
+    if key in core.WAITING_EDIT and cmd not in ("/rules", "/rule_add", "/rule_del"):
         did, attempt = core.WAITING_EDIT[key]
         if cmd == "/cancel":
             core.WAITING_EDIT.pop(key, None)
@@ -535,7 +524,7 @@ async def on_text(adapter: core.Adapter, user_id, text: str) -> bool:
         core.WAITING_RULE.discard(key)
         await adapter.notify(uid, "⛔ Настройки меняет только администратор.")
         return True
-    if key in core.WAITING_RULE and cmd not in ("/rules", "/rule_add", "/rule_del", "/status"):
+    if key in core.WAITING_RULE and cmd not in ("/rules", "/rule_add", "/rule_del"):
         return await save_rule_input(adapter, uid, t)
     if t.lower().startswith("/cancel") and await core.on_comment(adapter, uid, t):
         return True

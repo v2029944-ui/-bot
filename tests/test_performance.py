@@ -7,24 +7,18 @@ import core
 import max_
 
 
-def test_status_runs_balance_and_model_check_concurrently(monkeypatch):
+def test_status_fetches_balance_without_model_check(monkeypatch):
     async def scenario():
-        model_started, balance_started = asyncio.Event(), asyncio.Event()
-
         async def complete(*args):
-            model_started.set()
-            await balance_started.wait()
-            return "OK"
+            raise AssertionError("opening status must not call the model")
 
         async def balance():
-            balance_started.set()
-            await model_started.wait()
             return "Баланс: 100 ₽"
 
         monkeypatch.setattr(core, "_complete", complete)
         monkeypatch.setattr(core, "aitunnel_balance", balance)
         text = await asyncio.wait_for(core.status_text(FakeAdapter(admins=["1"])), 2)
-        assert "Баланс: 100 ₽" in text and "✅ отвечает" in text
+        assert "Баланс: 100 ₽" in text and "opening status must not call the model" not in text
     run(scenario())
 
 

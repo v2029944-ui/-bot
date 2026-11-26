@@ -71,9 +71,6 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         return True, "Черновик не найден."
     if d["status"] in ("publishing", "regenerating"):
         return False, core.BUSY
-    if d["status"] == "published" and action == "pubstatus":
-        await adapter.send_menu(str(user_id), *core.publication_view(d, adapter))
-        return False, ""
     if d["status"] != "pending":
         return True, "Этот пост уже обработан."
     if action == "show":  # из напоминания: показываем актуальный вариант, даже если пост уже пересоздали
@@ -110,17 +107,26 @@ async def on_action(adapter: core.Adapter, user_id, action: str, did: int, attem
         await adapter.send_menu(str(user_id), text, rows)
         return False, ""
 
+    if action in ("pubclose", "pubcloseyes"):
+        return await publication.close_publication(d, adapter, user_id, confirm=action == "pubcloseyes")
+
+    if action == "sendtext":
+        return await core._publish(adapter, user_id, did, attempt, text_only=True)
+
     if action.startswith("seen_"):
-        target = action.removeprefix("seen_")
+        confirm_text = action == "seen_tg_text"
+        target = "tg" if confirm_text else action.removeprefix("seen_")
         marks = core._parse_marks(d.get("published_to"))
         if marks.get(target) != "unknown":
             return False, "Для этого канала подтверждение не требуется."
         progress = json.loads(d.get("publish_progress") or "{}").get(target) or {}
-        if progress.get("media") and not progress.get("text") and not progress.get("text_started"):
+        if publication.text_pending(marks.get(target), progress):
             return False, "В этом канале опубликовано только медиа, а текст точно не отправлен. Завершите отправку текста."
+        if target == "tg" and confirm_text != bool(publication.text_unknown(marks.get(target), progress)):
+            return False, "Откройте свежий статус публикации и подтвердите именно текст, если он появился в Telegram."
         marks[target] = "done"
         core._set(did, published_to=core._dump_marks(marks))
-        if all(marks.get(t.name) == "done" for t in core.publication_targets(d, adapter)):
+        if publication.publication_complete(d, adapter, marks):
             await core.finish_publication(d, adapter, user_id)
             return False, ""
         text, rows = core.publication_view(core.get(did), adapter)

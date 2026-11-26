@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 REAL_SLEEP = asyncio.sleep
+LEGACY_ENV_SETTINGS = ("MAX_APPROVERS", "APPROVAL_PLATFORM", "PUBLISH_TO_ALL")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -16,7 +17,7 @@ def _settings_names() -> list[str]:
     """Все настройки бота из образца env.example: тесты не должны зависеть от настоящего .env сервера
     (при обновлении кнопкой тесты идут на сервере, где в окружении лежат ваши значения)."""
     text = (Path(__file__).resolve().parent.parent / "env.example").read_text(encoding="utf-8")
-    return re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", text, flags=re.M)
+    return [*re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", text, flags=re.M), *LEGACY_ENV_SETTINGS]
 
 
 for _k in _settings_names():

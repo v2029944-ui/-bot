@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 
 import pytest
-from conftest import run
+from conftest import LEGACY_ENV_SETTINGS, run
 
 import core
 import main
@@ -24,11 +24,12 @@ def _vars_read_by_code() -> set[str]:
     return found - INTERNAL  # внутренние переменные для тестов в образец не нужны
 
 
-def test_every_setting_the_code_reads_is_listed_in_env_example():
+def test_every_current_setting_the_code_reads_is_listed_in_env_example():
     example = (ROOT / "env.example").read_text(encoding="utf-8")
     listed = set(re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", example, flags=re.M))
-    missing = _vars_read_by_code() - listed
+    missing = _vars_read_by_code() - listed - set(LEGACY_ENV_SETTINGS)
     assert not missing, f"В env.example нет настроек, которые читает код: {sorted(missing)}"
+    assert not listed.intersection(LEGACY_ENV_SETTINGS)
 
 
 def test_example_does_not_advertise_settings_the_code_ignores():
