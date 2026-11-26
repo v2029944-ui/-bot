@@ -187,7 +187,7 @@ async def on_menu(adapter: core.Adapter, user_id, payload: str) -> tuple[str, li
             return "⛔ Людей добавляет только администратор пространства.", None
         spaces.WAITING_MEMBER.add((spaces.active_id(), uid))
         return "Отправьте ID человека в MAX. Он будет добавлен как участник.", input_rows(adapter, uid)
-    if act in ("space", "space_edit"):
+    if act in ("space", "space_fields", "space_edit"):
         return await spaces.settings_menu(adapter, uid, payload, parts)
     if act in ("spaces_archive", "space_archive", "space_restore"):
         return await spaces.lifecycle_menu(adapter, uid, payload, parts)

@@ -447,6 +447,14 @@ def payload(button):
 
 
 FIELDS = ("name", "owner", "max_channel", "tg_channel")
+FIELD_LABELS = {"name": "Название", "owner": "Владелец MAX",
+                "max_channel": "Группа MAX", "tg_channel": "Группа Telegram"}
+FIELD_PROMPTS = {
+    "name": "Пришлите новое название одной строкой (до 80 знаков).",
+    "owner": "Пришлите ID нового владельца в MAX.",
+    "max_channel": "Пришлите ID новой группы MAX.",
+    "tg_channel": "Пришлите ID или @username группы Telegram. Для отключения пришлите «-».",
+}
 INPUT_HELP = ("Отправьте строки:\nНазвание пространства\nID владельца в MAX\nID группы MAX\n"
               "ID или @username группы Telegram (или «-», если Telegram не нужен).\n"
               "Четвёртую строку можно пропустить.")
@@ -504,36 +512,64 @@ def settings_state():
     return dialog_state.PendingMap(root().db, "space_settings")
 
 
-def parse_settings(text, sid=None):
+def normalize_field(field, value):
+    value = value.strip()
+    if field == "name" and 1 <= len(value) <= 80 and len(value.splitlines()) == 1:
+        return value
+    if field == "owner" and configuration.user_id(value):
+        return str(int(value))
+    if field == "max_channel" and configuration.chat_id(value):
+        return str(int(value))
+    if field == "tg_channel":
+        if value in ("", "-"):
+            return None
+        if configuration.telegram_channel(value):
+            return value.lower() if value.startswith("@") else str(int(value))
+    raise ValueError(FIELD_PROMPTS[field])
+
+
+def parse_settings(text, sid=None, before=None):
     parts = [line.strip() for line in text.strip().splitlines()]
     if len(parts) == 3:
         parts.append("")
     if len(parts) != 4:
         raise ValueError(INPUT_HELP)
-    if parts[3] == "-":
-        parts[3] = ""
-    if (not 1 <= len(parts[0]) <= 80 or not configuration.user_id(parts[1])
-            or not configuration.chat_id(parts[2])
-            or parts[3] and not configuration.telegram_channel(parts[3])):
-        raise ValueError(INPUT_HELP)
-    # Canonical IDs prevent alternate spellings from bypassing uniqueness checks.
-    parts[1:3] = [str(int(value)) for value in parts[1:3]]
-    parts[3] = parts[3].lower() if parts[3].startswith("@") else str(int(parts[3])) if parts[3] else ""
+    try:
+        values = [normalize_field(field, value) for field, value in zip(FIELDS, parts)]
+    except ValueError:
+        raise ValueError(INPUT_HELP) from None
+    validate_settings(values, sid, before)
+    return values
+
+
+def validate_settings(values, sid, before):
     import os
-    if parts[3] and not os.getenv("TG_TOKEN", "").strip():
+
+    changed = {field for index, field in enumerate(FIELDS) if before is None or values[index] != before[index]}
+    _, owner, maximum, telegram = values
+    if "tg_channel" in changed and telegram and not os.getenv("TG_TOKEN", "").strip():
         raise ValueError("Для группы Telegram сначала подключите TG_TOKEN в .env. Без Telegram укажите «-».")
-    primary = configured_root(root().db)
-    if sid != 0 and primary and parts[1] == primary["owner"]:
-        raise ValueError("Этот владелец уже привязан к основному пространству. Укажите другого владельца.")
-    if sid == 0 and root().db.execute("SELECT 1 FROM workspaces WHERE owner=? LIMIT 1", (parts[1],)).fetchone():
-        raise ValueError("Этот владелец уже привязан к другому пространству.")
-    if sid != 0 and (parts[2] == str(root().adapters["max"].channel)
-                     or parts[3] and "tg" in root().adapters and parts[3] == str(root().adapters["tg"].channel).lower()):
-        raise ValueError("Эта группа уже используется основным пространством. Укажите отдельные группы.")
-    if sid == 0 and root().db.execute("SELECT 1 FROM workspaces WHERE max_channel=? OR (? IS NOT NULL AND LOWER(tg_channel)=?) LIMIT 1",
-                                     (parts[2], parts[3], parts[3])).fetchone():
-        raise ValueError("Эта группа уже привязана к другому пространству.")
-    return [*parts[:3], parts[3] or None]
+    db = root().db
+    primary = configured_root(db)
+    if "owner" in changed or sid == 0 and primary is None:
+        if sid != 0 and primary and owner == primary["owner"]:
+            raise ValueError("Этот владелец уже привязан к основному пространству. Укажите другого владельца.")
+        if sid == 0 and db.execute("SELECT 1 FROM workspaces WHERE owner=? LIMIT 1", (owner,)).fetchone():
+            raise ValueError("Этот владелец уже привязан к другому пространству.")
+    for field, value in (("max_channel", maximum), ("tg_channel", telegram)):
+        if field not in changed or value is None:
+            continue
+        if sid != 0:
+            primary_adapter = root().adapters.get("max" if field == "max_channel" else "tg")
+            if primary_adapter and value == str(primary_adapter.channel).strip().lower():
+                raise ValueError(f"{FIELD_LABELS[field]} уже используется в основном пространстве №0. "
+                                 "Выберите другую группу. Для переноса сначала измените группу в карточке №0.")
+        if sid is not None:
+            conflict = db.execute(f"SELECT id FROM workspaces WHERE LOWER({field})=? AND id!=? LIMIT 1",
+                                  (value, sid)).fetchone()
+            if conflict:
+                raise ValueError(f"{FIELD_LABELS[field]} уже используется в пространстве №{conflict['id']}. "
+                                 "Выберите другую группу или сначала измените группу в этом пространстве.")
 
 
 def settings_values(row):
@@ -544,7 +580,7 @@ def settings_card(sid):
     row = settings_record(sid)
     if not row:
         return "Пространство не найдено.", None
-    buttons = [[("✏️ Изменить настройки", f"m:space_edit:{sid}")]]
+    buttons = [[("✏️ Изменить настройки", f"m:space_fields:{sid}")]]
     if sid and row["state"] == "ready":
         buttons.append([("📂 Открыть меню пространства", f"w:{sid}:m:admin")])
         buttons.append([("🗃 Архивировать пространство", f"m:space_archive:{sid}")])
@@ -577,19 +613,31 @@ async def settings_input(adapter, uid, text):
         settings_state().pop(key, None)
         await adapter.send_menu(uid, *settings_card(saved["sid"]))
         return True
+    field = saved.get("field")
     try:
-        values = parse_settings(text, saved["sid"])
+        if field:
+            values = saved["before"][:]
+            values[FIELDS.index(field)] = normalize_field(field, text)
+            validate_settings(values, saved["sid"], saved["before"])
+        else:
+            values = parse_settings(text, saved["sid"], saved["before"])
     except ValueError as exc:
         await adapter.notify(uid, core.err(exc))
         return True
     payload = f"m:space_save:{saved['sid']}:{secrets.token_urlsafe(12)}"
     settings_state()[key] = {**saved, "waiting": False, "values": values, "payload": payload}
     name, owner, maximum, telegram = values
-    await adapter.send_menu(uid, f"Сохранить настройки?\nНазвание: {name}\nВладелец MAX: {owner}\n"
-                            f"Группа MAX: {maximum}\nГруппа Telegram: {telegram or 'не подключена'}\n\n"
-                            "При смене владельца прежний владелец потеряет доступ к пространству. Остальные участники сохранят права. "
-                            "Главные администраторы из MAX_ADMINS сохраняют полномочия.",
-                            [[("✅ Сохранить", payload)], [("Отмена", f"m:space:{saved['sid']}")]])
+    if field:
+        index = FIELDS.index(field)
+        old, new = saved["before"][index], values[index]
+        text = f"{FIELD_LABELS[field]} в пространстве №{saved['sid']}\nБыло: {old or '—'}\nСтанет: {new or '—'}"
+    else:
+        text = (f"Сохранить настройки?\nНазвание: {name}\nВладелец MAX: {owner}\n"
+                f"Группа MAX: {maximum}\nГруппа Telegram: {telegram or 'не подключена'}")
+    if owner != saved["before"][1]:
+        text += ("\n\nПри смене владельца прежний владелец потеряет доступ к пространству. "
+                 "Остальные участники и главные администраторы сохранят свои права.")
+    await adapter.send_menu(uid, text, [[("✅ Сохранить", payload)], [("Отмена", f"m:space:{saved['sid']}")]])
     return True
 
 
@@ -628,18 +676,36 @@ async def settings_save(adapter, uid, payload):
     state.pop(key)  # consume before any network operation
     sid, values = saved["sid"], saved["values"]
     row = settings_record(sid)
-    if not row or settings_values(row) != saved["before"]:
+    before = saved["before"]
+    if not row or settings_values(row) != before:
         return "Настройки уже изменились. Откройте пространство заново.", None
     if update_in_progress():
         return "Обновление ещё проверяется. Повторите изменение через пару минут.", None
     space = get(sid) if sid else root_context()
-    if (not sid or values != settings_values(row)) and settings_busy(space):
-        return "Есть обработка или незавершённая публикация. Дождитесь обработки, проверьте частичные и неизвестные результаты в каналах и повторите изменение.", None
     # Validate again: another workspace or the root settings may have changed since the prompt.
     try:
-        values = parse_settings("\n".join(value or "-" for value in values), sid)
+        validate_settings(values, sid, before)
     except ValueError as exc:
         return core.err(exc), None
+    name_only = values[0] != before[0] and values[1:] == before[1:]
+    if name_only and (sid or configured_root(root().db)):
+        db = root().db
+        try:
+            if sid:
+                db.execute("UPDATE workspaces SET name=? WHERE id=?", (values[0], sid))
+            else:
+                persist_root(values)
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        if not sid:
+            root().name = values[0]
+        space.name = values[0]
+        text, rows = settings_card(sid)
+        return "Настройки сохранены.\n\n" + text, rows
+    if (not sid or values != before) and settings_busy(space):
+        return "Есть обработка или незавершённая публикация. Дождитесь обработки, проверьте частичные и неизвестные результаты в каналах и повторите изменение.", None
     old_tg = space.memory["ADAPTERS"].get("tg")
     new_tg = old_tg
     if values[3] and old_tg is None:
@@ -703,7 +769,7 @@ async def settings_menu(adapter, uid, payload, parts):
         return "⛔ Настройки пространств меняет только главный администратор в основном пространстве.", None
     if parts[1] == "space_save":
         return await settings_save(adapter, uid, payload)
-    if len(parts) != 3 or not parts[2].isdigit() or len(parts[2]) > 9:
+    if len(parts) not in (3, 4) or not parts[2].isdigit() or len(parts[2]) > 9:
         return "Пространство не найдено.", None
     sid = int(parts[2])
     if parts[1] == "space":
@@ -711,10 +777,19 @@ async def settings_menu(adapter, uid, payload, parts):
     row = settings_record(sid)
     if not row:
         return "Пространство не найдено.", None
+    if parts[1] == "space_fields":
+        rows = [[(label, f"m:space_edit:{sid}:{field}")] for field, label in FIELD_LABELS.items()]
+        return f"Что изменить в «{row['name']}»?", rows + [[("← К пространству", f"m:space:{sid}")]]
+    field = parts[3] if len(parts) == 4 else None
+    if field is not None and field not in FIELDS:
+        return "Настройка не найдена.", None
     select_for_user(uid, 0)
-    settings_state()[(adapter.name, str(uid))] = {"sid": sid, "before": settings_values(row), "waiting": True}
+    settings_state()[(adapter.name, str(uid))] = {
+        "sid": sid, "before": settings_values(row), "waiting": True, "field": field,
+    }
     text, _ = settings_card(sid)
-    return text + "\n\n" + INPUT_HELP, core.input_rows(adapter, uid)
+    prompt = FIELD_PROMPTS[field] if field else INPUT_HELP
+    return text + "\n\n" + prompt, core.input_rows(adapter, uid)
 
 
 async def lifecycle_menu(adapter, uid, payload, parts):
